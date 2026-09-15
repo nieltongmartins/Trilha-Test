@@ -56,8 +56,8 @@ class AuditService:
         connection.commit()
         assert execution_id is not None
 
-        versions = list(self.source.list_versions(spreadsheet))
         try:
+            versions = list(self.source.list_versions(spreadsheet))
             pairs = self._pending_pairs(versions, checkpoint["versao_id"] if checkpoint else None)
         except Exception as error:
             return self._record_failure(
