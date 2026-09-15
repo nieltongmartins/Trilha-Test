@@ -160,7 +160,7 @@ auditoria_excel/
 │       └── sharepoint.py
 │
 ├── tests/
-│   ├── fixtures/
+│   ├── conftest.py
 │   ├── test_reader.py
 │   ├── test_comparator.py
 │   ├── test_database.py
@@ -255,14 +255,10 @@ Objetivo:
 
 simular o comportamento necessário para desenvolvimento e testes.
 
-Exemplo:
-
-tests/fixtures/
-└── CQL028/
-    ├── 0.84.xlsx
-    ├── 0.85.xlsx
-    ├── 0.86.xlsx
-    └── 0.87.xlsx
+Nos testes, as versões locais `.xlsx` deverão ser geradas programaticamente
+com `openpyxl` em diretório fornecido por `pytest/tmp_path` (ou mecanismo
+temporário equivalente), e descartadas ao final. Fixtures binárias não deverão
+ser versionadas.
 
 A fonte local deverá fornecer ao serviço de auditoria informações
 equivalentes às necessárias na fonte SharePoint.

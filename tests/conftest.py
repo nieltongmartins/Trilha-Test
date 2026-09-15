@@ -1,4 +1,5 @@
-from collections.abc import Mapping
+import shutil
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -26,8 +27,11 @@ def _write_workbook(path: Path, sheets: WorkbookState) -> None:
 
 
 @pytest.fixture
-def cql028_versions(tmp_path: Path) -> Path:
-    """Gera as quatro versões da CQL028 sem versionar binários no Git."""
+def cql028_versions(tmp_path: Path) -> Iterator[Path]:
+    """Gera e descarta quatro versões da CQL028 no diretório temporário."""
+
+    versions_path = tmp_path / "CQL028"
+    versions_path.mkdir()
 
     versions: dict[str, WorkbookState] = {
         "0.84.xlsx": {
@@ -73,6 +77,10 @@ def cql028_versions(tmp_path: Path) -> Path:
         },
     }
 
-    for filename, state in versions.items():
-        _write_workbook(tmp_path / filename, state)
-    return tmp_path
+    try:
+        for filename, state in versions.items():
+            _write_workbook(versions_path / filename, state)
+
+        yield versions_path
+    finally:
+        shutil.rmtree(versions_path, ignore_errors=True)
