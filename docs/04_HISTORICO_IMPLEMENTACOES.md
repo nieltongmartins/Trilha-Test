@@ -117,7 +117,7 @@ Utilizar:
 |---|---|---|---:|
 | F1 | Fundação e Banco de Auditoria | 🟢 CONCLUÍDA | 2 |
 | F2 | Motor Excel e Comparação | 🟢 CONCLUÍDA | 4 |
-| F3 | Auditor Local Incremental | ⬜ NÃO INICIADA | 0 |
+| F3 | Auditor Local Incremental | 🟢 CONCLUÍDA | 2 |
 | F4 | Microsoft Graph / SharePoint | ⬜ NÃO INICIADA | 0 |
 | F5 | Interface e Relatório | ⬜ NÃO INICIADA | 0 |
 | F6 | Robustez e Preparação para Produção | ⬜ NÃO INICIADA | 0 |
@@ -128,19 +128,19 @@ Utilizar:
 
 Fases concluídas:
 
-2 de 6
+3 de 6
 
 Progresso funcional inicial:
 
-Fases 1 e 2 concluídas.
+Fases 1, 2 e 3 concluídas.
 
 Fase atual:
 
-F2 — Motor Excel e Comparação concluída; nenhuma fase nova autorizada.
+F3 — Auditor Local Incremental concluída; nenhuma fase nova autorizada.
 
 Próxima fase prevista:
 
-F3 — Auditor Local Incremental, aguardando autorização expressa.
+F4 — Microsoft Graph / SharePoint, aguardando autorização expressa.
 
 ---
 
@@ -381,13 +381,13 @@ Aguardar autorização expressa para a F3. Não iniciar a fase seguinte.
 
 ## F3 — Auditor Local Incremental
 
-**Status:** ⬜ NÃO INICIADA
+**Status:** 🟢 CONCLUÍDA
 
-**Data de início:** —
+**Data de início:** 15/09/2026
 
-**Data de conclusão:** —
+**Data de conclusão:** 15/09/2026
 
-**Quantidade de commits:** 0
+**Quantidade de commits:** 2 (implementação e encerramento documental)
 
 ### Objetivo
 
@@ -396,27 +396,77 @@ locais simuladas.
 
 ### Implementado
 
-Ainda não iniciado.
+- contrato de fonte independente de tecnologia, com identidades compostas de
+  site, drive e DriveItem e modelo normalizado de versão;
+- fonte local somente leitura, baseada em ordem explícita e arquivos históricos
+  gerados temporariamente nos testes;
+- serviço de auditoria com cadastro/atualização da planilha, seleção a partir do
+  checkpoint e preservação da versão-base;
+- comparações consecutivas mantendo somente os snapshots necessários em memória;
+- persistência atômica, por comparação, da versão processada, alterações e
+  checkpoint;
+- registro de versões sem diferenças, execuções sem novidades e falhas;
+- rollback da comparação com falha, preservação das comparações confirmadas e
+  retomada posterior exata do checkpoint;
+- testes de primeira auditoria, idempotência, incremento, falha e retomada.
 
 ### Testes executados
 
-Nenhum.
+Comando:
+
+`pytest -q`
+
+Resultado:
+
+`22 passed in 1.00s`
+
+Comandos adicionais:
+
+- `python -m compileall -q app main.py tests` — concluído com código 0;
+- `git diff --check` — concluído sem erros.
+
+### Critérios de aceite
+
+[x] fonte local funciona;
+
+[x] primeira auditoria e consolidação do histórico funcionam;
+
+[x] checkpoint e preservação da versão-base funcionam;
+
+[x] reexecução não duplica registros;
+
+[x] auditoria incremental processa somente novas comparações;
+
+[x] falha não avança o checkpoint incorretamente e permite retomada;
+
+[x] versão sem alterações é registrada;
+
+[x] histórico de execução e erro é criado;
+
+[x] testes passam.
 
 ### Commits
 
-Nenhum.
+`53b29ec` — Implementa auditoria local incremental.
+
+O segundo commit encerra a fase com esta atualização factual do histórico; seu
+identificador é informado no relatório da execução, pois um commit não pode
+registrar o próprio hash em seu conteúdo.
 
 ### Problemas encontrados
 
-Nenhum.
+Na primeira execução da suíte ampliada, uma asserção comparou diretamente uma
+`sqlite3.Row` com uma tupla. A asserção foi ajustada para comparar a conversão
+explícita, e a suíte integral passou. Nenhum bloqueio permanece.
 
 ### Pendências
 
-Aguardar conclusão e aprovação da Fase 2.
+Nenhuma pendência da Fase 3.
 
 ### Próximo passo
 
-Não autorizado.
+F4 — Microsoft Graph / SharePoint, somente após autorização expressa do
+responsável pelo projeto.
 
 ---
 
@@ -992,21 +1042,21 @@ A presença nesta seção não significa autorização para implementação.
 
 **Versão planejada:** V1
 
-**Fase atual:** F2 — Motor Excel e Comparação concluída
+**Fase atual:** F3 — Auditor Local Incremental concluída
 
-**Implementação:** reader e comparator implementados e validados pela suíte
-integral; fixtures Excel geradas e descartadas durante os testes
+**Implementação:** núcleo local incremental implementado sobre fonte abstrata,
+com checkpoint, transações por comparação, idempotência, falha e retomada
+validados pela suíte integral
 
-**Fases concluídas:** 2/6
+**Fases concluídas:** 3/6
 
-**Commits da Fase 2:** 4 (o quarto é o ajuste corretivo solicitado após a
-integração)
+**Commits da Fase 3:** 2 (implementação e encerramento documental)
 
 **Bloqueios:** 0
 
 **Próxima ação:**
 
-Aguardar autorização expressa para iniciar a F3.
+Aguardar autorização expressa para iniciar a F4.
 
 ---
 
