@@ -118,7 +118,7 @@ Utilizar:
 | F1 | Fundação e Banco de Auditoria | 🟢 CONCLUÍDA | 2 |
 | F2 | Motor Excel e Comparação | 🟢 CONCLUÍDA | 4 |
 | F3 | Auditor Local Incremental | 🟢 CONCLUÍDA | 2 |
-| F4 | Microsoft Graph / SharePoint | ⬜ NÃO INICIADA | 0 |
+| F4 | Microsoft Graph / SharePoint | 🔴 BLOQUEADA | 2 |
 | F5 | Interface e Relatório | ⬜ NÃO INICIADA | 0 |
 | F6 | Robustez e Preparação para Produção | ⬜ NÃO INICIADA | 0 |
 
@@ -136,11 +136,11 @@ Fases 1, 2 e 3 concluídas.
 
 Fase atual:
 
-F3 — Auditor Local Incremental concluída; nenhuma fase nova autorizada.
+F4 — Microsoft Graph / SharePoint bloqueada na validação controlada real.
 
-Próxima fase prevista:
+Próxima ação prevista:
 
-F4 — Microsoft Graph / SharePoint, aguardando autorização expressa.
+Disponibilizar ambiente e credenciais de leitura para concluir a F4.
 
 ---
 
@@ -474,13 +474,13 @@ responsável pelo projeto.
 
 ## F4 — Microsoft Graph / SharePoint
 
-**Status:** ⬜ NÃO INICIADA
+**Status:** 🔴 BLOQUEADA
 
-**Data de início:** —
+**Data de início:** 15/09/2026
 
 **Data de conclusão:** —
 
-**Quantidade de commits:** 0
+**Quantidade de commits:** 2 (implementação testável e registro do bloqueio)
 
 ### Objetivo
 
@@ -489,50 +489,107 @@ de leitura suportados.
 
 ### Implementado
 
-Ainda não iniciado.
+- configuração por ambiente para tenant, aplicativo, segredo, site e drive,
+  validada sem expor o valor do segredo;
+- autenticação OAuth 2.0 `client_credentials` contra a plataforma de identidade
+  Microsoft, solicitando o escopo `.default` do Microsoft Graph;
+- fonte SharePoint com chamadas Graph exclusivamente `GET` para listar arquivos
+  `.xlsx`, paginar resultados, enumerar versões e baixar conteúdo histórico;
+- preservação de site, drive, DriveItem ID, nome, caminho, identificador da
+  versão, data/hora, autor e tamanho disponíveis;
+- comentário mantido nulo quando o contrato `DriveItemVersion` usado não fornece
+  esse dado, evitando atribuição indevida de metadados;
+- arquivos históricos em diretório temporário descartável;
+- integração automatizada da fonte com o `AuditService`, sem reescrever reader,
+  comparator ou persistência;
+- falhas na listagem de versões agora registradas como falhas de execução pelo
+  serviço de auditoria.
 
 ### Testes executados
 
-Nenhum.
+Comando:
+
+`pytest -q`
+
+Resultado:
+
+`28 passed in 1.04s`
+
+Comandos adicionais:
+
+- `python -m compileall -q app main.py tests` — concluído com código 0;
+- `git diff --check` — concluído sem erros.
+
+Tentativa de instalar as dependências:
+
+`python -m pip install -r requirements.txt`
+
+Resultado:
+
+falhou porque o índice configurado no ambiente retornou `403 Forbidden` ao
+consultar `msal`. A dependência foi eliminada: o fluxo OAuth suportado foi
+implementado com a biblioteca padrão e o `requirements.txt` permaneceu enxuto.
+
+### Critérios de aceite
+
+[x] configuração e autenticação seguras implementadas;
+
+[x] cliente limitado a operações de leitura no Microsoft Graph;
+
+[x] DriveItem ID, versões, metadados disponíveis e conteúdo histórico cobertos
+por testes automatizados;
+
+[x] `AuditService` funciona com `SharePointSource` em teste isolado;
+
+[x] motor Excel não foi reescrito;
+
+[ ] autenticação e leitura comprovadas em SharePoint controlado;
+
+[ ] versões reais, especialmente secundárias, enumeradas e recuperadas;
+
+[ ] teste controlado concluído e ausência de escrita comprovada no ambiente.
 
 ### Commits
 
-Nenhum.
+`df7943f` — Implementa fonte SharePoint somente leitura.
 
-### Problemas encontrados
+O segundo commit registra este bloqueio e o estado factual da fase; seu
+identificador é informado no relatório da execução.
 
-Nenhum.
+### BLOQUEIO
 
-### Validação crítica pendente
+**Problema:** os critérios obrigatórios de prova real não podem ser executados
+sem tenant, aplicativo autorizado, segredo, site, drive e uma planilha
+controlada acessível.
 
-Deverá ser comprovado no ambiente real o comportamento da recuperação
-das versões históricas necessárias, especialmente versões secundárias
-como:
+**Causa:** o ambiente da sessão não contém credenciais SharePoint nem o cenário
+corporativo controlado.
 
-0.84
-0.85
-0.86
-...
-0.98
-0.99
+**Impacto:** não é possível afirmar que o ambiente enumera ou permite baixar as
+versões secundárias necessárias, nem concluir a F4.
 
-Deverá ser verificado:
+**Alternativas:**
 
-- se são enumeradas;
-- quais identificadores são retornados;
-- quais metadados estão disponíveis;
-- se o conteúdo de cada versão pode ser recuperado;
-- quais limitações existem.
+1. fornecer ao ambiente as cinco variáveis documentadas em `.env.example`, com
+   permissões mínimas de leitura, e indicar uma planilha controlada;
+2. executar o teste controlado externamente e fornecer evidências técnicas dos
+   endpoints, metadados e versões recuperadas.
 
-Não presumir resultado antes do teste.
+**Recomendação:** disponibilizar credenciais de aplicação com menor privilégio e
+uma planilha controlada; então validar uma única planilha antes de qualquer uso
+operacional.
 
 ### Pendências
 
-Aguardar conclusão e aprovação da Fase 3.
+- comprovar acesso ao site e à biblioteca no ambiente real;
+- confirmar a ordem efetiva retornada pela coleção de versões;
+- confirmar enumeração e download das versões secundárias;
+- registrar metadados reais e executar a auditoria controlada.
 
 ### Próximo passo
 
-Não autorizado.
+Retomar somente a validação controlada da F4 após remoção do bloqueio. Não
+iniciar a F5.
 
 ---
 
@@ -1042,21 +1099,21 @@ A presença nesta seção não significa autorização para implementação.
 
 **Versão planejada:** V1
 
-**Fase atual:** F3 — Auditor Local Incremental concluída
+**Fase atual:** F4 — Microsoft Graph / SharePoint bloqueada
 
-**Implementação:** núcleo local incremental implementado sobre fonte abstrata,
-com checkpoint, transações por comparação, idempotência, falha e retomada
-validados pela suíte integral
+**Implementação:** fonte Graph somente leitura e integração automatizada com o
+núcleo concluídas; validação real ainda não executada
 
 **Fases concluídas:** 3/6
 
-**Commits da Fase 3:** 2 (implementação e encerramento documental)
+**Commits da Fase 4:** 2 (implementação e registro do bloqueio)
 
-**Bloqueios:** 0
+**Bloqueios:** 1
 
 **Próxima ação:**
 
-Aguardar autorização expressa para iniciar a F4.
+Disponibilizar ambiente SharePoint controlado e credenciais mínimas de leitura
+para retomar e concluir a F4. Não iniciar a F5.
 
 ---
 
