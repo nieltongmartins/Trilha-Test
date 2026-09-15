@@ -2,9 +2,10 @@
 ## Auditor de Planilhas Excel — SharePoint Online
 
 **Documento:** 03_PLANO_DE_DESENVOLVIMENTO.md  
-**Versão:** 1.0  
-**Status:** Oficial  
-**Data:** 15/09/2026  
+**Versão:** 1.1
+**Status:** Oficial
+**Data:** 15/09/2026
+**Última revisão:** 15/09/2026
 
 ---
 
@@ -39,12 +40,19 @@ O objetivo é entregar uma ferramenta simples e confiável que:
 
 # 2. DOCUMENTOS OFICIAIS
 
-Antes de implementar uma fase, consultar:
+Antes de implementar uma fase, consultar na ordem definida pela governança:
 
-1. `docs/01_ESPECIFICACAO_FUNCIONAL.md`
-2. `docs/02_ARQUITETURA.md`
-3. `docs/03_PLANO_DE_DESENVOLVIMENTO.md`
-4. `docs/04_HISTORICO_IMPLEMENTACOES.md`
+1. `docs/06_GOVERNANCA.md`
+2. `docs/01_ESPECIFICACAO_FUNCIONAL.md`
+3. `docs/02_ARQUITETURA.md`
+4. `docs/03_PLANO_DE_DESENVOLVIMENTO.md`
+5. `docs/04_HISTORICO_IMPLEMENTACOES.md`
+
+O arquivo:
+
+`docs/05_PROMPT_OFICIAL.md`
+
+define as instruções operacionais utilizadas nas sessões com o Codex.
 
 Responsabilidades:
 
@@ -127,7 +135,7 @@ FASE 2 — Motor Excel e Comparação
 
 FASE 3 — Auditor Local Incremental
 
-FASE 4 — Microsoft Graph / SharePoint
+FASE 4 — Aquisição de Versões SharePoint
 
 FASE 5 — Interface e Relatório
 
@@ -161,6 +169,26 @@ F3: 1–2 commits
 F4: 1–3 commits
 F5: 1–3 commits
 F6: 1–3 commits
+
+EXCEÇÃO CONTROLADA DA FASE 4
+
+A Fase 4 atingiu originalmente o limite de 3 commits durante a tentativa
+de integração com Microsoft Graph e foi corretamente interrompida após
+a identificação de bloqueio corporativo.
+
+A revisão arquitetural decorrente desse bloqueio constitui alteração
+formal de requisito autorizada pelo responsável pelo projeto.
+
+Excepcionalmente, poderão ser autorizados até 2 commits adicionais
+exclusivamente para:
+
+1. adequação da Fase 4 ao mecanismo de aquisição aprovado;
+2. implementação e validação da solução de aquisição escolhida.
+
+Essa exceção não autoriza avanço para a Fase 5.
+
+Qualquer necessidade além desses commits deverá provocar nova
+interrupção e avaliação.
 
 Estimativa total:
 
@@ -778,76 +806,177 @@ Máximo:
 
 ---
 
-# 17. FASE 4 — MICROSOFT GRAPH / SHAREPOINT
+# 17. FASE 4 — AQUISIÇÃO DE VERSÕES SHAREPOINT
 
 ## 17.1 Objetivo
 
-Substituir a fonte local pela fonte SharePoint real sem modificar o
-motor de auditoria.
+Integrar o núcleo de auditoria já validado a uma fonte SharePoint real
+sem modificar as regras do motor de auditoria.
 
-Esta é a principal prova da arquitetura.
+A Fase 4 deverá identificar, validar e implementar um mecanismo de
+aquisição de versões históricas que seja:
 
----
+- suportado tecnicamente;
+- autorizado no ambiente corporativo;
+- exclusivamente de leitura;
+- compatível com versões principais e secundárias necessárias;
+- capaz de fornecer conteúdo suficiente para a trilha de auditoria;
+- compatível com processamento incremental;
+- adequado ao uso futuro em escala.
 
-## 17.2 Implementar
-
-`app/sources/sharepoint.py`
-
-e componentes auxiliares estritamente necessários.
-
----
-
-# 18. AUTENTICAÇÃO
-
-Utilizar mecanismo suportado pela Microsoft.
-
-Requisitos:
-
-- nenhuma senha em código;
-- nenhum token no Git;
-- nenhum segredo em logs;
-- menor privilégio;
-- operações somente leitura.
-
-A estratégia definitiva dependerá do ambiente corporativo disponível.
+Microsoft Graph permanece como mecanismo possível quando disponível e
+autorizado, mas não constitui dependência obrigatória da V1.
 
 ---
 
-# 19. PROVA DE LEITURA
+## 17.2 Situação identificada
 
-Antes de processar auditoria real, comprovar:
+Durante a execução original da Fase 4, a integração Microsoft Graph
+não pôde ser concluída porque o ambiente corporativo não disponibiliza
+ao projeto os dados e autorizações necessários para a autenticação
+originalmente planejada.
 
-[ ] acesso ao site;
+A organização não disponibilizou ao projeto os identificadores,
+credenciais e registro de aplicação necessários para esse modelo de
+integração.
 
-[ ] acesso à biblioteca;
+Essa restrição deverá ser tratada como limitação real do ambiente e não
+deverá ser contornada.
 
-[ ] listagem de arquivos;
+---
 
-[ ] DriveItem ID;
+## 17.3 Evidência técnica já obtida
 
-[ ] nome;
+Foi validado com a planilha real CQL028.xlsx que uma versão histórica
+pode ser acessada pelo usuário autenticado através de endereço
+SharePoint contendo `_vti_history`.
 
-[ ] caminho;
+No teste realizado, o recurso correspondente à versão 0.97 abriu
+corretamente a versão histórica esperada através da sessão autenticada
+do usuário.
 
-[ ] listagem de versões;
+Foi realizado também teste HTTP controlado através de Python sem
+credenciais, cookies ou tokens.
 
-[ ] identificadores de versões;
+Resultado:
+
+HTTP 403
+
+Portanto, o acesso pelo navegador/Excel autenticado não comprova
+capacidade de acesso programático através do mesmo endereço.
+
+---
+
+# 18. INVESTIGAÇÃO DO MECANISMO DE AQUISIÇÃO
+
+Antes de implementar uma nova integração, deverão ser avaliados
+mecanismos suportados e autorizados que possam fornecer acesso
+programático às versões históricas utilizando as capacidades
+disponíveis no ambiente corporativo.
+
+Cada alternativa deverá ser avaliada quanto a:
+
+- autenticação;
+- autorização;
+- operação somente leitura;
+- listagem/descoberta das planilhas;
+- identidade técnica;
+- descoberta das versões;
+- recuperação do conteúdo histórico;
+- versões principais;
+- versões secundárias;
+- metadados;
+- ordenação;
+- escalabilidade;
+- segurança;
+- compatibilidade com o ambiente Windows corporativo.
+
+A investigação deverá ser objetiva e limitada ao necessário para
+selecionar uma solução viável.
+
+---
+
+# 19. REGRAS DE SEGURANÇA DA INVESTIGAÇÃO
+
+É proibido:
+
+- extrair cookies do navegador;
+- capturar tokens de sessões existentes;
+- copiar credenciais internas do Microsoft Office;
+- armazenar senha corporativa;
+- utilizar autenticação obsoleta ou insegura;
+- contornar políticas do Microsoft Entra;
+- elevar permissões;
+- modificar o SharePoint;
+- restaurar versões;
+- excluir versões;
+- criar versões para facilitar a aquisição.
+
+A existência de acesso através do navegador ou Microsoft Excel não
+autoriza automaticamente sua reutilização programática.
+
+---
+
+# 20. CONTRATO DA FONTE
+
+O mecanismo escolhido deverá permanecer atrás da abstração de fonte
+definida na arquitetura.
+
+O AuditService não deverá conhecer detalhes específicos de:
+
+- Microsoft Graph;
+- autenticação;
+- `_vti_history`;
+- URLs SharePoint;
+- mecanismo alternativo de aquisição.
+
+A fonte deverá entregar ao núcleo informações normalizadas equivalentes
+às utilizadas pela LocalSource.
+
+A substituição da fonte não deverá exigir reescrita do ExcelReader,
+Comparator, regras de checkpoint ou persistência.
+
+---
+
+# 21. PROVA DE LEITURA
+
+Para o mecanismo candidato deverão ser comprovados, quando tecnicamente
+disponíveis:
+
+[ ] acesso autorizado ao SharePoint;
+
+[ ] identificação da planilha;
+
+[ ] identidade técnica estável;
+
+[ ] nome e caminho;
+
+[ ] descoberta/listagem das versões;
+
+[ ] identificadores das versões;
+
+[ ] ordenação confiável;
 
 [ ] data/hora;
 
-[ ] autor;
+[ ] autor da versão;
 
 [ ] comentário, quando disponível;
 
-[ ] conteúdo histórico recuperável.
+[ ] conteúdo histórico recuperável;
+
+[ ] operação exclusivamente em leitura.
+
+A indisponibilidade de determinado metadado deverá ser registrada
+explicitamente e não preenchida através de inferência.
 
 ---
 
-# 20. VERSÕES SECUNDÁRIAS
+# 22. VERSÕES SECUNDÁRIAS
 
-Este é um CRITÉRIO CRÍTICO.
+Este permanece como CRITÉRIO CRÍTICO.
 
-No ambiente real existem versões semelhantes a:
+No ambiente real existem versões como:
 
 0.84
 0.85
@@ -855,97 +984,108 @@ No ambiente real existem versões semelhantes a:
 0.98
 0.99
 
-A integração deverá comprovar quais dessas versões podem ser:
+A solução deverá comprovar quais dessas versões podem ser:
 
-1. enumeradas;
+1. descobertas;
 2. identificadas;
-3. baixadas;
-4. comparadas.
+3. adquiridas;
+4. ordenadas;
+5. comparadas.
 
-Não presumir funcionamento.
-
----
-
-# 21. REGRA DE BLOQUEIO
-
-Se Microsoft Graph/SharePoint não permitir recuperar alguma categoria
-necessária de versão:
-
-PARAR.
-
-Registrar:
-
-- endpoint testado;
-- comportamento observado;
-- requisito afetado;
-- impacto;
-- alternativas.
-
-Não alterar SharePoint.
-
-Não utilizar workaround destrutivo.
-
-Não avançar silenciosamente.
+Não presumir funcionamento com base apenas na interface do SharePoint.
 
 ---
 
-# 22. TESTE CONTROLADO
+# 23. CONTINGÊNCIA
 
-Utilizar inicialmente UMA planilha real.
+Caso nenhuma solução automatizada suportada e autorizada seja encontrada,
+a Fase 4 deverá PARAR novamente.
 
-Preferencialmente uma planilha controlada para teste.
+Nesse caso deverão ser documentados:
 
-Somente após validação poderá ser utilizada uma planilha operacional
-para conferência.
+- mecanismos avaliados;
+- resultados;
+- limitações;
+- impacto operacional;
+- alternativas restantes.
 
----
+Somente após decisão explícita do responsável pelo projeto poderá ser
+adotado mecanismo de importação assistida ou manual.
 
-# 23. TESTE DA CQL028
-
-Quando autorizado e tecnicamente possível, utilizar CQL028 como cenário
-de validação real.
-
-Objetivo conceitual:
-
-obter versões disponíveis
-
-e produzir:
-
-0.84 → 0.85
-...
-0.98 → 0.99
-
-ou o intervalo efetivamente disponibilizado pela API.
-
-Comparar resultado com alterações conhecidas.
+A importação manual de centenas de versões NÃO constitui, neste momento,
+a solução oficial da V1.
 
 ---
 
-# 24. CRITÉRIOS DE ACEITE DA FASE 4
+# 24. TESTE CONTROLADO
 
-[ ] autenticação segura;
+A validação deverá utilizar inicialmente UMA planilha real.
 
-[ ] leitura do SharePoint;
+Quando autorizado e tecnicamente possível:
 
-[ ] nenhuma escrita;
+CQL028.xlsx
 
-[ ] DriveItem ID obtido;
+A versão 0.97, cujo acesso histórico já foi comprovado pelo usuário,
+poderá ser utilizada como uma das referências do teste.
 
-[ ] versões enumeradas;
+O objetivo final permanece obter versões consecutivas suficientes para
+comprovar:
 
-[ ] conteúdo histórico recuperado;
+N → N+1
 
-[ ] comportamento das versões secundárias documentado;
+e validar o fluxo completo através da SharePointSource.
 
-[ ] metadados disponíveis capturados;
-
-[ ] AuditService funciona com SharePointSource;
-
-[ ] motor Excel não precisou ser reescrito;
-
-[ ] teste controlado concluído.
+Nenhuma operação de escrita poderá ocorrer.
 
 ---
+
+# 25. CRITÉRIOS DE ACEITE DA FASE 4
+
+A Fase 4 será considerada concluída quando:
+
+[ ] existir mecanismo de aquisição definido e documentado;
+
+[ ] o mecanismo for suportado e autorizado no ambiente;
+
+[ ] acesso ao SharePoint ocorrer exclusivamente em leitura;
+
+[ ] identidade técnica estável da planilha estiver definida;
+
+[ ] versões necessárias puderem ser descobertas/adquiridas;
+
+[ ] ordenação das versões estiver validada;
+
+[ ] comportamento das versões secundárias estiver documentado;
+
+[ ] conteúdo histórico necessário puder ser recuperado;
+
+[ ] metadados disponíveis forem capturados;
+
+[ ] AuditService funcionar com SharePointSource;
+
+[ ] motor Excel não precisar ser reescrito;
+
+[ ] checkpoint e idempotência permanecerem funcionais;
+
+[ ] teste controlado com planilha real for concluído;
+
+[ ] nenhuma operação de escrita no SharePoint ocorrer.
+
+Caso esses critérios não possam ser atendidos por restrição corporativa,
+a fase deverá permanecer BLOQUEADA até decisão formal sobre contingência.
+
+---
+
+# 25.1 COMMITS DA FASE 4
+
+A Fase 4 já consumiu os 3 commits originalmente previstos antes da
+identificação e registro definitivo do bloqueio corporativo.
+
+Mediante autorização expressa do responsável pelo projeto, ficam
+permitidos excepcionalmente até 2 commits adicionais exclusivamente
+para concluir a Fase 4 revisada.
+
+Não iniciar Fase 5 dentro desses commits.
 
 # 25. COMMITS DA FASE 4
 
@@ -1059,7 +1199,8 @@ O relatório deverá ser criado a partir do banco.
 ## RESUMO
 
 - planilha;
-- DriveItem ID;
+- identidade técnica da planilha;
+- DriveItem ID, quando disponível;
 - primeira versão;
 - última versão;
 - última execução;
@@ -1315,7 +1456,9 @@ Durante qualquer fase, evitar:
 - adicionar Node.js;
 - criar frontend web complexo;
 - alterar SharePoint;
-- utilizar nome do arquivo como identidade;
+- utilizar exclusivamente o nome do arquivo como identidade técnica;
+- contornar mecanismos corporativos de autenticação ou autorização;
+- assumir que acesso pelo navegador implica acesso programático;
 - avançar checkpoint antes do commit dos dados;
 - reprocessar histórico sem necessidade;
 - utilizar relatório Excel como banco oficial;
@@ -1366,13 +1509,14 @@ A V1 estará pronta quando o seguinte cenário funcionar:
 
 1. usuário inicia a ferramenta;
 
-2. ferramenta acessa SharePoint somente em leitura;
+2. ferramenta utiliza mecanismo SharePoint suportado e autorizado,
+   exclusivamente em leitura;
 
 3. usuário seleciona CQL028.xlsx;
 
-4. ferramenta identifica a planilha pelo DriveItem ID;
+4. ferramenta reconhece a planilha através de identidade técnica estável;
 
-5. consulta versões;
+5. consulta ou adquire automaticamente as versões históricas necessárias;
 
 6. identifica ausência ou existência de checkpoint;
 
@@ -1422,7 +1566,8 @@ Esse é o principal critério funcional de sucesso do projeto.
 
 Ao iniciar uma sessão de implementação, o Codex deverá:
 
-1. ler os quatro documentos oficiais;
+1. ler a documentação obrigatória conforme ordem definida em
+   `docs/06_GOVERNANCA.md`;
 
 2. identificar a fase atual;
 
@@ -1524,14 +1669,26 @@ arquitetura.
 
 # 54. STATUS INICIAL DO PROJETO
 
-No momento da criação deste documento:
+# 54. STATUS ATUAL DO PROJETO
 
-FASE 1 — NÃO INICIADA
-FASE 2 — NÃO INICIADA
-FASE 3 — NÃO INICIADA
-FASE 4 — NÃO INICIADA
+FASE 1 — CONCLUÍDA
+FASE 2 — CONCLUÍDA
+FASE 3 — CONCLUÍDA
+FASE 4 — EM ANDAMENTO / BLOQUEIO TÉCNICO EM REAVALIAÇÃO
 FASE 5 — NÃO INICIADA
 FASE 6 — NÃO INICIADA
+
+Situação da Fase 4:
+
+A estratégia originalmente baseada em Microsoft Graph encontrou
+restrição de autenticação/autorização no ambiente corporativo.
+
+A arquitetura e o plano foram revisados para permitir investigação de
+mecanismo alternativo suportado e autorizado de aquisição SharePoint.
+
+A Fase 5 permanece não autorizada enquanto a Fase 4 revisada não atingir
+seus critérios de aceite ou receber decisão formal diferente do
+responsável pelo projeto.
 
 Progresso da V1:
 
@@ -1541,17 +1698,21 @@ Progresso da V1:
 
 # 55. PRÓXIMA AÇÃO OFICIAL
 
-Após criação dos quatro documentos oficiais:
+Continuar:
 
-iniciar:
+FASE 4 — AQUISIÇÃO DE VERSÕES SHAREPOINT
 
-FASE 1 — FUNDAÇÃO E BANCO DE AUDITORIA
+Próxima atividade:
 
-Não iniciar Fase 2 simultaneamente.
+investigar e validar mecanismo suportado e autorizado de aquisição
+automatizada das versões históricas no ambiente corporativo.
 
-A Fase 1 deverá ser concluída, testada e registrada antes da autorização
-para a Fase 2.
+Não implementar importação manual como solução oficial sem nova decisão.
 
----
+Não iniciar Fase 5.
+
+Não realizar commits de implementação até que exista uma alternativa
+tecnicamente validada ou autorização expressa para implementação da
+solução escolhida.
 
 FIM DO DOCUMENTO

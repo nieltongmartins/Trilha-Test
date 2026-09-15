@@ -20,11 +20,17 @@ Desenvolver uma aplicação em Python capaz de:
 
 2. Permitir selecionar uma planilha para auditoria.
 
-3. Identificar a planilha tecnicamente pelo DriveItem ID do SharePoint.
-   O nome do arquivo NÃO é sua identidade técnica.
+3. Identificar a planilha por identidade técnica estável e inequívoca.
 
-4. Consultar o histórico de versões disponíveis da planilha,
-   incluindo versões principais e secundárias recuperáveis.
+   Quando disponível através do mecanismo de aquisição adotado, utilizar
+   preferencialmente o DriveItem ID e os identificadores de contexto
+   necessários.
+
+   O nome do arquivo NÃO deverá ser utilizado como identidade técnica
+   exclusiva.
+
+4. Consultar ou adquirir automaticamente o histórico de versões
+   disponíveis da planilha,
 
 5. Na primeira auditoria:
    - obter o histórico disponível;
@@ -104,7 +110,8 @@ MOD = conteúdo existente foi alterado.
 Registrar pelo menos:
 
 - identificador global da ação;
-- DriveItem ID da planilha;
+- identidade técnica da planilha;
+- DriveItem ID, quando disponível;
 - nome da planilha no momento da auditoria;
 - versão anterior;
 - versão atual;
@@ -147,7 +154,11 @@ de:
 5. CHECKPOINT E IDEMPOTÊNCIA
 ======================================================================
 
-O checkpoint será individual por planilha e associado ao DriveItem ID.
+O checkpoint será individual por planilha e associado à sua identidade
+técnica estável.
+
+Quando DriveItem ID estiver disponível, ele deverá ser preservado como
+parte da identidade/metadados técnicos conforme definido na arquitetura.
 
 O sistema deverá garantir:
 
@@ -279,13 +290,22 @@ documentada.
 
 Obrigatório:
 
+Obrigatório:
+
 - Python 3.x
 - openpyxl
 - SQLite inicialmente
-- Microsoft Graph API para SharePoint
+- integração suportada e autorizada com SharePoint Online
 - pytest para testes
 
+Microsoft Graph API permanece como mecanismo de integração suportado
+pela arquitetura quando estiver disponível e autorizado no ambiente,
+mas não constitui dependência obrigatória ou exclusiva da V1.
+
+Dependências específicas de aquisição SharePoint somente deverão ser
+adicionadas após validação do mecanismo efetivamente adotado.
 A aplicação NÃO DEVE possuir dependência de:
+
 
 - Node.js
 - npm
@@ -300,6 +320,9 @@ Se interface gráfica for necessária, utilizar tecnologia compatível
 com execução Python e manter a solução simples.
 
 Priorizar bibliotecas Python maduras e com manutenção ativa.
+
+É proibido introduzir mecanismo destinado a contornar políticas
+corporativas de autenticação ou autorização.
 
 
 ======================================================================
@@ -344,7 +367,8 @@ Manter separação entre:
 - geração de relatório;
 - interface.
 
-O motor de auditoria NÃO deve depender diretamente do Microsoft Graph.
+O motor de auditoria NÃO deverá depender diretamente do Microsoft Graph
+nem de qualquer mecanismo específico de aquisição SharePoint.
 
 Deve ser possível utilizar uma fonte local simulada para testes.
 
@@ -355,11 +379,18 @@ Exemplo conceitual:
           Serviço Auditoria
           /       |       \
          /        |        \
-    Fonte      Comparator    Banco
+    VersionSource      Comparator    Banco
    Local/
-   Graph
+   SharePoint
                  |
               Relatório
+
+A SharePointSource deverá encapsular o mecanismo concreto de aquisição.
+
+Microsoft Graph poderá ser utilizado quando autorizado.
+
+Outro mecanismo somente poderá ser utilizado quando for suportado,
+autorizado, exclusivamente de leitura e validado tecnicamente.
 
 
 ======================================================================
@@ -383,18 +414,21 @@ Validar obrigatoriamente:
 - ausência de duplicação;
 - retomada após checkpoint.
 
-NÍVEL 2 — SHAREPOINT CONTROLADO
+NÍVEL 2 — AQUISIÇÃO SHAREPOINT CONTROLADA
 
 Utilizar uma única planilha real.
 
 Validar:
 
-- DriveItem ID;
-- listagem das versões;
-- download/leitura de versões;
-- metadados;
-- versões principais/secundárias disponíveis;
+- identidade técnica estável;
+- DriveItem ID, quando disponível;
+- descoberta/listagem das versões;
+- aquisição/leitura das versões históricas;
+- metadados disponíveis;
+- ordenação das versões;
+- versões principais/secundárias necessárias;
 - comparação;
+- checkpoint;
 - nenhuma alteração no SharePoint.
 
 NÍVEL 3 — ESCALA
@@ -434,9 +468,6 @@ para a sessão do agente de desenvolvimento.
 
 O documento 06_GOVERNANCA.md possui precedência sobre os demais
 documentos conforme a hierarquia definida nele.
-
-Não criar documentos adicionais sem necessidade técnica clara ou
-solicitação do responsável pelo projeto.
 
 Não criar documentos adicionais sem necessidade técnica clara ou
 solicitação do responsável pelo projeto.
@@ -485,9 +516,16 @@ Planejar a V1 em aproximadamente 6 fases:
 FASE 1 — Fundação + banco
 FASE 2 — Motor Excel + comparação
 FASE 3 — Auditor local incremental
-FASE 4 — Integração Microsoft Graph / SharePoint
+FASE 4 — Aquisição de Versões SharePoint
 FASE 5 — Interface + relatório consolidado
 FASE 6 — Robustez, testes reais e preparação para produção
+
+A Fase 4 deverá utilizar Microsoft Graph quando disponível e autorizado
+ou outro mecanismo suportado e autorizado conforme definido na
+arquitetura.
+
+A seleção de mecanismo alternativo não autoriza contorno de controles
+corporativos de segurança.
 
 Cada fase deve entregar algo executável/testável.
 
@@ -522,35 +560,52 @@ Evitar:
 
 
 ======================================================================
-17. REGRA PARA DÚVIDAS
+17. REGRA PARA DÚVIDAS E LIMITAÇÕES DE INTEGRAÇÃO
 ======================================================================
 
-Não inventar comportamento do SharePoint ou Microsoft Graph.
+Não inventar comportamento do SharePoint, Microsoft Graph ou qualquer
+mecanismo de aquisição.
 
-Se determinada capacidade depender da API, especialmente recuperação
-de versões históricas principais/secundárias, confirmar tecnicamente
-antes de implementar.
+Se determinada capacidade depender da fonte, especialmente:
 
-Se existir limitação da Microsoft Graph que afete algum requisito,
-interromper aquela implementação e informar:
+- autenticação;
+- identidade técnica;
+- descoberta de versões;
+- recuperação de versões históricas;
+- versões principais/secundárias;
+- metadados;
+- ordenação;
 
-1. requisito afetado;
-2. limitação encontrada;
-3. impacto;
-4. alternativas possíveis.
+confirmar tecnicamente antes de implementar.
 
-Não implementar workaround destrutivo.
+Se existir limitação que afete algum requisito:
+
+1. interromper a implementação afetada;
+2. registrar o requisito;
+3. registrar o comportamento observado;
+4. registrar o impacto;
+5. apresentar alternativas suportadas;
+6. aguardar decisão quando houver mudança de arquitetura, segurança
+   ou escopo.
+
+Não implementar workaround destrutivo ou mecanismo destinado a
+contornar autenticação/autorização corporativa.
+
+Não extrair cookies, tokens, senhas ou credenciais de sessões existentes.
+
+Acesso através do navegador ou Microsoft Excel não deverá ser tratado
+automaticamente como autorização para acesso programático.
 
 
 ======================================================================
-18. SUA PRIMEIRA TAREFA
+18. PROCEDIMENTO OBRIGATÓRIO EM CADA SESSÃO
 ======================================================================
 
-NÃO comece implementando toda a aplicação.
+NÃO comece implementando funcionalidades automaticamente.
 
 Antes de qualquer alteração no código:
 
-1. Leia integralmente:
+1. Leia integralmente, nesta ordem:
    - docs/06_GOVERNANCA.md
    - docs/01_ESPECIFICACAO_FUNCIONAL.md
    - docs/02_ARQUITETURA.md
@@ -559,60 +614,74 @@ Antes de qualquer alteração no código:
 
 2. Inspecione o estado atual do repositório.
 
-3. Verifique o git status e a estrutura existente.
+3. Verifique:
+   - git status;
+   - branch atual;
+   - commits recentes;
+   - estrutura existente;
+   - alterações não commitadas.
 
 4. Não apague ou substitua código existente sem justificativa.
 
-5. Identifique no PLANO_DE_DESENVOLVIMENTO a fase atualmente
-   autorizada.
+5. Identifique no PLANO_DE_DESENVOLVIMENTO a fase atualmente autorizada.
 
 6. Consulte o HISTORICO_IMPLEMENTACOES para verificar:
    - fases concluídas;
    - fase atual;
    - commits realizados;
+   - decisões;
    - bloqueios;
+   - limitações;
    - pendências;
    - próximo passo registrado.
 
-7. Nesta primeira execução de desenvolvimento, trabalhar SOMENTE na:
+7. Execute SOMENTE a fase/tarefa expressamente autorizada.
 
-   FASE 1 — FUNDAÇÃO E BANCO DE AUDITORIA.
+8. Não implemente funcionalidades de fases posteriores.
 
-8. Implementar somente os entregáveis e critérios de aceite previstos
-   para a Fase 1.
+9. Quando a tarefa autorizada for apenas investigação técnica:
+   - não transformar investigação em implementação automaticamente;
+   - realizar somente testes seguros e necessários;
+   - registrar resultados observados;
+   - não alterar arquitetura silenciosamente.
 
-9. Executar os testes previstos para a fase.
+10. Executar os testes aplicáveis ao trabalho realizado.
 
-10. Atualizar:
+11. Atualizar:
     docs/04_HISTORICO_IMPLEMENTACOES.md
 
     registrando somente fatos reais:
     - implementação realizada;
+    - investigação realizada;
     - arquivos criados/alterados;
     - testes efetivamente executados;
     - resultados;
     - decisões;
     - bloqueios;
+    - limitações;
     - commits reais.
 
-11. Respeitar o limite máximo de 3 commits para a fase,
-    preferencialmente utilizando 1 ou 2.
+12. Respeitar o limite de commits definido pelo plano e as exceções
+    formalmente autorizadas.
 
-12. NÃO iniciar a Fase 2.
+13. Ao finalizar, apresentar:
 
-Ao terminar, apresente:
+    - fase;
+    - status;
+    - tarefa executada;
+    - resumo;
+    - arquivos criados;
+    - arquivos alterados;
+    - testes executados;
+    - resultados;
+    - commits;
+    - problemas;
+    - bloqueios;
+    - pendências;
+    - riscos;
+    - próximo passo recomendado.
 
-- status da Fase 1;
-- resumo do que foi implementado;
-- arquivos criados;
-- arquivos alterados;
-- estrutura resultante;
-- testes executados;
-- resultado dos testes;
-- commits realizados;
-- problemas ou bloqueios;
-- pendências;
-- próximo passo recomendado.
+14. NÃO iniciar a próxima fase.
 
 Depois:
 

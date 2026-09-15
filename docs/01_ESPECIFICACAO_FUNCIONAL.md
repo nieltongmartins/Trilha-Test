@@ -66,8 +66,13 @@ Cada planilha possuirá sua própria:
 
 O nome do arquivo NÃO será utilizado como chave técnica.
 
-A identidade da planilha será baseada no identificador fornecido pelo
-SharePoint/Microsoft Graph, preferencialmente o DriveItem ID.
+A identidade da planilha deverá ser baseada em identificador técnico estável e inequívoco fornecido ou derivado da fonte SharePoint utilizada pela aplicação.
+
+Quando a integração utilizada disponibilizar o DriveItem ID, este deverá ser preferencialmente utilizado.
+
+Caso o mecanismo de aquisição autorizado não disponibilize o DriveItem ID, deverá ser definida e documentada uma estratégia alternativa de identidade técnica que não dependa exclusivamente do nome do arquivo.
+
+O mecanismo de identificação adotado não poderá comprometer a continuidade da trilha em caso de renomeação da planilha.
 
 Exemplo conceitual:
 
@@ -130,12 +135,13 @@ Exemplo:
 0.99
 
 O objetivo é considerar tanto versões principais quanto secundárias,
-desde que possam ser enumeradas e recuperadas através das APIs
-disponíveis no ambiente.
+desde que possam ser enumeradas e recuperadas através de mecanismo de acesso suportado, autorizado e disponível no ambiente corporativo.
 
-A capacidade real de recuperação dessas versões deverá ser validada
-durante a integração com o Microsoft Graph/SharePoint.
+A capacidade real de enumeração e recuperação dessas versões deverá ser validada durante a integração com o SharePoint.
 
+A aplicação não deverá depender exclusivamente do Microsoft Graph. O mecanismo de aquisição deverá respeitar as políticas de autenticação, autorização e segurança do ambiente corporativo.
+
+Caso determinado mecanismo de integração esteja indisponível por restrição corporativa, deverão ser avaliadas alternativas oficialmente suportadas antes da adoção de processos manuais.
 A aplicação não deverá presumir que uma versão pode ser recuperada
 apenas porque aparece na interface web do SharePoint.
 
@@ -439,8 +445,9 @@ Essa limitação deverá permanecer documentada.
 
 # 18. COMENTÁRIO DA VERSÃO
 
-Quando disponível através da integração, o comentário da versão deverá
-ser armazenado.
+Quando disponível através do mecanismo de aquisição utilizado, o comentário da versão deverá ser armazenado.
+
+A indisponibilidade de determinado metadado deverá ser registrada de forma explícita, sem inferência ou fabricação de informação pela aplicação.
 
 Exemplo:
 
@@ -656,8 +663,9 @@ imutabilidade.
 
 # 27. SELEÇÃO DA PLANILHA
 
-A interface deverá permitir visualizar planilhas elegíveis disponíveis
-no escopo configurado do SharePoint.
+A forma de descoberta das planilhas dependerá das capacidades disponibilizadas pelo mecanismo de aquisição SharePoint adotado.
+
+A interface não deverá pressupor que Microsoft Graph seja o único mecanismo possível de descoberta.
 
 O usuário poderá selecionar uma planilha.
 
@@ -725,8 +733,14 @@ Tecnologias principais:
 - Python 3.x;
 - openpyxl;
 - SQLite;
-- Microsoft Graph API;
+- integração suportada com SharePoint Online;
 - pytest.
+
+Microsoft Graph permanece como mecanismo de integração preferencial quando estiver disponível e autorizado no ambiente, mas não constitui dependência obrigatória da V1.
+
+Outros mecanismos de acesso ao SharePoint somente poderão ser utilizados quando forem tecnicamente suportados, autorizados pelo ambiente corporativo e compatíveis com o requisito de operação exclusivamente em leitura.
+
+É proibido implementar mecanismos destinados a contornar controles de autenticação ou autorização do ambiente corporativo.
 
 É proibida dependência obrigatória de:
 
@@ -763,18 +777,29 @@ credenciais ou disponibilidade do SharePoint.
 
 # 32. TESTE SHAREPOINT
 
-Após validação local, utilizar uma única planilha real controlada.
+Após validação local, deverá ser utilizada uma única planilha real controlada para validar o mecanismo de aquisição SharePoint disponível no ambiente.
 
-Deverão ser comprovados:
+Deverão ser investigados e, quando suportados pelo mecanismo adotado, comprovados:
 
-- identificação por DriveItem ID;
-- listagem das versões;
-- recuperação das versões;
-- recuperação dos metadados disponíveis;
-- acesso a versões principais/secundárias necessárias;
-- ausência total de escrita no SharePoint.
+identificação técnica estável da planilha;
+descoberta/listagem das versões;
+recuperação das versões históricas;
+recuperação dos metadados disponíveis;
+acesso às versões principais e secundárias necessárias;
+ordenação correta das versões;
+ausência total de escrita no SharePoint.
 
-Somente depois disso o processamento em escala poderá ser habilitado.
+Foi constatado durante a implementação que versões históricas podem ser acessadas pelo usuário autenticado através de endereços SharePoint contendo _vti_history, inclusive versões secundárias utilizadas no projeto.
+
+Entretanto, uma requisição HTTP Python não autenticada ao mesmo recurso retornou HTTP 403. Portanto, a existência e acessibilidade da URL através da sessão autenticada do usuário não deverão ser interpretadas como prova de acesso programático autorizado.
+
+A F4 deverá investigar um mecanismo suportado e autorizado de aquisição automatizada utilizando os recursos disponibilizados pelo ambiente corporativo.
+
+Não deverão ser utilizados mecanismos de extração de cookies, captura indevida de tokens, armazenamento de credenciais do usuário ou qualquer outra técnica destinada a contornar os controles corporativos de autenticação.
+
+Caso nenhuma solução automatizada suportada esteja disponível, deverá ser avaliado e documentado um mecanismo alternativo de aquisição/importação, preservando a arquitetura do motor de auditoria.
+
+Somente depois da validação da estratégia de aquisição o processamento em escala poderá ser habilitado.
 
 ---
 
@@ -797,13 +822,14 @@ Primeiro deverá ser comprovada a correção funcional.
 
 A V1 será considerada funcional quando for possível:
 
-1. selecionar uma planilha real do SharePoint;
+1. selecionar ou identificar uma planilha real do SharePoint;
 
-2. identificar seu DriveItem ID;
+2. estabelecer sua identidade técnica estável;
 
-3. consultar as versões históricas necessárias;
+3. consultar ou adquirir as versões históricas necessárias por mecanismo
+   suportado e autorizado;
 
-4. recuperar versões sem alterar o SharePoint;
+4. recuperar as versões necessárias sem alterar o SharePoint;
 
 5. comparar versões consecutivas;
 

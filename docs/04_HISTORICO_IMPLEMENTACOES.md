@@ -2,9 +2,10 @@
 ## Auditor de Planilhas Excel — SharePoint Online
 
 **Documento:** 04_HISTORICO_IMPLEMENTACOES.md  
-**Versão:** 1.0  
-**Status:** Oficial  
-**Data de criação:** 15/09/2026  
+**Versão:** 1.1
+**Status:** Oficial
+**Data de criação:** 15/09/2026
+**Última revisão:** 15/09/2026
 
 ---
 
@@ -45,6 +46,11 @@ A documentação oficial é composta por:
 2. `02_ARQUITETURA.md`
 3. `03_PLANO_DE_DESENVOLVIMENTO.md`
 4. `04_HISTORICO_IMPLEMENTACOES.md`
+5. `05_PROMPT_OFICIAL.md`
+6. `06_GOVERNANCA.md`
+
+A ordem obrigatória de consulta e a hierarquia entre os documentos são
+definidas por `06_GOVERNANCA.md`.
 
 Funções:
 
@@ -118,10 +124,14 @@ Utilizar:
 | F1 | Fundação e Banco de Auditoria | 🟢 CONCLUÍDA | 2 |
 | F2 | Motor Excel e Comparação | 🟢 CONCLUÍDA | 4 |
 | F3 | Auditor Local Incremental | 🟢 CONCLUÍDA | 2 |
-| F4 | Microsoft Graph / SharePoint | 🔴 BLOQUEADA | 2 |
+| F4 | Aquisição de Versões SharePoint | 🟡 EM ANDAMENTO / REAVALIAÇÃO TÉCNICA | 3 |
 | F5 | Interface e Relatório | ⬜ NÃO INICIADA | 0 |
 | F6 | Robustez e Preparação para Produção | ⬜ NÃO INICIADA | 0 |
 
+* A Fase 4 atingiu o limite original de commits durante a tentativa de
+integração Graph e o registro do bloqueio. O plano revisado autoriza,
+excepcionalmente, até 2 commits adicionais exclusivamente para conclusão
+da F4 revisada.
 ---
 
 # 7. PROGRESSO GERAL
@@ -136,11 +146,22 @@ Fases 1, 2 e 3 concluídas.
 
 Fase atual:
 
-F4 — Microsoft Graph / SharePoint bloqueada na validação controlada real.
+Fase atual:
+
+F4 — Aquisição de Versões SharePoint em reavaliação técnica.
+
+Situação:
+
+A integração Microsoft Graph implementada permanece disponível no código,
+mas sua validação real está bloqueada pelas restrições de
+autenticação/autorização do ambiente corporativo.
 
 Próxima ação prevista:
 
-Disponibilizar ambiente e credenciais de leitura para concluir a F4.
+Investigar e validar mecanismo suportado e autorizado de aquisição
+automatizada das versões históricas do SharePoint.
+
+A Fase 5 permanece não autorizada.
 
 ---
 
@@ -472,15 +493,15 @@ responsável pelo projeto.
 
 # 12. HISTÓRICO DA FASE 4
 
-## F4 — Microsoft Graph / SharePoint
+## F4 — Aquisição de Versões SharePoint
 
-**Status:** 🔴 BLOQUEADA
+**Status:** 🟡 EM ANDAMENTO / REAVALIAÇÃO TÉCNICA
 
 **Data de início:** 15/09/2026
 
 **Data de conclusão:** —
 
-**Quantidade de commits:** 2 (implementação testável e registro do bloqueio)
+**Quantidade de commits:** 3 no ciclo original da F4
 
 ### Objetivo
 
@@ -591,6 +612,83 @@ operacional.
 Retomar somente a validação controlada da F4 após remoção do bloqueio. Não
 iniciar a F5.
 
+### Evolução do bloqueio
+
+Após o registro inicial do bloqueio, foi confirmado pelo responsável do
+projeto que o ambiente corporativo não disponibilizará acesso ao Microsoft
+Entra Admin Center nem realizará o registro de aplicação originalmente
+necessário para a estratégia `client_credentials`.
+
+Consequentemente, a alternativa originalmente recomendada de fornecer
+tenant, client ID, client secret, site ID e drive ID deixou de ser uma
+dependência operacional viável para a V1 no ambiente atual.
+
+A implementação Graph existente não deverá ser removida, pois permanece
+arquiteturalmente válida para ambientes onde essa integração seja
+autorizada.
+
+Entretanto, Microsoft Graph deixou de ser considerado o único mecanismo
+possível de aquisição SharePoint.
+
+### Investigação `_vti_history`
+
+Foi realizada investigação controlada utilizando a planilha real:
+
+CQL028.xlsx
+
+Foi confirmado que o SharePoint disponibiliza acesso à versão histórica
+0.97, através da sessão autenticada do usuário, por endereço contendo:
+
+`_vti_history/97/.../CQL028.xlsx`
+
+Ao abrir esse recurso através do ambiente autenticado do usuário, foi
+apresentada exatamente a versão histórica esperada.
+
+A mesma versão também pôde ser aberta no Microsoft Excel como versão
+anterior somente leitura.
+
+Não foi executada restauração nem qualquer operação de escrita.
+
+### Teste programático controlado
+
+Foi executado um teste Python isolado, fora da aplicação, utilizando uma
+requisição HTTP GET sem credenciais, cookies ou tokens para o mesmo
+recurso histórico.
+
+Resultado observado:
+
+Status HTTP: 403
+Content-Type: text/plain; charset=utf-8
+Redirecionamento: nenhum
+Corpo da resposta: 13 bytes
+
+Conclusão:
+
+a existência de uma URL `_vti_history` acessível pela sessão autenticada
+do usuário não implica que o mesmo recurso esteja disponível
+programaticamente sem autenticação apropriada.
+
+Não foram extraídos cookies, tokens ou credenciais da sessão existente.
+
+### Decisão decorrente
+
+A Fase 4 foi revisada de:
+
+"Microsoft Graph / SharePoint"
+
+para:
+
+"Aquisição de Versões SharePoint".
+
+O objetivo permanece adquirir automaticamente as versões históricas
+necessárias utilizando mecanismo suportado, autorizado e exclusivamente
+de leitura.
+
+A importação manual permanece somente como contingência e não foi
+adotada como solução oficial da V1.
+
+A Fase 5 permanece bloqueada até conclusão da F4 revisada ou nova decisão
+expressa do responsável pelo projeto.
 ---
 
 # 13. HISTÓRICO DA FASE 5
@@ -628,11 +726,31 @@ Nenhum.
 
 ### Pendências
 
-Aguardar conclusão e aprovação da Fase 4.
+### Pendências
+
+- identificar mecanismos suportados e autorizados disponíveis no ambiente;
+- validar autenticação e autorização do mecanismo candidato;
+- comprovar aquisição programática de versão histórica;
+- comprovar descoberta/enumeração das versões necessárias;
+- validar versões secundárias;
+- validar identidade técnica estável da planilha;
+- recuperar os metadados disponíveis;
+- validar ordenação das versões;
+- integrar o mecanismo escolhido à SharePointSource;
+- executar auditoria controlada real;
+- comprovar ausência de operações de escrita.
 
 ### Próximo passo
 
-Não autorizado.
+### Próximo passo
+
+Continuar somente a investigação técnica da F4 revisada.
+
+Não implementar solução de aquisição ainda sem validação do mecanismo.
+
+Não adotar importação manual como solução oficial sem decisão expressa.
+
+Não iniciar F5.
 
 ---
 
@@ -833,6 +951,56 @@ Preferência:
 Evitar desenvolvimento excessivamente fragmentado e manter o projeto
 curto e controlável.
 
+## DEC-008 — Desacoplamento da aquisição SharePoint do Microsoft Graph
+
+**Data:** 15/09/2026
+
+**Status:** APROVADA
+
+### Decisão
+
+Microsoft Graph deixa de constituir mecanismo obrigatório e exclusivo
+para aquisição das versões SharePoint na V1.
+
+A arquitetura continuará permitindo Graph quando autorizado, mas a F4
+passará a investigar mecanismo alternativo suportado e autorizado no
+ambiente corporativo.
+
+### Motivo
+
+A integração Graph implementada não pôde ser validada no ambiente real
+porque a organização não disponibiliza ao projeto o registro de aplicação
+e as autorizações necessárias.
+
+### Consequência
+
+O motor Excel, AuditService, persistência, checkpoint e trilha consolidada
+permanecem inalterados.
+
+A aquisição deverá continuar isolada atrás do contrato de fonte.
+
+## DEC-009 — Importação manual somente como contingência
+
+**Data:** 15/09/2026
+
+**Status:** APROVADA
+
+### Decisão
+
+O download e a importação manual de versões históricas não serão adotados
+neste momento como mecanismo oficial da V1.
+
+### Motivo
+
+O cenário previsto inclui centenas de planilhas e potencialmente centenas
+ou milhares de versões, tornando a aquisição manual inadequada como fluxo
+operacional principal.
+
+### Consequência
+
+A investigação de aquisição automatizada deverá ser concluída antes de
+decisão sobre contingência manual.
+
 ---
 
 # 16. REGISTRO DE BLOQUEIOS
@@ -841,38 +1009,54 @@ Nenhum bloqueio registrado até o momento.
 
 Quando necessário utilizar:
 
-## BLOQ-XXX — Título
+## BLOQ-001 — Autenticação programática SharePoint no ambiente corporativo
 
-**Data:**
+**Data:** 15/09/2026
 
-**Fase:**
+**Fase:** F4 — Aquisição de Versões SharePoint
 
-**Status:**
+**Status:** EM REAVALIAÇÃO
 
 ### Problema
 
-[...]
+A integração Microsoft Graph implementada não pode ser validada no
+ambiente real utilizando o modelo de autenticação originalmente previsto.
 
 ### Causa
 
-[...]
+O projeto não dispõe de App Registration/autorização corporativa
+necessária e essa disponibilização não está prevista no ambiente atual.
 
 ### Impacto
 
-[...]
+A aplicação ainda não consegue adquirir automaticamente as versões
+históricas reais necessárias para concluir a F4.
+
+### Evidências adicionais
+
+O acesso humano autenticado à versão histórica 0.97 da CQL028.xlsx através
+de `_vti_history` foi confirmado.
+
+Uma requisição Python HTTP não autenticada ao mesmo recurso retornou
+HTTP 403.
 
 ### Alternativas
 
-1. [...]
-2. [...]
+1. identificar outro mecanismo Microsoft/SharePoint suportado e autorizado;
+2. manter Microsoft Graph disponível para ambientes onde seja autorizado;
+3. avaliar importação assistida somente como contingência caso nenhuma
+   alternativa automatizada seja viável.
 
 ### Recomendação
 
-[...]
+Prosseguir com investigação técnica controlada das alternativas
+suportadas, sem contornar mecanismos corporativos de autenticação.
 
 ### Decisão
 
-Aguardando responsável / Resolvido.
+F4 revisada e mantida em andamento/reavaliação.
+
+F5 permanece não autorizada.
 
 ---
 
@@ -886,27 +1070,33 @@ confirmados.
 
 Quando uma limitação for comprovada:
 
-## LIM-XXX — Título
+## LIM-001 — URL histórica não é acesso programático anônimo
 
-**Data:**
+**Data:** 15/09/2026
 
-**Fase:**
+**Fase:** F4
 
 ### Comportamento esperado
 
-[...]
+Verificar se uma URL histórica `_vti_history` acessível pelo usuário
+autenticado também poderia ser recuperada diretamente por requisição
+Python sem autenticação adicional.
 
 ### Comportamento observado
 
-[...]
+A URL abriu corretamente a versão histórica 0.97 no ambiente autenticado.
+
+A requisição Python HTTP sem autenticação retornou HTTP 403.
 
 ### Impacto
 
-[...]
+A URL `_vti_history` isoladamente não resolve a aquisição automatizada.
 
 ### Tratamento adotado
 
-[...]
+Investigar mecanismo suportado de autenticação/aquisição.
+
+Não reutilizar cookies ou tokens de sessões existentes como contorno.
 
 ---
 
@@ -1093,27 +1283,36 @@ A presença nesta seção não significa autorização para implementação.
 
 # 25. ESTADO ATUAL OFICIAL
 
+# 25. ESTADO ATUAL OFICIAL
+
 **Data:** 15/09/2026
 
 **Projeto:** Auditor de Planilhas Excel — SharePoint Online
 
 **Versão planejada:** V1
 
-**Fase atual:** F4 — Microsoft Graph / SharePoint bloqueada
+**Fase atual:** F4 — Aquisição de Versões SharePoint
 
-**Implementação:** fonte Graph somente leitura e integração automatizada com o
-núcleo concluídas; validação real ainda não executada
+**Status:** 🟡 EM ANDAMENTO / REAVALIAÇÃO TÉCNICA
+
+**Implementação:** núcleo local completo; integração Microsoft Graph
+implementada e testada isoladamente; validação Graph real inviabilizada no
+ambiente corporativo atual; investigação de aquisição alternativa em curso.
 
 **Fases concluídas:** 3/6
 
-**Commits da Fase 4:** 2 (implementação e registro do bloqueio)
+**Commits do ciclo original da Fase 4:** 3
 
-**Bloqueios:** 1
+**Bloqueios ativos:** 1
+
+**Limitações confirmadas:** 1
 
 **Próxima ação:**
 
-Disponibilizar ambiente SharePoint controlado e credenciais mínimas de leitura
-para retomar e concluir a F4. Não iniciar a F5.
+Investigar e validar mecanismo suportado e autorizado de aquisição
+automatizada das versões históricas SharePoint.
+
+Não iniciar F5.
 
 ---
 
@@ -1121,11 +1320,12 @@ para retomar e concluir a F4. Não iniciar a F5.
 
 Antes de iniciar qualquer implementação:
 
-1. consultar este documento;
-2. consultar `01_ESPECIFICACAO_FUNCIONAL.md`;
-3. consultar `02_ARQUITETURA.md`;
-4. consultar `03_PLANO_DE_DESENVOLVIMENTO.md`;
-5. verificar o estado real do repositório;
+1. consultar a documentação obrigatória na ordem definida por
+   `06_GOVERNANCA.md`;
+2. verificar o estado real do repositório;
+3. consultar este histórico;
+4. identificar a fase e a tarefa expressamente autorizadas;
+5. respeitar bloqueios e decisões registrados.
 6. identificar a fase autorizada.
 
 Após executar a fase:

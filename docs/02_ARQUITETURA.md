@@ -2,9 +2,10 @@
 ## Auditor de Planilhas Excel — SharePoint Online
 
 **Documento:** 02_ARQUITETURA.md  
-**Versão:** 1.0  
-**Status:** Oficial  
-**Data:** 15/09/2026  
+Versão: 1.1
+Status: Oficial
+Data: 15/09/2026
+Última revisão: 15/09/2026
 
 ---
 
@@ -48,13 +49,14 @@ A solução deverá seguir os seguintes princípios:
 
 5. Motor de comparação independente do SharePoint.
 
-6. Fonte de arquivos intercambiável:
-   - fonte local para testes;
-   - Microsoft Graph para produção.
+6. Fonte de versões intercambiável:
+   - fonte local para desenvolvimento e testes;
+   - fonte SharePoint para produção;
+   - mecanismo concreto de aquisição desacoplado do motor de auditoria.
 
 7. Processamento incremental por planilha.
 
-8. Checkpoint associado ao DriveItem ID.
+8. Checkpoint associado à identidade técnica estável da planilha.
 
 9. Operações críticas protegidas por transação.
 
@@ -63,6 +65,17 @@ A solução deverá seguir os seguintes princípios:
 11. Reexecução não poderá duplicar evidências.
 
 12. Simplicidade deverá ser preferida a abstrações prematuras.
+
+13. Microsoft Graph não constitui dependência arquitetural obrigatória.
+
+14. A aquisição de versões SharePoint deverá utilizar somente mecanismos
+    suportados e autorizados no ambiente corporativo.
+
+15. Restrições de autenticação ou autorização não deverão ser contornadas
+    por captura de cookies, tokens, senhas ou sessões de usuário.
+
+16. Mecanismos alternativos de aquisição poderão ser implementados sem
+    modificar o motor Excel, as regras de auditoria ou a persistência.
 
 ---
 
@@ -87,7 +100,8 @@ Arquitetura conceitual:
     ┌────────────────┐ ┌───────────────┐ ┌────────────────┐
     │ FONTE DE DADOS │ │ MOTOR EXCEL   │ │ BANCO AUDITORIA│
     │                │ │               │ │                │
-    │ Local / Graph  │ │ Reader + Diff │ │ SQLite / SQL   │
+    │ │ VersionSource  │
+     │ Local/SharePoint│ │ │ Reader + Diff │ │ SQLite / SQL   │
     └────────────────┘ └───────────────┘ └────────────────┘
                                                    │
                                                    ▼
@@ -106,7 +120,7 @@ A aplicação será dividida nos seguintes componentes:
 2. Interface
 3. Serviço de auditoria
 4. Fonte de dados
-5. Cliente Microsoft Graph
+5. Mecanismo de aquisição SharePoint
 6. Leitor Excel
 7. Comparador
 8. Persistência
@@ -199,7 +213,7 @@ Não deverá conter:
 
 - lógica de comparação;
 - SQL complexo;
-- chamadas Graph detalhadas;
+- chamadas detalhadas ao mecanismo de aquisição SharePoint;
 - lógica de negócio da auditoria.
 
 Essas responsabilidades pertencem aos componentes específicos.
@@ -269,7 +283,39 @@ equivalentes às necessárias na fonte SharePoint.
 
 Arquivo:
 
+## 8.2 Fonte SharePoint
+
+Arquivo:
+
 app/sources/sharepoint.py
+
+Objetivo:
+
+fornecer ao serviço de auditoria acesso normalizado às planilhas,
+versões e metadados disponíveis no SharePoint, independentemente do
+mecanismo concreto de aquisição autorizado no ambiente.
+
+Responsabilidades:
+
+- localizar planilhas elegíveis;
+- estabelecer sua identidade técnica;
+- listar ou descobrir versões;
+- recuperar metadados disponíveis;
+- recuperar conteúdo histórico para leitura;
+- recuperar a versão atual quando necessário;
+- normalizar os dados para o contrato interno da aplicação.
+
+Todas as operações deverão ser exclusivamente de leitura.
+
+A fonte SharePoint não deverá obrigar o restante da aplicação a conhecer
+detalhes de Microsoft Graph, URLs históricas, autenticação ou qualquer
+outro mecanismo concreto de aquisição.
+
+Microsoft Graph poderá ser utilizado como implementação quando estiver
+disponível e autorizado.
+
+Caso Graph não esteja disponível, outro mecanismo somente poderá ser
+adotado após validação técnica e de segurança.
 
 Responsável por:
 
@@ -300,17 +346,14 @@ baixar_versao(id_planilha, id_versao)
 
 obter_metadados(...)
 
-Os nomes definitivos poderão ser ajustados durante implementação.
+O serviço de auditoria deverá conseguir operar com qualquer implementação
+compatível com esse contrato sem alteração de sua lógica de negócio.
 
-Entretanto, o serviço de auditoria deverá conseguir operar com:
+A identidade utilizada por `id_planilha` deverá representar a identidade
+técnica estável definida pela fonte, não necessariamente um DriveItem ID.
 
-LocalSource
-
-ou:
-
-SharePointSource
-
-sem alterar a lógica do motor.
+Detalhes específicos do mecanismo de aquisição não deverão vazar para
+AuditService, ExcelReader ou Comparator.
 
 ---
 
@@ -364,8 +407,9 @@ Preferências:
 2. data/hora + identificador;
 3. parser controlado de versão, se necessário.
 
-A estratégia definitiva deverá ser validada contra o comportamento real
-do Microsoft Graph.
+A estratégia definitiva deverá ser validada contra o comportamento real da fonte SharePoint e do mecanismo de aquisição adotado.
+
+Quando a fonte fornecer uma ordem oficial ou identificador confiável, essa informação deverá prevalecer sobre inferências baseadas apenas no número exibido da versão.
 
 ---
 
@@ -720,6 +764,21 @@ composta por mais de um identificador, como drive/site + item ID.
 
 A modelagem deverá preservar os identificadores necessários para evitar
 colisões ou ambiguidades entre bibliotecas.
+
+Os campos relacionados ao Microsoft Graph poderão permanecer na
+modelagem existente por compatibilidade e uso futuro.
+
+Entretanto, a arquitetura não deverá exigir que `drive_item_id`,
+`site_id` ou `drive_id` estejam disponíveis em todos os mecanismos de
+aquisição.
+
+Caso a fonte adotada não forneça esses identificadores, deverá ser
+definida uma identidade técnica alternativa estável antes da utilização
+em produção.
+
+Qualquer alteração de schema necessária para suportar essa identidade
+deverá ser avaliada explicitamente, preservando os dados já existentes
+e a compatibilidade com o motor de auditoria.
 
 ---
 
@@ -1156,65 +1215,95 @@ Logs não substituem a tabela oficial de execuções.
 
 # 41. AUTENTICAÇÃO MICROSOFT
 
-A estratégia de autenticação deverá ser definida durante a fase de
-integração.
+A estratégia de autenticação e acesso deverá ser compatível com os
+mecanismos oficialmente suportados e autorizados no ambiente
+corporativo.
 
 Critérios:
 
-- utilizar mecanismos suportados pela Microsoft;
+- utilizar somente mecanismos suportados;
+- respeitar as políticas corporativas de autenticação e autorização;
 - não armazenar senha em código;
-- evitar credenciais de usuário em texto;
+- não armazenar credenciais de usuário em texto;
 - aplicar menor privilégio;
-- permitir execução adequada ao ambiente corporativo.
+- operar exclusivamente em leitura;
+- não extrair cookies ou tokens de sessões existentes;
+- não utilizar sessões autenticadas de navegador ou Office como forma
+  de contornar restrições programáticas;
+- permitir diagnóstico claro quando determinado mecanismo estiver
+  indisponível.
 
-Não implementar método de autenticação obsoleto ou inseguro apenas por
-ser mais simples.
+A existência de acesso do usuário através do navegador ou Microsoft
+Excel não implica automaticamente autorização ou capacidade de acesso
+programático.
+
+Nenhum método obsoleto, inseguro ou destinado a contornar controles
+corporativos deverá ser implementado.
 
 ---
 
 # 42. MICROSOFT GRAPH
 
-A integração deverá validar experimentalmente:
+A integração deverá validar experimentalmente, para cada mecanismo
+candidato:
 
-1. identificação do site;
-2. identificação da biblioteca;
-3. listagem de arquivos;
-4. DriveItem ID;
-5. histórico de versões;
-6. IDs das versões;
-7. metadados;
-8. autor;
-9. data/hora;
-10. comentário, se exposto;
-11. download do conteúdo histórico;
-12. comportamento de versões principais;
-13. comportamento de versões secundárias.
+1. identificação da planilha;
+2. identidade técnica estável;
+3. descoberta/listagem de versões;
+4. identificadores das versões;
+5. metadados;
+6. autor da versão;
+7. data/hora;
+8. comentário, quando disponível;
+9. recuperação do conteúdo histórico;
+10. versões principais;
+11. versões secundárias;
+12. ordenação confiável;
+13. comportamento da autenticação;
+14. garantia de operação exclusivamente em leitura.
 
-Nenhum desses comportamentos deverá ser inventado.
+Microsoft Graph permanece candidato preferencial quando disponível e
+autorizado, mas não é requisito arquitetural exclusivo.
+
+Nenhum comportamento deverá ser presumido sem validação.
 
 ---
 
 # 43. LIMITAÇÃO CRÍTICA A VALIDAR
 
-A interface SharePoint pode apresentar versões como:
+# 43. RESTRIÇÃO CORPORATIVA E INVESTIGAÇÃO F4
 
-0.84
-0.85
-...
-0.99
+Durante a F4 foi constatado que o ambiente corporativo não disponibiliza
+ao projeto os dados e autorizações necessários para utilização da
+integração Microsoft Graph originalmente prevista.
 
-Isso NÃO constitui, por si só, prova de que todas serão recuperáveis
-pelo endpoint escolhido do Microsoft Graph.
+Também foi validado que uma versão histórica real pode ser acessada pelo
+usuário autenticado através de endereço SharePoint contendo
+`_vti_history`.
 
-Durante a integração real, isso deverá ser validado.
+No teste controlado realizado com CQL028.xlsx, o endereço histórico
+correspondente à versão 0.97 abriu corretamente essa versão através da
+sessão autenticada do usuário.
 
-Se houver limitação:
+Entretanto, uma requisição Python HTTP não autenticada ao mesmo recurso
+retornou HTTP 403.
 
-- não criar workaround destrutivo;
-- não modificar SharePoint;
-- registrar limitação;
-- apresentar alternativas técnicas;
-- aguardar decisão antes de mudar arquitetura.
+Portanto:
+
+- a URL histórica não deverá ser considerada acesso programático
+  automaticamente disponível;
+- não deverão ser extraídos cookies ou tokens do navegador/Office;
+- não deverão ser utilizados mecanismos de contorno da autenticação;
+- Microsoft Graph deverá permanecer disponível arquiteturalmente para
+  utilização futura caso seja autorizado;
+- a F4 deverá investigar alternativas suportadas e autorizadas de
+  aquisição automatizada;
+- importação manual deverá ser considerada contingência, e não solução
+  automática oficial, enquanto a investigação técnica não estiver
+  concluída.
+
+Nenhuma mudança estrutural adicional deverá ser implementada antes da
+validação da alternativa escolhida.
 
 ---
 
@@ -1335,13 +1424,16 @@ Dependências somente deverão ser adicionadas quando utilizadas.
 Base esperada:
 
 openpyxl
-requests ou biblioteca Microsoft apropriada
-MSAL, se adotado para autenticação
 pytest
 
-A lista definitiva será determinada durante implementação.
+Dependências relacionadas à aquisição SharePoint deverão ser adicionadas
+somente após definição e validação do mecanismo autorizado.
 
-Node.js não será dependência.
+`requests`, bibliotecas Microsoft ou MSAL poderão ser utilizados quando
+forem efetivamente necessários ao mecanismo escolhido.
+
+Nenhuma biblioteca deverá ser adicionada apenas com base na arquitetura
+original do Microsoft Graph.
 
 ---
 
@@ -1373,8 +1465,9 @@ HTTP 403
 
 apresentar:
 
-"Não foi possível acessar o histórico de versões da planilha.
-Verifique as permissões de leitura configuradas para o SharePoint."
+"Não foi possível acessar programaticamente o histórico de versões da
+planilha através do mecanismo configurado. Verifique a configuração,
+autorização e compatibilidade do método de acesso ao SharePoint."
 
 O detalhe técnico poderá permanecer no log.
 
@@ -1459,7 +1552,7 @@ USUÁRIO
 SELECIONA CQL028.xlsx
    │
    ▼
-IDENTIFICA DRIVEITEM
+IDENTIFICA PLANILHA E IDENTIDADE TÉCNICA
    │
    ▼
 CONSULTA BANCO
@@ -1469,7 +1562,7 @@ CONSULTA BANCO
    └── com checkpoint ──► auditoria incremental
                               │
                               ▼
-                    CONSULTA SHAREPOINT
+                    CONSULTA FONTE SHAREPOINT
                               │
                               ▼
                       LISTA VERSÕES
@@ -1478,7 +1571,7 @@ CONSULTA BANCO
                      DETERMINA PENDÊNCIAS
                               │
                               ▼
-                    BAIXA N E N+1
+                    ADQUIRE N E N+1
                               │
                               ▼
                       CRIA SNAPSHOTS
@@ -1581,29 +1674,30 @@ O QUE realmente foi implementado.
 
 # 59. CRITÉRIO ARQUITETURAL FINAL
 
-A arquitetura será considerada adequada quando conseguirmos substituir:
+A arquitetura será considerada adequada quando o AuditService puder
+operar com diferentes implementações compatíveis de VersionSource sem
+reescrever:
+
+- motor de comparação;
+- regras de checkpoint;
+- persistência;
+- trilha consolidada;
+- geração de relatório.
+
+A substituição entre:
 
 LocalSource
 
-por:
+e:
 
 SharePointSource
 
-sem reescrever o motor de comparação e sem alterar as regras de
-persistência da trilha.
+não deverá exigir alteração das regras de negócio.
 
-Da mesma forma, a futura substituição de:
-
-SQLite
-
-por:
-
-SQL Server
-
-não deverá exigir reescrita do motor Excel.
-
-Essa separação constitui uma das principais garantias de
-manutenibilidade da solução.
+Da mesma forma, a substituição do mecanismo interno de aquisição da
+SharePointSource — por exemplo Microsoft Graph ou outro mecanismo
+suportado e autorizado — não deverá exigir reescrita do motor de
+auditoria.
 
 ---
 

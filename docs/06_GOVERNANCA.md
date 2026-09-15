@@ -1,10 +1,11 @@
 # GOVERNANÇA DO PROJETO
 ## Auditor de Planilhas Excel — SharePoint Online
 
-**Documento:** 06_GOVERNANCA.md  
-**Versão:** 1.0  
-**Status:** Oficial  
-**Data:** 15/09/2026  
+**Documento:** 06_GOVERNANCA.md
+**Versão:** 1.1
+**Status:** Oficial
+**Data:** 15/09/2026
+**Última revisão:** 15/09/2026
 
 ---
 
@@ -290,14 +291,22 @@ O relatório não deverá ser utilizado como substituto do banco para:
 
 ## 7.4 Identidade da planilha
 
-O nome do arquivo não será a identidade técnica da planilha.
+O nome do arquivo não será utilizado como identidade técnica exclusiva
+da planilha.
 
-Deverão ser preservados os identificadores necessários fornecidos pelo
-SharePoint/Microsoft Graph.
+A aplicação deverá utilizar identidade técnica estável e inequívoca
+fornecida ou estabelecida através da fonte SharePoint adotada.
 
-O DriveItem ID deverá ser utilizado conforme definido na arquitetura,
-considerando também drive/site quando necessário para garantir
-identidade inequívoca.
+Quando disponíveis, deverão ser preservados os identificadores
+fornecidos pelo SharePoint/Microsoft Graph, incluindo DriveItem ID e os
+identificadores de contexto necessários.
+
+Caso o mecanismo autorizado de aquisição não disponibilize DriveItem ID,
+deverá ser definida e documentada identidade técnica alternativa antes
+do uso operacional.
+
+Nenhuma alteração dessa estratégia poderá comprometer checkpoint,
+idempotência ou continuidade da trilha existente.
 
 ---
 
@@ -340,13 +349,18 @@ F2 — Motor Excel e Comparação
 
 F3 — Auditor Local Incremental
 
-F4 — Microsoft Graph / SharePoint
+F4 — Aquisição de Versões SharePoint
 
 F5 — Interface e Relatório
 
 F6 — Robustez e Preparação para Produção
 
 O agente deverá trabalhar somente na fase autorizada.
+
+O mecanismo concreto utilizado na F4 não constitui uma fase independente.
+
+Microsoft Graph ou outro mecanismo suportado e autorizado deverá
+permanecer encapsulado na camada de aquisição SharePoint.
 
 ---
 
@@ -371,6 +385,17 @@ Não criar microcommits artificialmente.
 
 Se uma fase aparentar exigir mais de 3 commits, o agente deverá parar e
 avaliar o motivo antes de continuar.
+
+Exceções ao limite somente poderão ocorrer mediante decisão expressa do
+responsável pelo projeto, com:
+
+- motivo;
+- fase afetada;
+- quantidade adicional autorizada;
+- finalidade;
+- registro no plano e/ou histórico correspondente.
+
+Uma exceção não altera permanentemente o limite padrão das demais fases.
 
 ---
 
@@ -527,23 +552,33 @@ requisitos.
 
 ---
 
-# 18. MICROSOFT GRAPH / SHAREPOINT
+# 18. AQUISIÇÃO SHAREPOINT
 
-Comportamentos da API não deverão ser inventados.
+Comportamentos do SharePoint, Microsoft Graph ou de qualquer outro
+mecanismo de aquisição não deverão ser inventados.
 
-Durante F4 deverão ser validados no ambiente real:
+Durante a F4 deverão ser validados no ambiente real, conforme as
+capacidades do mecanismo candidato:
 
 - autenticação;
-- site;
-- biblioteca;
-- DriveItem;
+- autorização;
+- acesso ao SharePoint;
+- identidade técnica da planilha;
+- site/biblioteca, quando aplicável;
 - histórico;
 - versões;
+- ordenação;
 - metadados;
 - conteúdo histórico;
 - versões principais;
 - versões secundárias;
-- permissões de leitura.
+- operação exclusivamente em leitura.
+
+Microsoft Graph poderá ser utilizado quando disponível e autorizado,
+mas não constitui mecanismo obrigatório ou exclusivo da V1.
+
+Outro mecanismo somente poderá ser adotado quando for suportado,
+autorizado e compatível com os princípios de segurança deste projeto.
 
 ---
 
@@ -561,15 +596,17 @@ somente poderão ser consideradas tecnicamente suportadas pela aplicação
 depois que a integração comprovar que podem ser recuperadas de forma
 adequada.
 
-A presença na interface web não autoriza o agente a presumir
-comportamento da API.
+A presença na interface web não autoriza o agente a presumir que a
+versão possa ser adquirida programaticamente pelo mecanismo escolhido.
+
+O comportamento deverá ser comprovado tecnicamente.
 
 ---
 
-# 20. LIMITAÇÃO DE API
+# 20. LIMITAÇÃO DE INTEGRAÇÃO
 
-Caso uma limitação do Microsoft Graph ou SharePoint impeça requisito
-previsto:
+Caso uma limitação do SharePoint, Microsoft Graph, autenticação
+corporativa ou mecanismo de aquisição impeça requisito previsto:
 
 não alterar silenciosamente o requisito.
 
@@ -595,6 +632,20 @@ Nunca incluir no repositório:
 - informação sensível desnecessária.
 
 Arquivos de exemplo poderão conter somente placeholders.
+
+Também é proibido utilizar como mecanismo de contorno:
+
+- extração de cookies de navegador;
+- captura de tokens de sessões autenticadas;
+- extração de credenciais do Microsoft Office;
+- armazenamento de senha corporativa;
+- reutilização não autorizada de sessão autenticada;
+- mecanismo destinado a contornar políticas do Microsoft Entra ou
+  controles corporativos equivalentes.
+
+A existência de acesso legítimo do usuário através do navegador ou
+Microsoft Excel não implica automaticamente autorização para reutilizar
+essa sessão programaticamente.
 
 ---
 
@@ -828,9 +879,9 @@ Será medido pela capacidade de realizar corretamente o fluxo:
 
 Selecionar planilha
         ↓
-Identificar SharePoint
+Estabelecer identidade técnica
         ↓
-Consultar versões
+Adquirir versões do SharePoint
         ↓
 Determinar checkpoint
         ↓
