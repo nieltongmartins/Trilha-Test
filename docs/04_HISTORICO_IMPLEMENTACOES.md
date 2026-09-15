@@ -115,7 +115,7 @@ Utilizar:
 
 | Fase | Descrição | Status | Commits |
 |---|---|---|---:|
-| F1 | Fundação e Banco de Auditoria | ⬜ NÃO INICIADA | 0 |
+| F1 | Fundação e Banco de Auditoria | 🟢 CONCLUÍDA | 2 |
 | F2 | Motor Excel e Comparação | ⬜ NÃO INICIADA | 0 |
 | F3 | Auditor Local Incremental | ⬜ NÃO INICIADA | 0 |
 | F4 | Microsoft Graph / SharePoint | ⬜ NÃO INICIADA | 0 |
@@ -128,19 +128,19 @@ Utilizar:
 
 Fases concluídas:
 
-0 de 6
+1 de 6
 
 Progresso funcional inicial:
 
-0%
+Fase 1 concluída.
 
 Fase atual:
 
-Nenhuma fase de implementação iniciada.
+F1 — Fundação e Banco de Auditoria concluída.
 
 Próxima fase prevista:
 
-F1 — Fundação e Banco de Auditoria.
+F2 — Motor Excel e Comparação, aguardando autorização.
 
 ---
 
@@ -163,64 +163,124 @@ existir código e teste correspondente.
 
 ## F1 — Fundação e Banco de Auditoria
 
-**Status:** ⬜ NÃO INICIADA
+**Status:** 🟢 CONCLUÍDA
 
-**Data de início:** —
+**Data de início:** 15/09/2026
 
-**Data de conclusão:** —
+**Data de conclusão:** 15/09/2026
 
-**Quantidade de commits:** 0
-
-### Objetivo
-
-Criar a fundação executável da aplicação e a persistência inicial da
-trilha de auditoria.
+**Quantidade de commits:** 2 (implementação e encerramento documental)
 
 ### Implementado
 
-Ainda não iniciado.
+- fundação executável em Python com ponto de entrada `main.py`;
+- configuração por variáveis de ambiente, criação de diretórios e logging;
+- banco SQLite criado automaticamente e de forma idempotente;
+- seis tabelas oficiais, chaves, relacionamentos, índices e timestamps;
+- constraints para identidade técnica, checkpoint único, comparações e
+  alterações não duplicadas, estados e tipos controlados;
+- encerramento explícito da conexão por gerenciador de contexto;
+- testes automatizados de configuração, inicialização, persistência,
+  integridade referencial, unicidade, reexecução e encerramento.
 
 ### Arquivos criados
 
-Nenhum.
+- `main.py`, `requirements.txt`, `pytest.ini`, `.gitignore`, `.env.example` e
+  `README.md`;
+- `app/__init__.py`, `app/config.py`, `app/database.py`, `app/models.py`,
+  `app/exceptions.py` e `app/logging_config.py`;
+- `tests/test_config.py`, `tests/test_database.py` e `tests/test_main.py`;
+- marcadores dos diretórios `data/database`, `data/temp`, `data/reports` e
+  `logs`.
 
 ### Arquivos alterados
 
-Nenhum.
+- `docs/04_HISTORICO_IMPLEMENTACOES.md`.
 
 ### Banco de dados
 
-Ainda não implementado.
+Implementado em SQLite, por padrão em `data/database/auditoria.db`, com as
+estruturas `planilha`, `checkpoint`, `versao_processada`, `alteracao`,
+`execucao_auditoria` e `erro_processamento`.
+
+A identidade de `planilha` utiliza a composição `site_id`, `drive_id` e
+`drive_item_id`; o nome permanece descritivo. Essa composição preserva o
+contexto técnico até a validação real prevista para a Fase 4.
 
 ### Testes executados
 
-Nenhum.
+Comando:
 
-### Resultado dos testes
+`pytest -q`
 
-Não aplicável.
+Resultado:
+
+`8 passed in 0.08s`
+
+Comando:
+
+`AUDIT_DATABASE_PATH=/tmp/auditoria-f1.db AUDIT_LOG_PATH=/tmp/auditoria-f1.log python main.py`
+
+Resultado:
+
+aplicação finalizada com código 0; banco e log não vazios foram criados nos
+caminhos configurados.
+
+Comandos adicionais:
+
+- `python -m compileall -q app main.py tests` — concluído com código 0;
+- `git diff --check` — concluído sem erros.
+
+### Critérios de aceite
+
+[x] projeto Python executável;
+
+[x] nenhuma dependência de Node.js;
+
+[x] banco SQLite criado automaticamente;
+
+[x] todas as tabelas oficiais existentes;
+
+[x] relacionamentos básicos e integridade referencial funcionais;
+
+[x] proteção essencial contra duplicidade implementada;
+
+[x] testes da camada de persistência aprovados;
+
+[x] histórico atualizado.
 
 ### Commits
 
-Nenhum.
+`4e80575` — Implementa fundação e banco da trilha de auditoria.
+
+O segundo commit encerra a fase com esta atualização factual do histórico; seu
+identificador é informado no relatório da execução, pois um commit não pode
+registrar o próprio hash em seu conteúdo.
 
 ### Decisões técnicas
 
-Nenhuma decisão adicional registrada.
+- utilização exclusiva da biblioteca padrão `sqlite3` na persistência, evitando
+  dependência e abstração prematura;
+- habilitação de `PRAGMA foreign_keys` em toda conexão;
+- criação idempotente por `CREATE TABLE/INDEX IF NOT EXISTS`;
+- credenciais não são carregadas nem necessárias na Fase 1.
 
 ### Problemas encontrados
 
-Nenhum.
+A primeira coleta de testes falhou porque o executável `pytest` do ambiente não
+incluiu a raiz do projeto no caminho de importação. Foi adicionado `pytest.ini`
+com `pythonpath = .`; a execução posterior passou integralmente.
+
+Nenhum bloqueio permanece.
 
 ### Pendências
 
-Executar a Fase 1 conforme:
-
-`03_PLANO_DE_DESENVOLVIMENTO.md`
+Nenhuma pendência da Fase 1.
 
 ### Próximo passo
 
-Iniciar F1 somente após autorização do responsável pelo projeto.
+F2 — Motor Excel e Comparação, somente após autorização do responsável pelo
+projeto.
 
 ---
 
@@ -882,20 +942,20 @@ A presença nesta seção não significa autorização para implementação.
 
 **Versão planejada:** V1
 
-**Fase atual:** Preparação concluída
+**Fase atual:** F1 — Fundação e Banco de Auditoria concluída
 
-**Implementação:** Ainda não iniciada
+**Implementação:** Fundação executável e persistência SQLite implementadas
 
-**Fases concluídas:** 0/6
+**Fases concluídas:** 1/6
 
-**Commits de implementação:** 0
+**Commits da Fase 1:** 2 (incluindo o encerramento documental)
 
 **Bloqueios:** 0
 
 **Próxima ação:**
 
-Iniciar F1 — Fundação e Banco de Auditoria, após autorização do
-responsável pelo projeto.
+Iniciar F2 — Motor Excel e Comparação somente após autorização do responsável
+pelo projeto.
 
 ---
 
