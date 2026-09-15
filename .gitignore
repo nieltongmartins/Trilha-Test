@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 .env
 
+# Planilhas criadas programaticamente pelos testes (use `git add -f` se uma
+# fixture binária excepcional precisar ser versionada de forma intencional).
+/tests/**/*.xlsx
+
 data/database/*.db
 data/database/*.db-*
 data/temp/*

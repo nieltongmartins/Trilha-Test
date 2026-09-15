@@ -14,6 +14,7 @@ def test_reader_preserves_formulas_values_and_sheets(
     assert snapshot["Resumo"] == {
         "A1": 15,
         "B2": "OK",
+        "C3": "Pendente",
         "D4": 0,
         "E5": False,
         "F6": "=SUM(A1:A20)",

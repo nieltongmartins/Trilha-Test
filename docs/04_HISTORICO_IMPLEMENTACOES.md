@@ -116,7 +116,7 @@ Utilizar:
 | Fase | Descrição | Status | Commits |
 |---|---|---|---:|
 | F1 | Fundação e Banco de Auditoria | 🟢 CONCLUÍDA | 2 |
-| F2 | Motor Excel e Comparação | 🔴 BLOQUEADA | 3 |
+| F2 | Motor Excel e Comparação | 🟢 CONCLUÍDA | 4 |
 | F3 | Auditor Local Incremental | ⬜ NÃO INICIADA | 0 |
 | F4 | Microsoft Graph / SharePoint | ⬜ NÃO INICIADA | 0 |
 | F5 | Interface e Relatório | ⬜ NÃO INICIADA | 0 |
@@ -128,19 +128,19 @@ Utilizar:
 
 Fases concluídas:
 
-1 de 6
+2 de 6
 
 Progresso funcional inicial:
 
-Fase 1 concluída.
+Fases 1 e 2 concluídas.
 
 Fase atual:
 
-F2 — Motor Excel e Comparação bloqueada na validação por indisponibilidade da dependência no ambiente.
+F2 — Motor Excel e Comparação concluída; nenhuma fase nova autorizada.
 
 Próxima fase prevista:
 
-F2 — instalar as dependências e executar os testes obrigatórios; não iniciar F3.
+F3 — Auditor Local Incremental, aguardando autorização expressa.
 
 ---
 
@@ -288,13 +288,14 @@ projeto.
 
 ## F2 — Motor Excel e Comparação
 
-**Status:** 🔴 BLOQUEADA
+**Status:** 🟢 CONCLUÍDA
 
 **Data de início:** 15/09/2026
 
-**Data de conclusão:** —
+**Data de conclusão:** 15/09/2026
 
-**Quantidade de commits:** 3 (implementação, registro do bloqueio e ajuste das fixtures)
+**Quantidade de commits:** 4 (incluindo ajuste corretivo solicitado após a
+integração da fase)
 
 ### Implementado
 
@@ -308,6 +309,9 @@ projeto.
 - geração temporária de quatro versões `.xlsx` controladas, sem binários
   versionados, cobrindo fórmulas, múltiplas abas, versão sem diferenças e os
   tipos de alteração obrigatórios;
+- descarte explícito dessas versões ao encerrar a fixture e regra de
+  `.gitignore` limitada à árvore de testes, sem bloquear planilhas reais em
+  outros diretórios;
 - testes automatizados do reader e comparator.
 
 ### Arquivos criados
@@ -325,29 +329,9 @@ Comando:
 
 `pytest -q`
 
-Resultado:
+Resultado final após a disponibilização de `openpyxl 3.1.5`:
 
-falha na coleta de `test_reader.py` e `test_comparator.py`:
-`ModuleNotFoundError: No module named 'openpyxl'`.
-
-Comando:
-
-`python -m pip install -r requirements.txt`
-
-Resultado:
-
-falha por restrição de rede do ambiente (`403 Forbidden` no túnel), sem pacote
-`openpyxl` disponível no cache local.
-
-Comandos adicionais:
-
-- `pytest -q tests/test_config.py tests/test_database.py tests/test_main.py` —
-  `8 passed in 0.08s`;
-- teste isolado das três comparações que não leem arquivos, com módulo mínimo
-  temporário apenas para liberar a importação sem `openpyxl` — `3 passed, 3
-  deselected in 0.02s`;
-- `python -m compileall -q app main.py tests` — concluído com código 0;
-- `git diff --check` — concluído sem erros.
+`17 passed`.
 
 ### Critérios de aceite
 
@@ -363,51 +347,33 @@ Comandos adicionais:
 
 [x] resultado determinístico implementado e coberto por teste;
 
-[ ] testes automatizados executados com as dependências instaladas.
+[x] testes automatizados executados com as dependências instaladas.
 
 ### Commits
 
-`f3b5d9f` — Implementa leitura determinística de planilhas Excel.
+`dfafb72` — Substitui fixtures binárias por geração em teste (integra os três
+commits originalmente planejados para a Fase 2).
 
-`2e60250` — Implementa comparação Excel e registra bloqueio da Fase 2.
-
-O terceiro commit remove os binários do Git, passa a gerar as fixtures durante
-os testes e atualiza este registro; seu identificador é informado no relatório
+O quarto commit é um ajuste corretivo solicitado após a integração: restringe
+o ignore aos testes, garante o descarte explícito dos temporários, alinha a
+documentação e conclui a validação. Seu identificador é informado no relatório
 da execução, pois um commit não pode registrar o próprio hash em seu conteúdo.
 
 ### Problemas encontrados
 
-## BLOQUEIO
-
-**Fase:** F2 — Motor Excel e Comparação
-
-**Problema:** os testes obrigatórios não podem ser coletados no ambiente atual.
-
-**Causa:** `openpyxl` não está instalado e a rede configurada rejeita o acesso ao
-índice de pacotes com HTTP 403. Não existe wheel no cache local.
-
-**Impacto:** conforme a governança, a F2 não pode ser marcada como concluída até
-que os testes automatizados sejam executados com sucesso.
-
-**Alternativas:**
-
-1. disponibilizar `openpyxl>=3.1,<4` no ambiente ou no cache de pacotes;
-2. executar `python -m pip install -r requirements.txt` em ambiente com acesso ao
-   índice e então executar `pytest -q`.
-
-**Recomendação:** instalar a dependência declarada e retomar exclusivamente a
-validação da F2.
+O bloqueio anterior foi resolvido com a disponibilização de `openpyxl 3.1.5`.
+Na primeira execução integral, o teste do reader revelou que a asserção não
+incluía `C3 = "Pendente"`, embora esse valor estivesse corretamente presente na
+versão 0.85 para formar o cenário DEL seguinte. A expectativa foi corrigida e a
+suíte integral passou.
 
 ### Pendências
 
-- instalar as dependências;
-- executar a suíte completa;
-- corrigir eventuais falhas reais;
-- somente então concluir a F2.
+Nenhuma pendência da Fase 2.
 
 ### Próximo passo
 
-Retomar a F2 para executar os testes obrigatórios. F3 não autorizada.
+Aguardar autorização expressa para a F3. Não iniciar a fase seguinte.
 
 ---
 
@@ -1026,21 +992,21 @@ A presença nesta seção não significa autorização para implementação.
 
 **Versão planejada:** V1
 
-**Fase atual:** F2 — Motor Excel e Comparação bloqueada na validação
+**Fase atual:** F2 — Motor Excel e Comparação concluída
 
-**Implementação:** reader e comparator implementados; validação integral da F2
-pendente por indisponibilidade de `openpyxl` no ambiente
+**Implementação:** reader e comparator implementados e validados pela suíte
+integral; fixtures Excel geradas e descartadas durante os testes
 
-**Fases concluídas:** 1/6
+**Fases concluídas:** 2/6
 
-**Commits da Fase 2:** 3 (incluindo o ajuste das fixtures de teste)
+**Commits da Fase 2:** 4 (o quarto é o ajuste corretivo solicitado após a
+integração)
 
-**Bloqueios:** 1
+**Bloqueios:** 0
 
 **Próxima ação:**
 
-Instalar `openpyxl`, executar os testes obrigatórios e concluir a F2. Não
-iniciar a F3.
+Aguardar autorização expressa para iniciar a F3.
 
 ---
 

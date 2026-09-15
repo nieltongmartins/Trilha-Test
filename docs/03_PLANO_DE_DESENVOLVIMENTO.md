@@ -387,13 +387,11 @@ Deverá comparar:
 
 ## 8.5 Cenários obrigatórios
 
-Criar arquivos controlados de teste.
+Gerar arquivos controlados de teste programaticamente com `openpyxl`, usando
+`pytest/tmp_path` ou mecanismo temporário equivalente. Os arquivos devem ser
+descartados após os testes e não devem ser versionados como fixtures binárias.
 
-Exemplo:
-
-`tests/fixtures/CQL028/`
-
-Versões simuladas:
+Versões simuladas durante a execução:
 
 `0.84.xlsx`
 
