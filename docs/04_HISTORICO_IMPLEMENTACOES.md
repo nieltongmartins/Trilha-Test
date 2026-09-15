@@ -116,7 +116,7 @@ Utilizar:
 | Fase | Descrição | Status | Commits |
 |---|---|---|---:|
 | F1 | Fundação e Banco de Auditoria | 🟢 CONCLUÍDA | 2 |
-| F2 | Motor Excel e Comparação | ⬜ NÃO INICIADA | 0 |
+| F2 | Motor Excel e Comparação | 🔴 BLOQUEADA | 3 |
 | F3 | Auditor Local Incremental | ⬜ NÃO INICIADA | 0 |
 | F4 | Microsoft Graph / SharePoint | ⬜ NÃO INICIADA | 0 |
 | F5 | Interface e Relatório | ⬜ NÃO INICIADA | 0 |
@@ -136,11 +136,11 @@ Fase 1 concluída.
 
 Fase atual:
 
-F1 — Fundação e Banco de Auditoria concluída.
+F2 — Motor Excel e Comparação bloqueada na validação por indisponibilidade da dependência no ambiente.
 
 Próxima fase prevista:
 
-F2 — Motor Excel e Comparação, aguardando autorização.
+F2 — instalar as dependências e executar os testes obrigatórios; não iniciar F3.
 
 ---
 
@@ -288,42 +288,126 @@ projeto.
 
 ## F2 — Motor Excel e Comparação
 
-**Status:** ⬜ NÃO INICIADA
+**Status:** 🔴 BLOQUEADA
 
-**Data de início:** —
+**Data de início:** 15/09/2026
 
 **Data de conclusão:** —
 
-**Quantidade de commits:** 0
-
-### Objetivo
-
-Implementar leitura de arquivos Excel, snapshots e comparação
-determinística entre versões consecutivas.
+**Quantidade de commits:** 3 (implementação, registro do bloqueio e ajuste das fixtures)
 
 ### Implementado
 
-Ainda não iniciado.
+- leitor `.xlsx` somente leitura com `openpyxl`, `data_only=False`, fechamento
+  garantido da pasta de trabalho e snapshots por aba/endereço;
+- descarte exclusivo de valores `None`, preservando zero e `False`;
+- comparador puro com resultados imutáveis para ADD, DEL e MOD;
+- representação determinística de abas adicionadas/removidas pelas alterações de
+  suas células e ordenação estável por aba, linha e coluna;
+- distinção explícita entre booleanos e números;
+- geração temporária de quatro versões `.xlsx` controladas, sem binários
+  versionados, cobrindo fórmulas, múltiplas abas, versão sem diferenças e os
+  tipos de alteração obrigatórios;
+- testes automatizados do reader e comparator.
+
+### Arquivos criados
+
+- `app/excel/__init__.py`;
+- `app/excel/reader.py`;
+- `app/excel/comparator.py`;
+- `tests/test_reader.py`;
+- `tests/test_comparator.py`;
+- `tests/conftest.py`.
 
 ### Testes executados
 
-Nenhum.
+Comando:
+
+`pytest -q`
+
+Resultado:
+
+falha na coleta de `test_reader.py` e `test_comparator.py`:
+`ModuleNotFoundError: No module named 'openpyxl'`.
+
+Comando:
+
+`python -m pip install -r requirements.txt`
+
+Resultado:
+
+falha por restrição de rede do ambiente (`403 Forbidden` no túnel), sem pacote
+`openpyxl` disponível no cache local.
+
+Comandos adicionais:
+
+- `pytest -q tests/test_config.py tests/test_database.py tests/test_main.py` —
+  `8 passed in 0.08s`;
+- teste isolado das três comparações que não leem arquivos, com módulo mínimo
+  temporário apenas para liberar a importação sem `openpyxl` — `3 passed, 3
+  deselected in 0.02s`;
+- `python -m compileall -q app main.py tests` — concluído com código 0;
+- `git diff --check` — concluído sem erros.
+
+### Critérios de aceite
+
+[x] Reader implementado;
+
+[x] fórmulas preservadas por configuração `data_only=False`;
+
+[x] ADD, DEL e MOD implementados;
+
+[x] zero e False tratados explicitamente;
+
+[x] múltiplas abas e snapshots iguais cobertos por testes;
+
+[x] resultado determinístico implementado e coberto por teste;
+
+[ ] testes automatizados executados com as dependências instaladas.
 
 ### Commits
 
-Nenhum.
+`f3b5d9f` — Implementa leitura determinística de planilhas Excel.
+
+`2e60250` — Implementa comparação Excel e registra bloqueio da Fase 2.
+
+O terceiro commit remove os binários do Git, passa a gerar as fixtures durante
+os testes e atualiza este registro; seu identificador é informado no relatório
+da execução, pois um commit não pode registrar o próprio hash em seu conteúdo.
 
 ### Problemas encontrados
 
-Nenhum.
+## BLOQUEIO
+
+**Fase:** F2 — Motor Excel e Comparação
+
+**Problema:** os testes obrigatórios não podem ser coletados no ambiente atual.
+
+**Causa:** `openpyxl` não está instalado e a rede configurada rejeita o acesso ao
+índice de pacotes com HTTP 403. Não existe wheel no cache local.
+
+**Impacto:** conforme a governança, a F2 não pode ser marcada como concluída até
+que os testes automatizados sejam executados com sucesso.
+
+**Alternativas:**
+
+1. disponibilizar `openpyxl>=3.1,<4` no ambiente ou no cache de pacotes;
+2. executar `python -m pip install -r requirements.txt` em ambiente com acesso ao
+   índice e então executar `pytest -q`.
+
+**Recomendação:** instalar a dependência declarada e retomar exclusivamente a
+validação da F2.
 
 ### Pendências
 
-Aguardar conclusão e aprovação da Fase 1.
+- instalar as dependências;
+- executar a suíte completa;
+- corrigir eventuais falhas reais;
+- somente então concluir a F2.
 
 ### Próximo passo
 
-Não autorizado.
+Retomar a F2 para executar os testes obrigatórios. F3 não autorizada.
 
 ---
 
@@ -942,20 +1026,21 @@ A presença nesta seção não significa autorização para implementação.
 
 **Versão planejada:** V1
 
-**Fase atual:** F1 — Fundação e Banco de Auditoria concluída
+**Fase atual:** F2 — Motor Excel e Comparação bloqueada na validação
 
-**Implementação:** Fundação executável e persistência SQLite implementadas
+**Implementação:** reader e comparator implementados; validação integral da F2
+pendente por indisponibilidade de `openpyxl` no ambiente
 
 **Fases concluídas:** 1/6
 
-**Commits da Fase 1:** 2 (incluindo o encerramento documental)
+**Commits da Fase 2:** 3 (incluindo o ajuste das fixtures de teste)
 
-**Bloqueios:** 0
+**Bloqueios:** 1
 
 **Próxima ação:**
 
-Iniciar F2 — Motor Excel e Comparação somente após autorização do responsável
-pelo projeto.
+Instalar `openpyxl`, executar os testes obrigatórios e concluir a F2. Não
+iniciar a F3.
 
 ---
 
