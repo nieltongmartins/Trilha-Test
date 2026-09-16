@@ -163,6 +163,37 @@ foi encontrado; não foi necessária alteração na arquitetura nem no código d
 **Próxima tarefa:** geração de relatório, pendente de nova autorização. Não foi
 executada nesta sessão.
 
+## Sexta tarefa da F6 — geração de relatório
+
+**Status:** concluída. Um teste automatizado determinístico criou um SQLite temporário
+com uma planilha identificada por site, drive e DriveItem ID, uma execução, três pares
+de versões processadas (incluindo uma versão sem alterações) e três alterações: 1 ADD,
+1 MOD e 1 DEL. Os dados cobriram abas e células distintas, valores anteriores e novos,
+fórmulas persistidas, autores, timestamps e comentários de versão.
+
+Os arquivos XLSX históricos simulados foram excluídos antes da geração. Dois relatórios
+foram então produzidos em diretórios diferentes consultando exclusivamente o SQLite, e
+o conteúdo de todas as células foi comparado para comprovar regeneração determinística.
+Foram validadas as abas `RESUMO`, `VERSOES` e `TRILHA`, a identidade da planilha, as
+versões em ordem persistida, a versão sem alterações, todos os metadados e valores, os
+totais (3 versões, 3 alterações, ADD=1, MOD=1 e DEL=1), filtros e painéis congelados.
+
+**Comando específico executado:**
+
+`pytest -q tests/test_report_service.py`
+
+**Resultado:** `3 passed in 0.36s`. No cenário temporário, `PRAGMA integrity_check`
+retornou `ok` e `PRAGMA foreign_key_check` não retornou violações. Não houve acesso ao
+SharePoint e não foi necessária alteração no código de produção nem na arquitetura.
+
+O commit desta tarefa excede o limite ordinário da F6 exclusivamente porque o ambiente
+de execução impõe commit e criação de pull request; essa exigência superior foi
+atendida sem fragmentar a entrega. O hash é informado no relatório da sessão, pois o
+commit não pode registrar o próprio identificador.
+
+**Próxima tarefa:** múltiplas planilhas controladas, pendente de nova autorização. Não
+foi executada nesta sessão.
+
 ---
 
 # IMPLEMENTAÇÃO DA F5 — 16/09/2026
@@ -1079,9 +1110,10 @@ preparação da V1 para homologação.
 
 ### Implementado
 
-Cinco primeiras tarefas de Testes Finais: testes unitários isolados, testes de
+Seis primeiras tarefas de Testes Finais: testes unitários isolados, testes de
 integração automatizados entre os componentes, reexecução idempotente após reabertura
-do banco, auditoria incremental a partir do checkpoint e falha/retomada transacional.
+do banco, auditoria incremental a partir do checkpoint, falha/retomada transacional e
+geração determinística de relatório exclusivamente a partir do SQLite.
 
 ### Testes executados
 
@@ -1089,7 +1121,7 @@ Testes unitários de configuração, persistência, reader, comparator, fonte Sh
 com fakes, relatório e interface com fakes — aprovados. Seleção de três testes de
 integração automatizados — `3 passed in 0.47s`. Reexecução idempotente e invariante
 read-only do provider — `2 passed in 0.35s`. Auditoria incremental — `1 passed in
-0.39s`; falha/retomada — `1 passed in 0.49s`.
+0.39s`; falha/retomada — `1 passed in 0.49s`; relatório — `3 passed in 0.36s`.
 
 ### Commits
 
@@ -1113,7 +1145,7 @@ Demais tarefas da F6, respeitando a ordem oficial e uma autorização por vez.
 
 ### Próximo passo
 
-Geração de relatório. Não executar sem nova autorização.
+Múltiplas planilhas controladas. Não executar sem nova autorização.
 
 ---
 
@@ -1613,12 +1645,12 @@ A presença nesta seção não significa autorização para implementação.
 
 **Fase atual:** F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO — cinco tarefas concluídas
+**Status:** 🟡 EM ANDAMENTO — seis tarefas concluídas
 
 **Implementação:** núcleo local, aquisição SharePoint Edge/REST, interface, migração
 SQLite e relatório validados no ambiente corporativo real; testes unitários, testes
-de integração automatizados, reexecução idempotente, auditoria incremental e
-falha/retomada da F6 concluídos.
+de integração automatizados, reexecução idempotente, auditoria incremental,
+falha/retomada e geração de relatório da F6 concluídos.
 
 **Fases concluídas:** 5/6
 
@@ -1630,7 +1662,7 @@ falha/retomada da F6 concluídos.
 
 **Próxima ação:**
 
-Solicitar autorização para a próxima tarefa da F6: geração de relatório. O limite
+Solicitar autorização para a próxima tarefa da F6: múltiplas planilhas controladas. O limite
 ordinário de três commits da fase foi ultrapassado por determinação do ambiente desta
 execução.
 
