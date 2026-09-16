@@ -1,6 +1,11 @@
 # PROJETO: AUDITOR DE PLANILHAS SHAREPOINT
 
 
+# ESTADO OFICIAL APÓS A F4
+
+F4 está concluída com Selenium + Edge visível + autenticação manual + SharePoint REST read-only. A fonte descobre `.xlsx` recursivamente em escopos configurados, usa `UniqueId` contextualizado como identidade, reúne `/Versions` e a versão atual obtida separadamente, baixa histórico e atual pelos respectivos endpoints `/$value`, valida Open XML e entrega ao motor incremental existente. Cookies, tokens, senhas, PRT e transferência de sessão são proibidos. Graph é opcional/futuro. F5 não foi iniciada e depende de autorização expressa.
+
+
 
 ======================================================================
 DIRETRIZ ATUAL DA F4 — SHAREPOINT REST NO EDGE

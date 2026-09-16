@@ -74,7 +74,10 @@ class Settings:
         if not self.sharepoint_scope_paths:
             missing.append("SHAREPOINT_SCOPE_PATHS")
         if missing:
-            raise ValueError("Configuração SharePoint incompleta: " + ", ".join(missing))
+            raise ValueError(
+                "Configuração SharePoint incompleta: " + ", ".join(missing)
+            )
+        assert self.sharepoint_site_url is not None
         return self.sharepoint_site_url, self.sharepoint_scope_paths
 
     def create_directories(self) -> None:
