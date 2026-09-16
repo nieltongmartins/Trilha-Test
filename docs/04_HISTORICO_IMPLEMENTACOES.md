@@ -5,7 +5,28 @@
 **Versão:** 1.1
 **Status:** Oficial
 **Data de criação:** 15/09/2026
-**Última revisão:** 15/09/2026
+**Última revisão:** 16/09/2026
+
+---
+
+# AJUSTE TRANSVERSAL DA ESTRATÉGIA DE TESTES XLSX
+
+Em 16/09/2026, antes da continuidade da F4, a estratégia de testes foi
+revalidada para manter planilhas binárias fora do versionamento. As quatro
+versões controladas (`0.84.xlsx` a `0.87.xlsx`) são construídas com `openpyxl`
+sob `pytest/tmp_path` e removidas no encerramento da fixture. Os cenários
+continuam cobrindo ADD, DEL, MOD, fórmulas, múltiplas abas, célula vazia
+explícita, zero, `False` e versões sem alterações.
+
+Foi confirmado que o índice Git não contém arquivos `.xlsx`. A regra de
+ignore permanece deliberadamente restrita à árvore `tests/`, permitindo que
+uma planilha que venha a ser um artefato real do projeto em outra área seja
+versionada normalmente (e mantendo disponível a inclusão intencional com
+`git add -f` em uma exceção futura).
+
+Este é um ajuste transversal de testes e documentação: não altera o escopo
+funcional nem a contagem de commits das fases. A F4 segue como fase atual, e a
+F5 não foi iniciada.
 
 ---
 
