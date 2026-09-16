@@ -9,6 +9,21 @@
 
 ---
 
+# ENCERRAMENTO DA F5 E INÍCIO AUTORIZADO DA F6 — 16/09/2026
+
+A validação real da F5 foi aceita no Windows corporativo com SharePoint Online,
+Selenium/Edge e o SQLite existente migrado sem recriação. A F5 está concluída. Foi
+autorizado iniciar a F6, executando estritamente uma tarefa por vez na ordem deste
+plano. A primeira tarefa é **testes unitários**, primeiro item de Testes Finais.
+
+O cenário de capacidade a validar na F6 passa a considerar aproximadamente 2.000
+planilhas, algumas com mais de 3.000 versões, e potencialmente milhões de alterações,
+sempre em um banco canônico compartilhado. Isso não autoriza trocar o SQLite sem
+evidência de testes. Site e escopos SharePoint permanecem configurações variáveis e não
+devem ser fixados no código.
+
+---
+
 # INÍCIO AUTORIZADO DA F5 — 16/09/2026
 
 A solicitação expressa do responsável para identificar e executar a próxima fase
@@ -1359,15 +1374,18 @@ Não adicionar funcionalidades grandes nesta fase.
 
 # 38. TESTES FINAIS
 
-Executar:
+Executar, nesta ordem e como tarefas independentes:
 
-- testes unitários;
-- testes de integração;
-- reexecução;
-- auditoria incremental;
-- falha e retomada;
-- geração de relatório;
-- múltiplas planilhas controladas.
+- [x] testes unitários;
+- [ ] testes de integração;
+- [ ] reexecução;
+- [ ] auditoria incremental;
+- [ ] falha e retomada;
+- [ ] geração de relatório;
+- [ ] múltiplas planilhas controladas.
+
+O primeiro item foi executado após a autorização de início da F6. Os itens seguintes
+continuam pendentes e não estão implicitamente autorizados pela conclusão do anterior.
 
 ---
 
@@ -1716,34 +1734,30 @@ FASE 1 — CONCLUÍDA
 FASE 2 — CONCLUÍDA
 FASE 3 — CONCLUÍDA
 FASE 4 — CONCLUÍDA
-FASE 5 — EM ANDAMENTO
-FASE 6 — NÃO INICIADA
+FASE 5 — CONCLUÍDA
+FASE 6 — EM ANDAMENTO (PRIMEIRA TAREFA CONCLUÍDA)
 
-Situação da Fase 4:
+Situação atual:
 
-A estratégia Graph encontrou restrição corporativa; a alternativa Edge/REST foi validada, implementada e concluída.
+A F5 foi aceita em ambiente corporativo real. A F6 foi iniciada por autorização
+expressa e concluiu somente a primeira tarefa do backlog, testes unitários.
 
-A arquitetura e o plano foram revisados para permitir investigação de
-mecanismo alternativo suportado e autorizado de aquisição SharePoint.
-
-A Fase 5 permanece não autorizada enquanto a Fase 4 revisada não atingir
-seus critérios de aceite ou receber decisão formal diferente do
-responsável pelo projeto.
+Os requisitos de capacidade e operação com várias planilhas em um banco canônico estão
+registrados para validação posterior na ordem do backlog da F6.
 
 Progresso da V1:
 
-0%
+5 de 6 fases concluídas; F6 em andamento.
 
 ---
 
 # 55. PRÓXIMA AÇÃO OFICIAL
 
-Próxima atividade: validar manualmente a interface da F5 em ambiente gráfico com
-Edge, sem iniciar a F6.
+Próxima atividade: testes de integração da F6. Não executar sem nova autorização.
 
 Não implementar importação manual como solução oficial sem nova decisão.
 
-Não iniciar Fase 5.
+Não executar a próxima tarefa da F6 sem autorização expressa.
 
 Não iniciar a F6 sem autorização expressa.
 

@@ -1354,6 +1354,17 @@ validação da alternativa escolhida.
 O sistema deverá ser projetado para crescer, mas sem otimização
 prematura.
 
+O requisito de capacidade de produção considera aproximadamente 2.000 planilhas,
+algumas com mais de 3.000 versões, e potencialmente milhões de alterações. Um único
+banco SQLite canônico deverá atender às várias planilhas, mantendo por identidade os
+respectivos históricos, checkpoints, execuções e erros. A adoção de outro banco exige
+evidência obtida por medição; não é uma decisão preventiva.
+
+A validação de capacidade deverá medir índices e consultas, crescimento do banco,
+memória, relatórios, processamento inicial de históricos extensos, processamento
+incremental e lotes de muitas planilhas. Os gargalos observados, e não apenas o volume
+estimado, orientarão qualquer otimização.
+
 Medidas iniciais:
 
 - processamento incremental;

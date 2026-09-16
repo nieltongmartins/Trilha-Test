@@ -860,11 +860,25 @@ Somente depois da validação da estratégia de aquisição o processamento em e
 
 # 33. ESCALABILIDADE
 
-O projeto deverá considerar utilização futura com:
+O cenário operacional de referência informado pelo proprietário deverá considerar:
 
-- centenas de planilhas;
-- centenas ou milhares de versões;
-- grande quantidade de alterações.
+- aproximadamente 2.000 planilhas;
+- planilhas com mais de 3.000 versões;
+- potencialmente milhões de alterações célula a célula.
+
+Todas as planilhas deverão compartilhar um único banco canônico, sem exigir uma
+instância separada da aplicação para cada planilha. Identidade, versões processadas,
+alterações, checkpoint, execuções e erros deverão permanecer segregados por planilha.
+
+A capacidade deverá ser comprovada posteriormente por testes de carga e desempenho
+representativos, incluindo índices, consultas, crescimento do banco, memória,
+relatórios, carga inicial de históricos extensos, processamento incremental e operação
+em lote. SQLite permanece sendo a tecnologia da V1 e não deverá ser substituído
+preventivamente sem evidência técnica.
+
+O site e os escopos auditados deverão continuar configuráveis. Em particular,
+`SHAREPOINT_SITE_URL` e `SHAREPOINT_SCOPE_PATHS` não poderão ser substituídos por
+caminhos fixos no código, pois o escopo operacional pode mudar entre execuções.
 
 Entretanto, otimizações complexas não deverão ser implementadas
 prematuramente.
