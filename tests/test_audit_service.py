@@ -259,37 +259,140 @@ def test_incremental_audit_keeps_base_and_processes_only_new_pairs(
 def test_failure_rolls_back_pair_keeps_last_checkpoint_and_can_resume(
     database: Database, local_history: list[tuple[VersionInfo, Path]], tmp_path: Path,
 ) -> None:
-    AuditService(database, source(local_history)).audit(SPREADSHEET)
-    extended = list(local_history)
-    for number in ("1.00", "1.01"):
+    # Consolida o estado anterior até 1.00, que será o checkpoint válido da prova.
+    initial_history = list(local_history)
+    initial_path = tmp_path / "1.00.xlsx"
+    make_workbook(initial_path, {"Dados": {"A1": "1.00"}})
+    initial_history.append((version("1.00"), initial_path))
+    AuditService(database, source(initial_history)).audit(SPREADSHEET)
+
+    extended = list(initial_history)
+    for number in ("1.01", "1.02", "1.03"):
         path = tmp_path / f"{number}.xlsx"
         make_workbook(path, {"Dados": {"A1": number}})
         extended.append((version(number), path))
-    missing_path = tmp_path / "1.02.xlsx"
-    extended.append((version("1.02"), missing_path))
 
-    failed = AuditService(database, source(extended)).audit(SPREADSHEET)
+    # A falha é injetada no último passo da unidade transacional oficial, depois
+    # dos INSERTs de versão/alterações e antes da confirmação do checkpoint 1.02.
+    # Isso comprova que dados já escritos pela comparação também sofrem rollback.
+    connection = database.connection
+    connection.execute(
+        """
+        CREATE TRIGGER fail_checkpoint_102
+        BEFORE UPDATE ON checkpoint
+        WHEN NEW.versao_numero = '1.02'
+        BEGIN
+            SELECT RAISE(ABORT, 'falha controlada ao atualizar checkpoint 1.02');
+        END
+        """
+    )
+    connection.commit()
+    failing_source = source(extended)
+    acquired_before_failure: list[str] = []
+    original_get_version = failing_source.get_version
+
+    def record_failed_attempt(
+        spreadsheet: SpreadsheetInfo, item: VersionInfo,
+    ) -> Path:
+        acquired_before_failure.append(item.number)
+        return original_get_version(spreadsheet, item)
+
+    failing_source.get_version = record_failed_attempt  # type: ignore[method-assign]
+    failed = AuditService(database, failing_source).audit(SPREADSHEET)
 
     assert failed.status is AuditExecutionStatus.FAILED
-    assert (failed.processed_versions, failed.final_version) == (2, "1.01")
-    assert database.connection.execute(
-        "SELECT versao_numero FROM checkpoint"
-    ).fetchone()[0] == "1.01"
-    execution = database.connection.execute(
-        "SELECT status, versoes_processadas FROM execucao_auditoria ORDER BY id DESC"
+    assert (
+        failed.processed_versions,
+        failed.changes,
+        failed.initial_checkpoint,
+        failed.final_version,
+    ) == (1, 1, "1.00", "1.01")
+    assert acquired_before_failure == ["1.00", "1.01", "1.02"]
+    assert connection.execute(
+        "SELECT versao_id, versao_numero FROM checkpoint"
+    ).fetchone()[:] == ("version-101", "1.01")
+    failed_execution = connection.execute(
+        """SELECT id, checkpoint_inicial, versao_final, versoes_processadas,
+                  alteracoes_encontradas, status, fim, mensagem
+           FROM execucao_auditoria ORDER BY id DESC"""
     ).fetchone()
-    assert tuple(execution) == ("FALHA", 2)
-    error = database.connection.execute(
-        "SELECT versao_anterior, versao_atual, tipo_erro FROM erro_processamento"
+    assert tuple(failed_execution[1:6]) == ("1.00", "1.01", 1, 1, "FALHA")
+    assert failed_execution[6] is not None
+    assert failed_execution[7] == "falha controlada ao atualizar checkpoint 1.02"
+    error = connection.execute(
+        """SELECT execucao_id, versao_anterior, versao_atual, tipo_erro, mensagem
+           FROM erro_processamento"""
     ).fetchone()
-    assert tuple(error) == ("1.01", "1.02", "FileNotFoundError")
-    assert not database.connection.execute(
-        "SELECT 1 FROM versao_processada WHERE versao_atual_numero = '1.02'"
+    assert tuple(error) == (
+        failed_execution[0], "1.01", "1.02", "IntegrityError",
+        "falha controlada ao atualizar checkpoint 1.02",
+    )
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            """SELECT versao_anterior_numero, versao_atual_numero
+               FROM versao_processada ORDER BY id"""
+        )
+    ][-2:] == [("0.99", "1.00"), ("1.00", "1.01")]
+    assert not connection.execute(
+        """SELECT 1 FROM versao_processada
+           WHERE versao_atual_numero IN ('1.02', '1.03')"""
     ).fetchone()
+    assert not connection.execute(
+        """SELECT 1 FROM alteracao a JOIN versao_processada v
+               ON v.id = a.versao_processada_id
+           WHERE v.versao_atual_numero IN ('1.02', '1.03')"""
+    ).fetchone()
+    assert scalar(connection, "SELECT COUNT(*) FROM alteracao") == 7
+    assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
-    make_workbook(missing_path, {"Dados": {"A1": "recuperado"}})
-    resumed = AuditService(database, source(extended)).audit(SPREADSHEET)
+    connection.execute("DROP TRIGGER fail_checkpoint_102")
+    connection.commit()
+    resumed_source = source(extended)
+    acquired_on_resume: list[str] = []
+    original_resume_get_version = resumed_source.get_version
+
+    def record_resume(
+        spreadsheet: SpreadsheetInfo, item: VersionInfo,
+    ) -> Path:
+        acquired_on_resume.append(item.number)
+        return original_resume_get_version(spreadsheet, item)
+
+    resumed_source.get_version = record_resume  # type: ignore[method-assign]
+    resumed = AuditService(database, resumed_source).audit(SPREADSHEET)
 
     assert resumed.status is AuditExecutionStatus.COMPLETED
-    assert (resumed.processed_versions, resumed.final_version) == (1, "1.02")
-    assert scalar(database.connection, "SELECT COUNT(*) FROM versao_processada") == 6
+    assert (
+        resumed.processed_versions,
+        resumed.changes,
+        resumed.initial_checkpoint,
+        resumed.final_version,
+    ) == (2, 2, "1.01", "1.03")
+    assert acquired_on_resume == ["1.01", "1.02", "1.03"]
+    assert scalar(connection, "SELECT COUNT(*) FROM versao_processada") == 7
+    assert scalar(connection, "SELECT COUNT(*) FROM alteracao") == 9
+    assert connection.execute(
+        "SELECT versao_id, versao_numero FROM checkpoint"
+    ).fetchone()[:] == ("version-103", "1.03")
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            """SELECT versao_anterior_numero, versao_atual_numero, COUNT(*)
+               FROM versao_processada
+               GROUP BY versao_anterior_numero, versao_atual_numero
+               ORDER BY MIN(id)"""
+        )
+    ][-3:] == [
+        ("1.00", "1.01", 1), ("1.01", "1.02", 1), ("1.02", "1.03", 1),
+    ]
+    resumed_execution = connection.execute(
+        """SELECT checkpoint_inicial, versao_final, versoes_processadas,
+                  alteracoes_encontradas, status, fim, mensagem
+           FROM execucao_auditoria ORDER BY id DESC"""
+    ).fetchone()
+    assert tuple(resumed_execution[:5]) == ("1.01", "1.03", 2, 2, "CONCLUIDA")
+    assert resumed_execution[5] is not None and resumed_execution[6] is None
+    assert scalar(connection, "SELECT COUNT(*) FROM erro_processamento") == 1
+    assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

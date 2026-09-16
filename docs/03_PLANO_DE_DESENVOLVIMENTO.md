@@ -1380,11 +1380,11 @@ Executar, nesta ordem e como tarefas independentes:
 - [x] testes de integração;
 - [x] reexecução;
 - [x] auditoria incremental;
-- [ ] falha e retomada;
+- [x] falha e retomada;
 - [ ] geração de relatório;
 - [ ] múltiplas planilhas controladas.
 
-Os quatro primeiros itens foram executados, cada um após autorização própria. Os itens
+Os cinco primeiros itens foram executados, cada um após autorização própria. Os itens
 seguintes continuam pendentes e não estão implicitamente autorizados pela conclusão do
 anterior.
 
