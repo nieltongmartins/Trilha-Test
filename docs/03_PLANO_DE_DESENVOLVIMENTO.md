@@ -5,9 +5,25 @@
 **Versão:** 1.1
 **Status:** Oficial
 **Data:** 15/09/2026
-**Última revisão:** 15/09/2026
+**Última revisão:** 16/09/2026
 
 ---
+
+# ENCERRAMENTO DA F6 E DA V1 — 16/09/2026
+
+A autorização superior do responsável substituiu excepcionalmente a autorização por
+tarefa e permitiu executar, em ordem, todo o trabalho oficial restante. O inventário
+confirmou que backup (seção 43) já estava documentalmente concluído e que somente
+empacotamento (seção 44), validação integrada e reconciliação final permaneciam.
+
+O empacotamento Windows one-folder, launcher, configuração de exemplo, dependência de
+build e instruções operacionais foram implementados. A suíte final teve 52 testes
+aprovados, sem falhas ou skips; a seleção integrada teve 16 aprovados. Inicialização em
+banco novo retornou `integrity_check = ok` e nenhuma violação de foreign key. Todos os
+critérios da F6 e da definição de pronto foram atendidos.
+
+**Estado:** seis de seis fases concluídas; nenhuma tarefa oficial de implementação
+pendente. ELABORAÇÃO DA VERSÃO ATUAL CONCLUÍDA PARA UTILIZAÇÃO E TESTES REAIS.
 
 # ENCERRAMENTO DA F5 E INÍCIO AUTORIZADO DA F6 — 16/09/2026
 
@@ -1475,6 +1491,12 @@ O banco de auditoria deverá ser considerado ativo crítico.
 
 # 44. EMPACOTAMENTO
 
+**Status:** concluído em 16/09/2026. A distribuição Windows foi definida em formato
+one-folder com PyInstaller, launcher por duplo clique, configuração local não versionada
+e instruções de geração/operação. A geração final do `.exe` deve ocorrer em Windows; o
+ambiente Linux da validação não possuía acesso ao pacote PyInstaller no índice
+configurado.
+
 Avaliar distribuição simples para Windows.
 
 Se necessário, poderá ser utilizado mecanismo Python apropriado para
@@ -1489,27 +1511,27 @@ for viável disponibilizar executável.
 
 # 45. CRITÉRIOS DE ACEITE DA FASE 6
 
-[ ] testes críticos passam;
+[x] testes críticos passam;
 
-[ ] auditoria incremental está estável;
+[x] auditoria incremental está estável;
 
-[ ] falhas não corrompem checkpoint;
+[x] falhas não corrompem checkpoint;
 
 [x] logs adequados;
 
 [x] temporários controlados;
 
-[ ] relatório confiável;
+[x] relatório confiável;
 
-[ ] desempenho aceitável no cenário testado;
+[x] desempenho aceitável no cenário testado;
 
-[ ] documentação atualizada;
+[x] documentação atualizada;
 
-[ ] instruções de execução disponíveis;
+[x] instruções de execução disponíveis;
 
-[ ] nenhuma operação de escrita no SharePoint;
+[x] nenhuma operação de escrita no SharePoint;
 
-[ ] V1 pronta para homologação.
+[x] V1 pronta para homologação.
 
 ---
 
@@ -1763,36 +1785,24 @@ FASE 2 — CONCLUÍDA
 FASE 3 — CONCLUÍDA
 FASE 4 — CONCLUÍDA
 FASE 5 — CONCLUÍDA
-FASE 6 — EM ANDAMENTO (TESTES FINAIS, PERFORMANCE, LOGS, TEMPORÁRIOS, INTEGRIDADE E BACKUP CONCLUÍDOS)
+FASE 6 — CONCLUÍDA
 
 Situação atual:
 
-A F5 foi aceita em ambiente corporativo real. Na F6, os testes finais, a medição de
-performance, a revisão/fortalecimento de logs, o controle de arquivos temporários, a
-integridade por SHA-256 e a estratégia mínima de backup foram concluídos. A fase
-permanece em andamento e as tarefas
-posteriores não foram executadas.
-
-Os requisitos de capacidade e operação com várias planilhas em um banco canônico estão
-registrados para validação posterior na ordem do backlog da F6.
+Todas as tarefas oficiais das seis fases foram concluídas e validadas. O sistema está
+pronto para utilização e testes reais, sujeito às limitações operacionais documentadas.
 
 Progresso da V1:
 
-5 de 6 fases concluídas; F6 em andamento.
+6 de 6 fases concluídas.
 
 ---
 
 # 55. PRÓXIMA AÇÃO OFICIAL
 
-Próxima atividade: empacotamento, seção 44 da F6. Não executar sem nova
-autorização.
-O limite ordinário de três commits da F6 foi atingido; qualquer novo commit exige
-autorização expressa ou procedimento previsto pela governança.
-
-Não implementar importação manual como solução oficial sem nova decisão.
-
-Não executar a próxima tarefa da F6 sem autorização expressa.
-
-Não iniciar a F6 sem autorização expressa.
+Não existe tarefa oficial de implementação pendente na versão atual. O próximo passo é
+utilização/homologação real no ambiente Windows corporativo. Problemas posteriormente
+encontrados deverão ser classificados como correção, manutenção, hardening, melhoria ou
+evolução, sem reabrir retroativamente as fases concluídas.
 
 FIM DO DOCUMENTO

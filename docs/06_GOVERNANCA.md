@@ -5,9 +5,26 @@
 **Versão:** 1.1
 **Status:** Oficial
 **Data:** 15/09/2026
-**Última revisão:** 15/09/2026
+**Última revisão:** 16/09/2026
 
 ---
+
+# DECISÃO DE ENCERRAMENTO DA V1 — 16/09/2026
+
+O responsável pelo projeto concedeu autorização superior e explícita para identificar,
+executar, validar e concluir todas as tarefas oficiais restantes nas fases abertas, sem
+nova autorização entre tarefas. A decisão também autorizou os commits tecnicamente
+necessários, sem reescrita de histórico ou fragmentação artificial. Esta decisão atual
+tem precedência sobre as antigas regras de autorização tarefa a tarefa.
+
+O inventário confirmou F1–F5 concluídas, backup da F6 documentalmente concluído e
+empacotamento como única implementação pendente. Após empacotamento, 52 testes
+automatizados aprovados, validação integrada, PRAGMAs e reconciliação dos seis documentos,
+a F6 e a V1 foram encerradas. Nenhuma invariante de SharePoint read-only, SQLite
+canônico, identidade, adjacência, transação, checkpoint ou segurança foi alterada.
+
+**Estado oficial:** seis de seis fases concluídas; nenhuma tarefa oficial pendente;
+ELABORAÇÃO DA VERSÃO ATUAL CONCLUÍDA PARA UTILIZAÇÃO E TESTES REAIS.
 
 # DECISÃO FINAL DE GOVERNANÇA DA F4
 

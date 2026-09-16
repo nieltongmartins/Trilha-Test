@@ -9,6 +9,75 @@
 
 ---
 
+# CICLO FINAL, EMPACOTAMENTO E ENCERRAMENTO DA V1 — 16/09/2026
+
+**Autorização:** decisão expressa do responsável autorizou inventariar, executar e
+concluir todas as tarefas oficiais restantes sem nova autorização entre elas, além dos
+commits tecnicamente exigidos pelo ambiente. A exceção e seu objetivo de encerramento
+foram aplicados sem alterar as invariantes de segurança ou o escopo funcional.
+
+## Estado inicial e inventário
+
+As fases F1 a F5 estavam concluídas. A F6 estava em andamento com testes finais,
+performance, logs, temporários, SHA-256 e backup concluídos. A seção 43 exigia apenas
+documentar a estratégia mínima e já possuía evidência suficiente; não foi reimplementada.
+A única tarefa de implementação pendente era empacotamento (seção 44), seguida da
+validação integrada, reconciliação documental e encerramento. Não foi encontrada tarefa
+oficial posterior.
+
+## Empacotamento e alterações
+
+Foi definida distribuição Windows one-folder por `auditor_planilhas.spec`, com
+PyInstaller como dependência exclusiva de build em `requirements-build.txt`.
+`build_windows.bat` gera a pasta `dist\AuditorPlanilhas` e inclui o launcher e o exemplo
+de configuração. `executar_auditor.bat` fixa sua própria pasta como diretório de
+trabalho, exige `configuracao.bat`, não versionado, e inicia a aplicação por duplo
+clique. O exemplo contém apenas site, escopos e caminhos opcionais, sem credenciais.
+README e documentos oficiais receberam instruções e limites operacionais. Não houve
+alteração no código de produção, schema, migração, protocolo SharePoint, checkpoint,
+relatório, logs, temporários ou SHA-256.
+
+A tentativa de instalar PyInstaller neste Linux falhou porque o índice configurado foi
+inacessível (`403 Forbidden`). Além disso, PyInstaller não faz cross-build de Windows.
+Isso limita a materialização do `.exe` neste ambiente, não a definição reproduzível do
+pacote: a geração/homologação final deve ocorrer em Windows. Assinatura, canal e pasta
+corporativa, permissões e implantação da estratégia de backup continuam decisões
+operacionais.
+
+## Validação final integrada
+
+- `pytest -q`: **52 passed em 1,74 s**, sem falhas, skips ou warnings relevantes;
+- seleção integrada cobrindo banco legado, rollback/retomada, reexecução, incremental,
+  relatório, múltiplas planilhas, SHA-256, temporários, logs e empacotamento:
+  **16 passed em 1,12 s**;
+- inicialização sem UI em diretório temporário: código 0, banco novo criado e fechado;
+- banco novo: `PRAGMA integrity_check` = `ok` e `PRAGMA foreign_key_check` = `[]`;
+- `python -m compileall -q app main.py tests`, compilação do spec, `ruff check .` e
+  `git diff --check`: aprovados.
+
+A suíte preservou ADD/MOD/DEL, fórmulas, zero/False/vazio, múltiplas abas, versão sem
+alterações, pares adjacentes, checkpoint, rollback, retomada, isolamento, migração
+legada, hash do conteúdo processado, limpeza/órfãos, rotação/redação de logs e relatório
+`RESUMO`/`VERSOES`/`TRILHA` regenerável sem XLSX históricos. A prova corporativa real
+SharePoint/Edge já aceita na F5 não foi repetida no Linux; nenhum SharePoint real foi
+acessado ou alterado neste ciclo.
+
+## Estado final, riscos e limites
+
+F1, F2, F3, F4, F5 e F6 estão concluídas. Todos os critérios da F6 foram marcados como
+atendidos e não existe tarefa oficial pendente. SQLite permanece canônico; backup
+continua como estratégia documentada, não rotina operacional nem restauração. O gargalo
+conhecido do relatório com 100.000 alterações permanece aceito, sem SLA definido e sem
+redesenho preventivo. Disponibilidade histórica depende do SharePoint; autoria/horário
+são da versão, não da célula; fórmulas não são recalculadas; operação real depende de
+Windows, Edge, políticas corporativas, permissões de escrita locais e autenticação
+manual. SQL Server, agendamento, lote, dashboards, notificações, política avançada de
+retenção e hardening adicional permanecem melhorias futuras fora do escopo.
+
+**Estado oficial:** ELABORAÇÃO DA VERSÃO ATUAL CONCLUÍDA PARA UTILIZAÇÃO E TESTES
+REAIS. Problemas descobertos em utilização/homologação passam a ser correção, manutenção,
+hardening, melhoria ou evolução.
+
 # ESTRATÉGIA MÍNIMA DE BACKUP DA F6 — 16/09/2026
 
 **Fase:** F6 — Robustez e Preparação para Produção. **Status:** tarefa de backup
@@ -946,7 +1015,7 @@ Utilizar:
 | F3 | Auditor Local Incremental | 🟢 CONCLUÍDA | 2 |
 | F4 | Aquisição de Versões SharePoint | 🟢 CONCLUÍDA | 4 |
 | F5 | Interface e Relatório | 🟢 CONCLUÍDA | 3 |
-| F6 | Robustez e Preparação para Produção | 🟡 EM ANDAMENTO | 1 |
+| F6 | Robustez e Preparação para Produção | 🟢 CONCLUÍDA | exceções registradas |
 
 * A Fase 4 atingiu o limite original de commits durante a tentativa de
 integração Graph e o registro do bloqueio. O plano revisado autoriza,
@@ -956,32 +1025,10 @@ da F4 revisada.
 
 # 7. PROGRESSO GERAL
 
-Fases concluídas:
-
-3 de 6
-
-Progresso funcional inicial:
-
-Fases 1, 2 e 3 concluídas.
-
-Fase atual:
-
-Fase atual:
-
-F4 — Aquisição de Versões SharePoint em reavaliação técnica.
-
-Situação:
-
-A integração Microsoft Graph implementada permanece disponível no código,
-mas sua validação real está bloqueada pelas restrições de
-autenticação/autorização do ambiente corporativo.
-
-Próxima ação prevista:
-
-Investigar e validar mecanismo suportado e autorizado de aquisição
-automatizada das versões históricas do SharePoint.
-
-A Fase 5 permanece não autorizada.
+Fases concluídas: **6 de 6**. F1 a F6 estão concluídas; a versão atual está pronta para
+utilização e testes reais. Não há tarefa oficial pendente. Os registros cronológicos
+abaixo preservam os estados intermediários como fatos históricos e não substituem este
+estado consolidado.
 
 ---
 
@@ -1563,13 +1610,13 @@ F6 iniciada por autorização expressa; executar uma tarefa por vez.
 
 ## F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO
+**Status:** 🟢 CONCLUÍDA
 
 **Data de início:** 16/09/2026
 
-**Data de conclusão:** —
+**Data de conclusão:** 16/09/2026
 
-**Quantidade de commits:** 3
+**Quantidade de commits:** limite ordinário excedido pelas exceções impostas pelo ambiente e pela autorização final do responsável
 
 ### Objetivo
 
@@ -1583,9 +1630,10 @@ integração automatizados entre os componentes, reexecução idempotente após 
 do banco, auditoria incremental a partir do checkpoint, falha/retomada transacional e
 geração determinística de relatório exclusivamente a partir do SQLite, além do cenário
 controlado de três planilhas isoladas no mesmo banco canônico.
-Também foi concluída a tarefa de performance com carga sintética de 3.001 versões,
-100.000 alterações e 2.000 planilhas, comparação entre auditoria inicial e incremental,
-planos de consulta, integridade e geração de relatório.
+Também foram concluídos performance com carga sintética de 3.001 versões, 100.000
+alterações e 2.000 planilhas, logs, temporários, SHA-256, estratégia mínima de backup e
+empacotamento Windows one-folder. A validação final e os documentos oficiais foram
+reconciliados.
 
 ### Testes executados
 
@@ -1614,11 +1662,11 @@ Nenhum.
 
 ### Pendências
 
-Demais tarefas da F6, respeitando a ordem oficial e uma autorização por vez.
+Nenhuma tarefa oficial da V1.
 
 ### Próximo passo
 
-Logs. Não executar sem nova autorização.
+Utilização e homologação real.
 
 ---
 
@@ -2118,17 +2166,17 @@ A presença nesta seção não significa autorização para implementação.
 
 **Fase atual:** F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO — backup concluído
+**Status:** 🟢 CONCLUÍDA PARA UTILIZAÇÃO E TESTES REAIS
 
 **Implementação:** núcleo local, aquisição SharePoint Edge/REST, interface, migração
 SQLite e relatório validados no ambiente corporativo real; testes unitários, testes
 de integração automatizados, reexecução idempotente, auditoria incremental,
 falha/retomada, geração de relatório, múltiplas planilhas controladas e medição de
-performance, logs, temporários, integridade por SHA-256 e estratégia mínima de backup
-da F6 concluídos. A estratégia de backup foi somente documentada, como exigido pela
-seção 43, sem implementação operacional.
+performance, logs, temporários, integridade por SHA-256, estratégia mínima de backup,
+empacotamento e validação final da F6 concluídos. A estratégia de backup foi somente
+documentada, como exigido pela seção 43, sem implementação operacional.
 
-**Fases concluídas:** 5/6
+**Fases concluídas:** 6/6
 
 **Commits do ciclo original da Fase 4:** 3
 
@@ -2138,9 +2186,7 @@ seção 43, sem implementação operacional.
 
 **Próxima ação:**
 
-Solicitar autorização para a próxima tarefa da F6: empacotamento. O limite
-ordinário de três commits da fase foi ultrapassado por determinação do ambiente desta
-execução.
+Utilização e homologação real. Não existe tarefa oficial pendente na V1.
 
 ---
 
