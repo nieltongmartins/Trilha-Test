@@ -13,6 +13,31 @@
 
 **Fase:** F5 — Interface e Relatório. **Status:** 🟡 EM ANDAMENTO.
 
+## Migração SQLite identificada na validação real — 16/09/2026
+
+O segundo ciclo real confirmou que a aquisição SharePoint e os downloads históricos
+chegam ao processamento, mas revelou que bancos criados antes da evolução da F4 não
+recebiam as colunas `autor_email`, `autor_login`, `url_origem` e `versao_atual`.
+`CREATE TABLE IF NOT EXISTS` não altera tabelas existentes; por isso a gravação de
+`versao_processada` falhava em `autor_email`, com rollback correto da comparação e sem
+avanço do checkpoint.
+
+A inicialização agora inspeciona `PRAGMA table_info(versao_processada)`, acrescenta
+somente cada uma das quatro colunas ausentes com `ALTER TABLE` e registra a versão do
+schema em `PRAGMA user_version`. A migração é aditiva, transacional e idempotente: não
+remove nem recria o banco e preserva registros existentes. Testes cobrem banco no
+schema anterior, preservação dos dados, segunda execução da migração e equivalência
+dos campos necessários entre banco novo e migrado.
+
+As variáveis `SHAREPOINT_SITE_URL` e `SHAREPOINT_SCOPE_PATHS` continuam sendo
+configuração de ambiente e precisam ser novamente definidas após encerrar uma sessão
+PowerShell, salvo uso de mecanismo externo persistente de configuração. O escopo não
+foi fixado no código, pois o diretório auditado pode mudar. SharePoint continua
+estritamente read-only e a autenticação Selenium/Edge não foi alterada.
+
+**Status após a correção:** 🟡 F5 EM VALIDAÇÃO REAL. É necessário validar a migração
+no banco corporativo existente, sem apagá-lo. F6 não foi iniciada nem autorizada.
+
 ## Correção após validação real da F5 no Windows — 16/09/2026
 
 A validação real foi executada no Windows pelo VS Code/PowerShell, com Edge,

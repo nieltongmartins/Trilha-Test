@@ -122,6 +122,17 @@ CREATE INDEX IF NOT EXISTS idx_erro_execucao
     ON erro_processamento (execucao_id);
 """
 
+# Colunas acrescentadas ao modelo depois da criação dos primeiros bancos F1.
+# CREATE TABLE IF NOT EXISTS não evolui uma tabela que já existe, portanto cada
+# acréscimo precisa permanecer registrado como uma migração explícita.
+SCHEMA_VERSION = 1
+VERSION_PROCESSED_MIGRATIONS = {
+    "autor_email": "TEXT",
+    "autor_login": "TEXT",
+    "url_origem": "TEXT",
+    "versao_atual": "INTEGER NOT NULL DEFAULT 0 CHECK (versao_atual IN (0, 1))",
+}
+
 
 class Database:
     """Controla uma conexão SQLite com integridade referencial habilitada."""
@@ -152,10 +163,26 @@ class Database:
         return self._connection
 
     def initialize(self) -> None:
-        """Cria o esquema de modo idempotente, preservando dados existentes."""
+        """Cria ou migra o esquema de modo idempotente, preservando os dados."""
         connection = self.connect()
         with connection:
             connection.executescript(SCHEMA)
+            self._migrate_schema(connection)
+
+    @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
+        """Aplica evoluções aditivas ausentes no banco legado da F1."""
+        connection.execute("BEGIN IMMEDIATE")
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(versao_processada)")
+        }
+        for name, definition in VERSION_PROCESSED_MIGRATIONS.items():
+            if name not in columns:
+                connection.execute(
+                    f'ALTER TABLE versao_processada ADD COLUMN "{name}" {definition}'
+                )
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
         """Encerra a conexão aberta."""
