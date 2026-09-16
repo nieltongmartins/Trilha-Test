@@ -50,3 +50,6 @@ class LocalSource:
                     raise FileNotFoundError(f"Arquivo da versão {version.number} não encontrado")
                 return path
         raise KeyError(f"Versão desconhecida: {version.id}")
+
+    def release_version(self, path: Path) -> None:
+        """Arquivos fornecidos pelo usuário não pertencem à aplicação."""

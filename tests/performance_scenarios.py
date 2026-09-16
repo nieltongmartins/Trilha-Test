@@ -59,6 +59,9 @@ class SyntheticSource:
         self.downloads += 1
         return self.workbook
 
+    def release_version(self, path: Path) -> None:
+        """O XLSX sintético compartilhado pertence ao cenário, não à fonte."""
+
 
 SPREADSHEET = SpreadsheetInfo(
     site_id="site-performance",

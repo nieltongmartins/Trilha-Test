@@ -280,12 +280,14 @@ def test_downloads_historical_and_current_using_distinct_read_only_endpoints(
         spreadsheet = source.list_spreadsheets()[0]
         historical, current = source.list_versions(spreadsheet)
         historical_path = source.get_version(spreadsheet, historical)
-        assert historical_path.is_file() and historical_path.name.endswith(
-            "_98_0.98.xlsx"
-        )
+        assert historical_path.is_file()
+        assert len(historical_path.stem) == 64 and historical_path.suffix == ".xlsx"
         historical_bytes = historical_path.read_bytes()
         current_path = source.get_version(spreadsheet, current)
-        assert current_path.is_file() and current_path.name.endswith("_99_0.99.xlsx")
+        assert current_path.is_file() and current_path != historical_path
+        source.release_version(historical_path)
+        source.release_version(current_path)
+        assert list(source._workspace.path.glob("*.xlsx")) == []
     assert zipfile.is_zipfile(BytesIO(historical_bytes))
     assert "/Versions(98)/$value" in browser.visited[-2]
     assert "/Versions(" not in browser.visited[-1] and browser.visited[-1].endswith(
@@ -353,6 +355,7 @@ def test_gap_download_failure_rolls_back_and_keeps_checkpoint(tmp_path: Path) ->
             database.connection.execute("SELECT COUNT(*) FROM checkpoint").fetchone()[0]
             == 0
         )
+        assert list(source._workspace.path.glob("*.xlsx")) == []
 
 
 def test_only_get_same_origin_api_is_embedded() -> None:

@@ -463,11 +463,21 @@ Diretório:
 
 data/temp/
 
-Os arquivos temporários não serão considerados evidência oficial.
+Cada instância da fonte utiliza um subdiretório exclusivo, identificado por marcador
+da aplicação. Nomes de XLSX são derivados por SHA-256 da identidade contextual da
+planilha e do ID oficial da versão, evitando path traversal e colisões entre planilhas,
+versões e execuções.
 
-Após processamento bem-sucedido, poderão ser removidos.
+Os arquivos temporários não são evidência oficial. O motor os remove imediatamente
+depois de construir o snapshot em memória, tanto em sucesso quanto em falha posterior;
+a baseline permanece no snapshot somente durante a comparação incremental. O
+encerramento da fonte remove seu subdiretório e a inicialização seguinte remove apenas
+subdiretórios órfãos reconhecidos, com marcador válido e processo proprietário ausente.
+Artefatos externos, diretórios sem marcador e workspaces de processos ativos não são
+removidos.
 
-A aplicação deverá evitar acúmulo indefinido de arquivos temporários.
+Assim, a aplicação evita acúmulo durante auditorias extensas e recupera resíduos de
+interrupção abrupta sem limpeza ampla do diretório configurado.
 
 Nunca modificar o arquivo baixado.
 

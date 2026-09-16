@@ -9,6 +9,79 @@
 
 ---
 
+# CONTROLE DE ARQUIVOS TEMPORÁRIOS DA F6 — 16/09/2026
+
+**Fase:** F6 — Robustez e Preparação para Produção. **Status:** tarefa de arquivos
+temporários concluída; a F6 permanece em andamento.
+
+## Confirmação documental e estado anterior
+
+A seção 41 do plano era a próxima tarefa oficial e exigia validar criação,
+utilização, remoção, recuperação após falha e a separação entre temporários e
+evidência oficial. A arquitetura permitia downloads em `data/temp/`, descarte após
+sucesso e proibia acúmulo indefinido. Não houve conflito de requisito, segurança ou
+governança.
+
+As fontes Edge/REST e Graph já usavam subdiretórios temporários por instância e os
+removiam no fechamento normal. Entretanto, os XLSX permaneciam até o fechamento da
+fonte, uma interrupção abrupta podia deixar diretórios órfãos sem tratamento na
+reinicialização, o Graph numerava arquivos pela quantidade existente e a fonte Edge
+incorporava identificadores externos ao nome. Em auditorias extensas isso permitia
+crescimento até o encerramento e faltava uma garantia explícita contra colisão ou
+componentes de caminho maliciosos.
+
+## Alterações e comportamento
+
+- um workspace comum cria subdiretório exclusivo e marcador de propriedade/processo;
+- nomes determinísticos usam SHA-256 sobre site, contexto/drive, identidade da
+  planilha e ID oficial da versão, sem incorporar esses valores ao caminho;
+- Edge/REST e Graph escrevem apenas dentro do workspace; o Graph publica o download
+  por substituição atômica de arquivo parcial;
+- o `AuditService` remove cada XLSX adquirido logo após a leitura, inclusive quando a
+  leitura ou uma etapa posterior falha. Falha de limpeza é registrada como aviso e não
+  transforma temporário em evidência nem desfaz dados canônicos;
+- o fechamento normal remove o workspace inteiro. Na reinicialização, somente
+  diretórios com prefixo e marcador válidos, pertencentes à aplicação e cujo PID não
+  existe mais são removidos; arquivos externos, marcadores inválidos e processos ativos
+  são preservados;
+- fontes locais nunca removem fixtures/arquivos fornecidos pelo usuário.
+
+Na auditoria incremental, a baseline e a versão atual coexistem logicamente como
+snapshots em memória durante a comparação, embora os XLSX sejam liberados assim que
+lidos. Falha preserva as transações já confirmadas e o checkpoint; retomada readquire a
+baseline oficial da fonte. Se ela não estiver disponível, a regra existente registra
+falha e impede comparação não adjacente. Reinicialização não depende dos XLSX antigos.
+Relatórios continuam regeneráveis exclusivamente pelo SQLite.
+
+## Validação e limites
+
+`pytest -q` — `48 passed in 1.26s`.
+
+`ruff check .` — aprovado.
+
+`python -m compileall -q app main.py tests` — concluído sem erros.
+
+Os testes cobriram isolamento entre workspaces, nomes sem colisão entre versões e
+planilhas, remoção imediata, limpeza após falha de download/comparação, preservação de
+arquivo externo e recuperação de órfão na inicialização. A suíte existente manteve
+cobertura de auditoria inicial/incremental, sem novidades, falha/retomada, múltiplas
+planilhas, relatório sem XLSX e integridade transacional. `PRAGMA integrity_check`
+retornou `ok` e `PRAGMA foreign_key_check` permaneceu sem violações nesses cenários.
+Nenhum SharePoint real foi acessado.
+
+Uma terminação abrupta pode deixar resíduos até a próxima criação de fonte. Um PID
+reutilizado pelo sistema operacional pode adiar conservadoramente a remoção para evitar
+apagar workspace possivelmente ativo; isso não cria dependência funcional ou canônica.
+
+O commit adicional é realizado exclusivamente porque o ambiente exige commit e criação
+de pull request, apesar do limite ordinário da F6 já ultrapassado. O hash é informado no
+relatório da sessão.
+
+**Próxima tarefa oficial:** integridade, seção 42 do plano, pendente de nova
+autorização. Não foi executada. A F6 não está concluída.
+
+---
+
 # REVISÃO E FORTALECIMENTO DE LOGS DA F6 — 16/09/2026
 
 **Fase:** F6 — Robustez e Preparação para Produção. **Status:** tarefa de logs
