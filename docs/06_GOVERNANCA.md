@@ -9,6 +9,13 @@
 
 ---
 
+# DECISÃO FINAL DE GOVERNANÇA DA F4
+
+As evidências corporativas de versão atual e estabilidade do `UniqueId` removem as pendências anteriores. O provider oficial V1 é Selenium/Edge + SharePoint REST read-only, com autenticação interativa e sem captura/transferência da sessão. A identidade é `(site, contexto REST, UniqueId)`; nome e caminho são mutáveis.
+
+O Git real contém `1a7421a`, `ee013b3` e `ae6b9a2` como trabalhos F4 alcançáveis; `df7943f` não existe no repositório e corresponde a registro antigo de tentativa não incorporada. Como o limite ordinário de três foi alcançado, aplica-se a exceção já formalizada de até dois commits adicionais, usando somente um commit coerente para este encerramento. Isso não autoriza nem inicia F5.
+
+
 # DECISÃO DE GOVERNANÇA APLICÁVEL À CONTINUAÇÃO DA F4
 
 O responsável autorizou o provider Selenium/Edge + SharePoint REST como mecanismo da
@@ -21,9 +28,9 @@ avança após persistência. Graph pode permanecer isolado e opcional.
 
 Para contagem de commits, somente objetos efetivamente alcançáveis na branch contam.
 Hashes apenas documentados ou pertencentes a PR fechado sem merge não consomem o
-limite. Na branch inspecionada, os trabalhos F4 anteriores alcançáveis são `1a7421a` e
-`ee013b3`; `df7943f` não existe. Aplica-se o máximo ordinário de três commits efetivos,
-sem fragmentação. Esta decisão não autoriza F5.
+limite. O registro intermediário identificava `1a7421a` e `ee013b3`; a inspeção final também
+confirmou `ae6b9a2` alcançável. `df7943f` não existe. Aplica-se a exceção controlada
+descrita na decisão final acima, sem fragmentação. Esta decisão não autoriza F5.
 
 ---
 

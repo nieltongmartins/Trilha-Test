@@ -8,7 +8,33 @@
 
 ---
 
-# REVISÃO F4 — AQUISIÇÃO SHAREPOINT VALIDADA
+# ENCERRAMENTO F4 — HISTÓRICO E VERSÃO ATUAL
+
+A fonte oficial da V1 é `BrowserSharePointSource`: Selenium controla Microsoft Edge
+visível, o usuário conclui interativamente login/MFA e toda chamada autenticada permanece
+no navegador. A aplicação nunca solicita senha nem lê, copia ou persiste cookies, tokens,
+PRT ou credenciais do Office/Windows. Apenas GET same-origin sob `/_api/` é permitido.
+
+A descoberta é recursiva somente nas raízes de `SHAREPOINT_SCOPE_PATHS`. Cada `.xlsx` é
+identificado, no contexto do site, pelo `UniqueId`; `Name` e `ServerRelativeUrl` são dados
+mutáveis de apresentação/proveniência. O POC confirmou que o mesmo `UniqueId`
+`8bf40d61-f5c5-468a-ab06-21fec7e9b8cd` permaneceu após renomear e mover manualmente o
+arquivo descartável TEST001.xlsx.
+
+O histórico é lido por `/Versions?$expand=CreatedBy` e baixado com o ID efetivamente
+retornado em `/Versions(ID)/$value`. A versão atual é obtida separadamente: metadados
+`UIVersion`, `UIVersionLabel`, `TimeLastModified`, `UniqueId` e `ModifiedBy`, e conteúdo
+por `GetFileByServerRelativeUrl(...)/$value`. Histórico e atual são deduplicados e formam
+uma única sequência; nenhum ID é calculado a partir do label. O POC da CQL028.xlsx
+confirmou 0.1–0.98 históricas, atual 0.99 (`UIVersion=99`), `UniqueId`
+`e621d213-3f62-48a0-8eb8-7db36dea3a5c` e XLSX atual de 226.665 bytes.
+
+Downloads do Edge, inclusive o nome inicial `$value`, são associados localmente à
+identidade/versão, aguardam o desaparecimento de `.crdownload` e só entram no motor após
+validação ZIP/Open XML e presença de `xl/workbook.xml`. O banco permanece canônico;
+falhas interrompem a cadeia e não avançam checkpoint. Graph permanece opcional/futuro.
+
+# REVISÃO INTERMEDIÁRIA F4 — REGISTRO HISTÓRICO
 
 Para a V1, a aquisição utiliza Selenium com Microsoft Edge visível e autenticação
 interativa realizada pelo usuário. Toda leitura autenticada ocorre por `fetch` GET
@@ -31,9 +57,9 @@ baseline da primeira comparação nova; reexecuções não baixam histórico já
 além da baseline necessária. Artefatos ficam em diretório temporário descartável.
 
 O POC corporativo adquiriu 98 versões históricas (labels 0.1 a 0.98; IDs 1 a 98)
-do arquivo controlado, mas essa coincidência não é regra. O endpoint `/Versions` não
-foi comprovado como fonte da versão atual; obtenção e inclusão da versão atual exigem
-novo teste real e permanecem pendentes. Graph fica como provider opcional/futuro.
+do arquivo controlado, mas essa coincidência não é regra. Naquele estágio, o endpoint `/Versions` ainda não havia sido comprovado como fonte da
+versão atual. Essa pendência foi posteriormente resolvida conforme o encerramento acima.
+Graph fica como provider opcional/futuro.
 
 ---
 

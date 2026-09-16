@@ -9,6 +9,22 @@
 
 ---
 
+# ENCERRAMENTO REAL DA F4 — 16/09/2026
+
+**Branch:** `work`. **Estado inicial:** F4 em andamento; Edge/REST adquiria o histórico, mas versão atual e estabilidade do `UniqueId` estavam pendentes.
+
+O Git alcançável revelou três commits F4 anteriores: `1a7421a` (Graph/bloqueio), `ee013b3` (decisão) e `ae6b9a2` (Edge/REST). `df7943f`, citado no registro antigo de PR fechado sem merge, não existe. O limite ordinário estava consumido; este encerramento usa um único commit da exceção controlada de até dois adicionais.
+
+A evolução factual foi: Graph bloqueado por consentimento administrativo -> investigação -> `/_api/web` comprovado -> Selenium/Edge comprovado -> `/Versions?$expand=CreatedBy`, autoria da versão, comentários e download histórico comprovados -> 98 versões 0.1–0.98 adquiridas -> atual 0.99 identificada e adquirida por `/$value` -> `UniqueId` comprovado -> implementação oficial. O XLSX atual observado tinha 226.665 bytes e `xl/workbook.xml`; o `UniqueId` da CQL028 era `e621d213-3f62-48a0-8eb8-7db36dea3a5c`.
+
+TEST001.xlsx manteve `8bf40d61-f5c5-468a-ab06-21fec7e9b8cd` após renomeação e movimentação manuais. A implementação usa `UniqueId` contextualizado pelo site; `Name` e `ServerRelativeUrl` são mutáveis. A aplicação não escreve no SharePoint.
+
+Foram implementados versão atual explícita, deduplicação, endpoints distintos, espera sem `.crdownload`, tratamento de `$value` e validação ZIP/Open XML. Testes cobrem descoberta/identidade, metadados e autor da versão, ID independente do label, sequência, downloads, invalidade, gap, rollback, checkpoint, idempotência e segurança. Graph permanece opcional.
+
+**Status final:** 🟢 F4 CONCLUÍDA. Provider V1, motor existente, histórico + atual, UniqueId, descoberta configurável, read-only, testes e documentação atendem aos critérios. Não resta pendência obrigatória de F4. F5 NÃO foi iniciada.
+
+**Validação local final:** `pytest -q` — 33 passed; `ruff check app tests` — aprovado; `ruff format --check app/config.py app/sources/sharepoint.py tests/test_sharepoint_source.py` — aprovado; `mypy app/sources/sharepoint.py` — aprovado; `python -m compileall -q app main.py tests`, `python -m pip check` e `git diff --check` — aprovados. Edge/tenant não foram acessados neste ambiente, conforme o escopo da sessão.
+
 # AJUSTE TRANSVERSAL DA ESTRATÉGIA DE TESTES XLSX
 
 Em 16/09/2026, antes da continuidade da F4, a estratégia de testes foi
@@ -30,7 +46,7 @@ F5 não foi iniciada.
 
 ---
 
-# REGISTRO REAL DA CONTINUAÇÃO DA F4 — EDGE/REST
+# REGISTRO INTERMEDIÁRIO DA CONTINUAÇÃO DA F4 — EDGE/REST
 
 **Branch inspecionada:** `work`
 **Commits F4 anteriores efetivamente incorporados:** `1a7421a` e `ee013b3`.
@@ -57,7 +73,7 @@ iguais com IDs distintos, metadados, ordem por ID, encoding, download/validaçã
 falha intermediária, checkpoint, retomada/idempotência e bloqueio de endpoint externo.
 Não dependem do tenant real.
 
-**Estado:** F4 permanece EM ANDAMENTO. A coleção REST comprovada é histórica; a versão
+**Estado naquele momento:** F4 permanecia EM ANDAMENTO. A coleção REST comprovada é histórica; a versão
 atual ainda requer teste corporativo read-only. Também resta confirmar operacionalmente
 a estabilidade de `UniqueId` nos cenários de renomeação/movimentação relevantes. F5
 não foi iniciada.
@@ -179,7 +195,7 @@ Utilizar:
 | F1 | Fundação e Banco de Auditoria | 🟢 CONCLUÍDA | 2 |
 | F2 | Motor Excel e Comparação | 🟢 CONCLUÍDA | 4 |
 | F3 | Auditor Local Incremental | 🟢 CONCLUÍDA | 2 |
-| F4 | Aquisição de Versões SharePoint | 🟡 EM ANDAMENTO / REAVALIAÇÃO TÉCNICA | 3 |
+| F4 | Aquisição de Versões SharePoint | 🟢 CONCLUÍDA | 4 |
 | F5 | Interface e Relatório | ⬜ NÃO INICIADA | 0 |
 | F6 | Robustez e Preparação para Produção | ⬜ NÃO INICIADA | 0 |
 
@@ -627,7 +643,7 @@ por testes automatizados;
 
 ### Commits
 
-`df7943f` — Implementa fonte SharePoint somente leitura.
+`df7943f` — hash citado à época, mas inexistente no Git real; a implementação Graph/bloqueio alcançável está em `1a7421a`.
 
 O segundo commit registra este bloqueio e o estado factual da fase; seu
 identificador é informado no relatório da execução.
@@ -1348,24 +1364,23 @@ A presença nesta seção não significa autorização para implementação.
 
 **Fase atual:** F4 — Aquisição de Versões SharePoint
 
-**Status:** 🟡 EM ANDAMENTO / REAVALIAÇÃO TÉCNICA
+**Status:** 🟢 CONCLUÍDA
 
 **Implementação:** núcleo local completo; integração Microsoft Graph
 implementada e testada isoladamente; validação Graph real inviabilizada no
 ambiente corporativo atual; investigação de aquisição alternativa em curso.
 
-**Fases concluídas:** 3/6
+**Fases concluídas:** 4/6
 
 **Commits do ciclo original da Fase 4:** 3
 
-**Bloqueios ativos:** 1
+**Bloqueios ativos:** 0
 
 **Limitações confirmadas:** 1
 
 **Próxima ação:**
 
-Investigar e validar mecanismo suportado e autorizado de aquisição
-automatizada das versões históricas SharePoint.
+Aguardar autorização expressa para F5.
 
 Não iniciar F5.
 

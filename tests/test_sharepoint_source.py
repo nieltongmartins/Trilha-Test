@@ -1,6 +1,6 @@
-import base64
 from io import BytesIO
 from pathlib import Path
+import zipfile
 
 from openpyxl import Workbook
 import pytest
@@ -9,8 +9,7 @@ from app.audit_service import AuditService
 from app.config import Settings
 from app.database import Database
 from app.models import AuditExecutionStatus
-from app.sources import BrowserSharePointSource, SharePointReadError
-
+from app.sources import BrowserSharePointSource, SharePointReadError, SpreadsheetInfo
 
 SITE = "https://tenant.sharepoint.com/sites/qualidade"
 ROOT = "/sites/qualidade/Documentos Compartilhados"
@@ -26,22 +25,38 @@ def workbook_bytes(value: str) -> bytes:
 
 
 class FakeBrowser:
-    def __init__(self, responses: dict[str, object]) -> None:
+    def __init__(
+        self, responses: dict[str, object], download_directory: Path | None = None
+    ) -> None:
         self.responses = responses
-        self.calls: list[tuple[str, bool]] = []
+        self.calls: list[str] = []
         self.visited: list[str] = []
         self.quit_called = False
+        self.download_directory = download_directory
+
+    def _response(self, url: str) -> object:
+        matches = [(key, value) for key, value in self.responses.items() if key in url]
+        if not matches:
+            raise AssertionError(f"sem resposta fake para {url}")
+        return max(matches, key=lambda item: len(item[0]))[1]
 
     def get(self, url: str) -> None:
         self.visited.append(url)
+        value = self._response(url)
+        if isinstance(value, bytes):
+            assert self.download_directory is not None
+            (self.download_directory / "$value").write_bytes(value)
+        elif value == "partial":
+            assert self.download_directory is not None
+            (self.download_directory / "$value.crdownload").write_bytes(b"parcial")
 
-    def execute_async_script(self, script: str, url: str, binary: bool) -> object:
+    def execute_async_script(self, script: str, *args: object) -> object:
+        url = str(args[0])
         assert "method: 'GET'" in script
         assert "document.cookie" not in script and "localStorage" not in script
-        self.calls.append((url, binary))
-        value = next(value for suffix, value in self.responses.items() if suffix in url)
-        if isinstance(value, bytes):
-            return {"base64": base64.b64encode(value).decode()}
+        assert "arrayBuffer" not in script
+        self.calls.append(url)
+        value = self._response(url)
         if isinstance(value, Exception):
             return {"error": str(value)}
         return {"json": value}
@@ -53,95 +68,296 @@ class FakeBrowser:
 def discovery_responses() -> dict[str, object]:
     return {
         "Compartilhados')/Files": {"value": []},
-        "Compartilhados')/Folders": {"value": [
-            {"Name": "Setor A", "ServerRelativeUrl": f"{ROOT}/Setor A"},
-            {"Name": "Setor B", "ServerRelativeUrl": f"{ROOT}/Setor B"},
-        ]},
-        "Setor%20A')/Files": {"value": [
-            {"Name": "CQL028.xlsx", "ServerRelativeUrl": f"{ROOT}/Setor A/CQL028.xlsx", "UniqueId": "uuid-a", "Length": "10"}
-        ]},
+        "Compartilhados')/Folders": {
+            "value": [
+                {"Name": "Setor A", "ServerRelativeUrl": f"{ROOT}/Setor A"},
+                {"Name": "Setor B", "ServerRelativeUrl": f"{ROOT}/Setor B"},
+            ]
+        },
+        "Setor%20A')/Files": {
+            "value": [
+                {
+                    "Name": "Arquivo.xlsx",
+                    "ServerRelativeUrl": f"{ROOT}/Setor A/Arquivo.xlsx",
+                    "UniqueId": "UUID-A",
+                    "Length": "10",
+                }
+            ]
+        },
         "Setor%20A')/Folders": {"value": []},
-        "Setor%20B')/Files": {"value": [
-            {"Name": "CQL028.xlsx", "ServerRelativeUrl": f"{ROOT}/Setor B/CQL028.xlsx", "UniqueId": "uuid-b", "Length": "20"},
-            {"Name": "ignorar.xls", "ServerRelativeUrl": f"{ROOT}/Setor B/ignorar.xls", "UniqueId": "uuid-x", "Length": "1"},
-        ]},
+        "Setor%20B')/Files": {
+            "value": [
+                {
+                    "Name": "Arquivo.xlsx",
+                    "ServerRelativeUrl": f"{ROOT}/Setor B/Arquivo.xlsx",
+                    "UniqueId": "UUID-B",
+                    "Length": "20",
+                },
+                {
+                    "Name": "ignorar.xls",
+                    "ServerRelativeUrl": f"{ROOT}/Setor B/ignorar.xls",
+                    "UniqueId": "UUID-X",
+                    "Length": "1",
+                },
+            ]
+        },
         "Setor%20B')/Folders": {"value": []},
     }
 
 
-def test_configuration_has_no_credentials_or_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+def file_metadata(
+    unique_id: str = "UUID-A", label: str = "0.99", ui_version: int = 99
+) -> dict[str, object]:
+    return {
+        "value": {
+            "Name": "Arquivo.xlsx",
+            "ServerRelativeUrl": f"{ROOT}/Setor A/Arquivo.xlsx",
+            "UniqueId": unique_id,
+            "UIVersion": ui_version,
+            "UIVersionLabel": label,
+            "TimeLastModified": "2026-09-16T11:35:49Z",
+            "Length": "226665",
+            "ModifiedBy": {
+                "Title": "Autora Atual",
+                "Email": "atual@example.com",
+                "LoginName": "login-atual",
+            },
+        }
+    }
+
+
+def make_source(
+    tmp_path: Path, responses: dict[str, object]
+) -> tuple[BrowserSharePointSource, FakeBrowser]:
+    downloads = tmp_path / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    browser = FakeBrowser(responses, downloads)
+    source = BrowserSharePointSource(
+        SITE,
+        [ROOT],
+        browser,
+        temp_directory=tmp_path / "temp",
+        download_directory=downloads,
+        poll_interval=0.001,
+        download_timeout=0.02,
+    )
+    return source, browser
+
+
+def test_configuration_has_multiple_scopes_and_no_browser_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("SHAREPOINT_SITE_URL", SITE)
     monkeypatch.setenv("SHAREPOINT_SCOPE_PATHS", f"{ROOT};{ROOT}/Outro")
     settings = Settings.from_environment()
     assert settings.require_browser_sharepoint() == (SITE, (ROOT, f"{ROOT}/Outro"))
-    assert not any("password" in name or "token" in name or "cookie" in name for name in settings.__dict__)
+    browser_fields = {"sharepoint_site_url", "sharepoint_scope_paths"}
+    assert all(
+        not any(word in name for word in ("password", "token", "cookie"))
+        for name in browser_fields
+    )
 
 
-def test_recursively_discovers_same_name_in_different_folders(tmp_path: Path) -> None:
-    browser = FakeBrowser(discovery_responses())
-    with BrowserSharePointSource(SITE, [ROOT], browser, temp_directory=tmp_path) as source:
+def test_recursively_discovers_same_name_as_distinct_unique_ids(tmp_path: Path) -> None:
+    source, browser = make_source(tmp_path, discovery_responses())
+    with source:
         items = source.list_spreadsheets()
     assert [(item.drive_item_id, item.name, item.folder) for item in items] == [
-        ("uuid-a", "CQL028.xlsx", f"{ROOT}/Setor A"),
-        ("uuid-b", "CQL028.xlsx", f"{ROOT}/Setor B"),
+        ("UUID-A", "Arquivo.xlsx", f"{ROOT}/Setor A"),
+        ("UUID-B", "Arquivo.xlsx", f"{ROOT}/Setor B"),
     ]
-    assert all(method is False for _, method in browser.calls)
+    assert {item.drive_id for item in items} == {"sharepoint-rest"}
+    assert all("/_api/" in url for url in browser.calls)
 
 
-def test_versions_keep_id_label_metadata_and_technical_order(tmp_path: Path) -> None:
+def test_unique_id_keeps_identity_when_name_and_path_change() -> None:
+    original = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "stable-id", "antes.xlsx", "/raiz/antes.xlsx"
+    )
+    changed = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "stable-id", "depois.xlsx", "/outra/depois.xlsx"
+    )
+    assert (original.site_id, original.drive_id, original.drive_item_id) == (
+        changed.site_id,
+        changed.drive_id,
+        changed.drive_item_id,
+    )
+
+
+def test_parses_historical_metadata_and_appends_current_without_deriving_id(
+    tmp_path: Path,
+) -> None:
     responses = discovery_responses()
-    responses["/Versions?"] = {"value": [
-        {"ID": 98, "VersionLabel": "0.98", "Created": "2026-09-15T13:00:00Z", "CreatedBy": {"Title": "Autora", "Email": "a@example.com", "LoginName": "i:0#.f|membership|a@example.com"}, "CheckInComment": "fim", "Size": "200", "Url": "hist-98", "IsCurrentVersion": False},
-        {"ID": 2, "VersionLabel": "0.10", "Created": "2026-09-15T12:00:00Z", "CreatedBy": {"Title": "Autor"}, "Size": 100},
-    ]}
-    browser = FakeBrowser(responses)
-    with BrowserSharePointSource(SITE, [ROOT], browser, temp_directory=tmp_path) as source:
+    responses["/Versions?"] = {
+        "value": [
+            {
+                "ID": 700,
+                "VersionLabel": "0.98",
+                "Created": "2026-09-15T13:00:00Z",
+                "CreatedBy": {
+                    "Title": "Autora",
+                    "Email": "a@example.com",
+                    "LoginName": "login",
+                },
+                "CheckInComment": "fim",
+                "Length": "200",
+                "Url": "hist-700",
+                "IsCurrentVersion": False,
+            },
+            {
+                "ID": 2,
+                "VersionLabel": "0.10",
+                "CreatedBy": {"Title": "Autor"},
+                "Size": 100,
+            },
+        ]
+    }
+    responses[")?$select=Name"] = file_metadata(ui_version=99)
+    source, _ = make_source(tmp_path, responses)
+    with source:
         spreadsheet = source.list_spreadsheets()[0]
         versions = source.list_versions(spreadsheet)
-    assert [(version.id, version.number) for version in versions] == [("2", "0.10"), ("98", "0.98")]
-    assert versions[1].author == "Autora"
-    assert versions[1].author_email == "a@example.com"
-    assert versions[1].comment == "fim" and versions[1].source_url == "hist-98"
-    assert versions[1].is_current is False
+    assert [(v.id, v.number, v.is_current) for v in versions] == [
+        ("2", "0.10", False),
+        ("700", "0.98", False),
+        ("99", "0.99", True),
+    ]
+    assert versions[1].author == "Autora" and versions[1].comment == "fim"
+    assert versions[1].source_url == "hist-700" and versions[1].size == 200
+    assert versions[-1].modified_at == "2026-09-16T11:35:49Z"
+    assert versions[-1].author == "Autora Atual" and versions[-1].size == 226665
 
 
-def test_path_encoding_download_and_xlsx_validation(tmp_path: Path) -> None:
+def test_current_is_not_duplicated_when_versions_also_contains_it(
+    tmp_path: Path,
+) -> None:
     responses = discovery_responses()
-    responses["/Versions?"] = {"value": [{"ID": 7, "VersionLabel": "0.7"}]}
-    responses["Versions(7)/$value"] = workbook_bytes("válido")
-    browser = FakeBrowser(responses)
-    with BrowserSharePointSource(SITE, [ROOT], browser, temp_directory=tmp_path) as source:
+    responses["/Versions?"] = {
+        "value": [
+            {"ID": 98, "VersionLabel": "0.98"},
+            {"ID": 99, "VersionLabel": "0.99", "IsCurrentVersion": True},
+        ]
+    }
+    responses[")?$select=Name"] = file_metadata()
+    source, _ = make_source(tmp_path, responses)
+    with source:
         spreadsheet = source.list_spreadsheets()[0]
-        version = source.list_versions(spreadsheet)[0]
-        path = source.get_version(spreadsheet, version)
-        assert path.is_file() and "_7_0.7.xlsx" in path.name
-        download_url = browser.calls[-1][0]
-        assert "Setor%20A/CQL028.xlsx" in download_url and "Versions(7)/$value" in download_url
-    assert not path.parent.exists()
+        versions = source.list_versions(spreadsheet)
+    assert [(v.id, v.number, v.is_current) for v in versions] == [
+        ("98", "0.98", False),
+        ("99", "0.99", True),
+    ]
 
 
-def test_invalid_or_missing_version_never_becomes_a_non_adjacent_comparison(tmp_path: Path) -> None:
+def test_rejects_changed_unique_id_in_current_metadata(tmp_path: Path) -> None:
     responses = discovery_responses()
-    responses["/Versions?"] = {"value": [
-        {"ID": 1, "VersionLabel": "0.1"}, {"ID": 2, "VersionLabel": "0.2"}, {"ID": 3, "VersionLabel": "0.3"}
-    ]}
-    responses["Versions(1)/$value"] = workbook_bytes("um")
-    responses["Versions(2)/$value"] = "não é xlsx".encode()
-    responses["Versions(3)/$value"] = workbook_bytes("três")
-    browser = FakeBrowser(responses)
-    with Database(tmp_path / "audit.db") as database:
+    responses["/Versions?"] = {"value": []}
+    responses[")?$select=Name"] = file_metadata("outro-id")
+    source, _ = make_source(tmp_path, responses)
+    with source, pytest.raises(SharePointReadError, match="UniqueId"):
+        source.list_versions(source.list_spreadsheets()[0])
+
+
+def test_downloads_historical_and_current_using_distinct_read_only_endpoints(
+    tmp_path: Path,
+) -> None:
+    responses = discovery_responses()
+    responses["/Versions?"] = {"value": [{"ID": 98, "VersionLabel": "0.98"}]}
+    responses[")?$select=Name"] = file_metadata()
+    responses["Versions(98)/$value"] = workbook_bytes("histórica")
+    responses["')/$value"] = workbook_bytes("atual")
+    source, browser = make_source(tmp_path, responses)
+    with source:
+        spreadsheet = source.list_spreadsheets()[0]
+        historical, current = source.list_versions(spreadsheet)
+        historical_path = source.get_version(spreadsheet, historical)
+        assert historical_path.is_file() and historical_path.name.endswith(
+            "_98_0.98.xlsx"
+        )
+        historical_bytes = historical_path.read_bytes()
+        current_path = source.get_version(spreadsheet, current)
+        assert current_path.is_file() and current_path.name.endswith("_99_0.99.xlsx")
+    assert zipfile.is_zipfile(BytesIO(historical_bytes))
+    assert "/Versions(98)/$value" in browser.visited[-2]
+    assert "/Versions(" not in browser.visited[-1] and browser.visited[-1].endswith(
+        "/$value"
+    )
+    assert all("/_api/" in url for url in browser.visited)
+
+
+def test_rejects_invalid_open_xml_and_incomplete_download(tmp_path: Path) -> None:
+    responses = discovery_responses()
+    responses["Versions(7)/$value"] = "não é xlsx".encode()
+    source, _ = make_source(tmp_path, responses)
+    spreadsheet = SpreadsheetInfo(
+        SITE,
+        "sharepoint-rest",
+        "UUID-A",
+        "Arquivo.xlsx",
+        f"{ROOT}/Setor A/Arquivo.xlsx",
+    )
+    from app.sources.base import VersionInfo
+
+    with source, pytest.raises(SharePointReadError, match="XLSX/ZIP"):
+        source.get_version(spreadsheet, VersionInfo("7", "0.7"))
+
+    responses["Versions(7)/$value"] = "partial"
+    source, _ = make_source(tmp_path / "second", responses)
+    with source, pytest.raises(SharePointReadError, match="crdownload"):
+        source.get_version(spreadsheet, VersionInfo("7", "0.7"))
+
+
+def test_requires_workbook_xml(tmp_path: Path) -> None:
+    invalid = tmp_path / "invalid.xlsx"
+    with zipfile.ZipFile(invalid, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+    with pytest.raises(SharePointReadError, match="workbook.xml"):
+        BrowserSharePointSource._validate_xlsx(invalid)
+
+
+def test_gap_download_failure_rolls_back_and_keeps_checkpoint(tmp_path: Path) -> None:
+    responses = discovery_responses()
+    responses["/Versions?"] = {
+        "value": [
+            {"ID": 97, "VersionLabel": "0.97"},
+            {"ID": 98, "VersionLabel": "0.98"},
+        ]
+    }
+    responses[")?$select=Name"] = file_metadata()
+    responses["Versions(97)/$value"] = workbook_bytes("97")
+    responses["Versions(98)/$value"] = "inválido".encode()
+    responses["')/$value"] = workbook_bytes("99")
+    source, _ = make_source(tmp_path, responses)
+    with Database(tmp_path / "audit.db") as database, source:
         database.initialize()
-        with BrowserSharePointSource(SITE, [ROOT], browser, temp_directory=tmp_path / "temp") as source:
-            spreadsheet = source.list_spreadsheets()[0]
-            result = AuditService(database, source).audit(spreadsheet)
+        spreadsheet = source.list_spreadsheets()[0]
+        result = AuditService(database, source).audit(spreadsheet)
         assert result.status is AuditExecutionStatus.FAILED
         assert result.processed_versions == 0
-        assert database.connection.execute("SELECT COUNT(*) FROM versao_processada").fetchone()[0] == 0
-        assert database.connection.execute("SELECT COUNT(*) FROM checkpoint").fetchone()[0] == 0
+        assert (
+            database.connection.execute(
+                "SELECT COUNT(*) FROM versao_processada"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            database.connection.execute("SELECT COUNT(*) FROM checkpoint").fetchone()[0]
+            == 0
+        )
 
 
-def test_rejects_write_or_cross_origin_endpoints(tmp_path: Path) -> None:
-    source = BrowserSharePointSource(SITE, [ROOT], FakeBrowser({}), temp_directory=tmp_path)
-    with pytest.raises(SharePointReadError, match="Somente endpoints GET"):
-        source._fetch("https://evil.example/_api/web")
-    source.close()
+def test_only_get_same_origin_api_is_embedded() -> None:
+    import inspect
+    import app.sources.sharepoint as module
+
+    source = inspect.getsource(module)
+    assert "method: 'GET'" in source
+    assert all(
+        f"method: '{method}'" not in source
+        for method in ("POST", "PUT", "PATCH", "DELETE")
+    )
+    assert (
+        "get_cookies" not in source
+        and "access_token" not in source
+        and "password" not in source
+    )

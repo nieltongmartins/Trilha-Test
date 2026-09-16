@@ -9,7 +9,26 @@ Data: 15/09/2026
 
 ---
 
-# REVISÃO ARQUITETURAL F4 — PROVIDER EDGE/REST
+# ENCERRAMENTO ARQUITETURAL F4
+
+A arquitetura final da F4 é `BrowserSharePointSource -> VersionSource -> AuditService ->
+SQLite`. Selenium abre Edge visível com diretório temporário de download; autenticação e
+MFA são manuais. Consultas JSON usam `fetch` GET same-origin dentro da página e binários
+são baixados pelo próprio Edge. Não existe exportação de sessão para cliente HTTP.
+
+A descoberta usa `GetFolderByServerRelativeUrl(...)/Files` e `/Folders` de forma recursiva
+nos escopos autorizados. A chave persistida é `(site_url, "sharepoint-rest", UniqueId)`;
+nome e caminho são atualizados como atributos mutáveis. Histórico usa `/Versions` com
+`CreatedBy`; atual usa os metadados do arquivo e `/$value`. Ambos implementam o mesmo
+`VersionSource` já consumido pelo motor incremental. Downloads incompletos ou Open XML
+inválido encerram a execução, preservando a última transação/checkpoint confirmada.
+
+`GraphSharePointSource` permanece isolada e opcional para ambientes autorizados; a
+política corporativa de consentimento impediu seu uso como provider obrigatório da V1.
+Nenhum endpoint de escrita SharePoint integra a solução. F4 está concluída; F5 não foi
+iniciada.
+
+# REVISÃO ARQUITETURAL INTERMEDIÁRIA F4 — REGISTRO HISTÓRICO
 
 Fluxo oficial da V1: `BrowserSharePointSource` descobre arquivos recursivamente nos
 escopos configurados, normaliza identidade/proveniência e enumera/baixa versões;
@@ -27,8 +46,8 @@ identidade: `File.UniqueId` retornado pelo REST, com site e escopo como contexto
 localização: `ServerRelativeUrl`; versões históricas: `/Versions?$expand=CreatedBy`;
 conteúdo: `/Versions(ID)/$value`. O ID é preservado separadamente do label e fornece
 a ordem técnica observada. Os binários são validados antes da comparação e removidos
-com o diretório temporário. A versão atual permanece explicitamente fora da coleção
-histórica até validação real de metadados e conteúdo por endpoints read-only.
+com o diretório temporário. Naquele estágio, a versão atual permanecia fora da coleção histórica até validação; a
+validação e implementação finais estão registradas no encerramento acima.
 
 ---
 

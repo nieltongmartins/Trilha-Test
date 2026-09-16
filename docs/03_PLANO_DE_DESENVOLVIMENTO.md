@@ -9,7 +9,21 @@
 
 ---
 
-# ATUALIZAÇÃO DO PLANO — F4 AUTORIZADA
+# ENCERRAMENTO DO PLANO — F4 CONCLUÍDA
+
+A evidência corporativa fornecida encerrou as duas validações que ainda estavam pendentes:
+a versão atual foi identificada por `UIVersion/UIVersionLabel` e adquirida por `/$value`;
+e o `UniqueId` foi preservado após renomeação e movimentação manuais de arquivo
+descartável. A implementação passou a compor histórico + atual, validar downloads reais
+do Edge e usar `(site, contexto REST, UniqueId)` como identidade.
+
+O Git real desta branch contém três commits F4 anteriores alcançáveis: `1a7421a`,
+`ee013b3` e `ae6b9a2`. `df7943f`, citado por registro antigo de PR fechado sem merge, não
+é objeto presente. Este encerramento usa um dos dois commits adicionais já autorizados
+pela exceção controlada da F4. Todos os critérios da seção 25 foram atendidos por código,
+testes automatizados e evidência corporativa. F5 continua não autorizada/não iniciada.
+
+# ATUALIZAÇÃO INTERMEDIÁRIA DO PLANO — REGISTRO HISTÓRICO
 
 O histórico Git real da branch deve prevalecer sobre hashes meramente citados em
 documentação. Nesta branch, `1a7421a` contém a implementação Graph e o registro do
@@ -1693,14 +1707,13 @@ arquitetura.
 FASE 1 — CONCLUÍDA
 FASE 2 — CONCLUÍDA
 FASE 3 — CONCLUÍDA
-FASE 4 — EM ANDAMENTO / BLOQUEIO TÉCNICO EM REAVALIAÇÃO
+FASE 4 — CONCLUÍDA
 FASE 5 — NÃO INICIADA
 FASE 6 — NÃO INICIADA
 
 Situação da Fase 4:
 
-A estratégia originalmente baseada em Microsoft Graph encontrou
-restrição de autenticação/autorização no ambiente corporativo.
+A estratégia Graph encontrou restrição corporativa; a alternativa Edge/REST foi validada, implementada e concluída.
 
 A arquitetura e o plano foram revisados para permitir investigação de
 mecanismo alternativo suportado e autorizado de aquisição SharePoint.
@@ -1717,14 +1730,13 @@ Progresso da V1:
 
 # 55. PRÓXIMA AÇÃO OFICIAL
 
-Continuar:
+Aguardar autorização expressa para:
 
-FASE 4 — AQUISIÇÃO DE VERSÕES SHAREPOINT
+FASE 5 — INTERFACE E RELATÓRIO
 
 Próxima atividade:
 
-investigar e validar mecanismo suportado e autorizado de aquisição
-automatizada das versões históricas no ambiente corporativo.
+Nenhuma nesta sessão; F5 não está autorizada.
 
 Não implementar importação manual como solução oficial sem nova decisão.
 
