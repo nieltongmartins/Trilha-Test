@@ -9,6 +9,14 @@
 
 ---
 
+# INÍCIO AUTORIZADO DA F5 — 16/09/2026
+
+A solicitação expressa do responsável para identificar e executar a próxima fase
+autorizou o início da F5 após a conclusão da F4. Interface Tkinter e relatório
+consolidado foram implementados no primeiro commit da fase. A F5 permanece em
+andamento até a validação manual da interface em ambiente gráfico; F6 não está
+autorizada.
+
 # ENCERRAMENTO DO PLANO — F4 CONCLUÍDA
 
 A evidência corporativa fornecida encerrou as duas validações que ainda estavam pendentes:
@@ -1708,7 +1716,7 @@ FASE 1 — CONCLUÍDA
 FASE 2 — CONCLUÍDA
 FASE 3 — CONCLUÍDA
 FASE 4 — CONCLUÍDA
-FASE 5 — NÃO INICIADA
+FASE 5 — EM ANDAMENTO
 FASE 6 — NÃO INICIADA
 
 Situação da Fase 4:
@@ -1730,20 +1738,13 @@ Progresso da V1:
 
 # 55. PRÓXIMA AÇÃO OFICIAL
 
-Aguardar autorização expressa para:
-
-FASE 5 — INTERFACE E RELATÓRIO
-
-Próxima atividade:
-
-Nenhuma nesta sessão; F5 não está autorizada.
+Próxima atividade: validar manualmente a interface da F5 em ambiente gráfico com
+Edge, sem iniciar a F6.
 
 Não implementar importação manual como solução oficial sem nova decisão.
 
 Não iniciar Fase 5.
 
-Não realizar commits de implementação até que exista uma alternativa
-tecnicamente validada ou autorização expressa para implementação da
-solução escolhida.
+Não iniciar a F6 sem autorização expressa.
 
 FIM DO DOCUMENTO

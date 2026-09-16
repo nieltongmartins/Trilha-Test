@@ -144,7 +144,9 @@ class Database:
         """Abre uma conexão e habilita constraints de chave estrangeira."""
         if self._connection is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._connection = sqlite3.connect(self.path)
+            # A interface executa uma auditoria por vez em uma thread de trabalho
+            # para permanecer responsiva; o acesso continua serializado pela tela.
+            self._connection = sqlite3.connect(self.path, check_same_thread=False)
             self._connection.row_factory = sqlite3.Row
             self._connection.execute("PRAGMA foreign_keys = ON")
         return self._connection
