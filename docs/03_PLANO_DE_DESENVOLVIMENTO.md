@@ -1382,11 +1382,10 @@ Executar, nesta ordem e como tarefas independentes:
 - [x] auditoria incremental;
 - [x] falha e retomada;
 - [x] geração de relatório;
-- [ ] múltiplas planilhas controladas.
+- [x] múltiplas planilhas controladas.
 
-Os seis primeiros itens foram executados, cada um após autorização própria. O item
-seguinte continua pendente e não está implicitamente autorizado pela conclusão do
-anterior.
+Os sete itens foram executados, cada um após autorização própria. A conclusão deste
+bloco não autoriza implicitamente a tarefa seguinte da F6.
 
 ---
 
