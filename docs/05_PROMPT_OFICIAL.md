@@ -1,9 +1,14 @@
 # PROJETO: AUDITOR DE PLANILHAS SHAREPOINT
 
 
-# ESTADO OFICIAL APÓS A F4
+# ESTADO OFICIAL APÓS A ACEITAÇÃO DA F5
 
-F4 está concluída com Selenium + Edge visível + autenticação manual + SharePoint REST read-only. A fonte descobre `.xlsx` recursivamente em escopos configurados, usa `UniqueId` contextualizado como identidade, reúne `/Versions` e a versão atual obtida separadamente, baixa histórico e atual pelos respectivos endpoints `/$value`, valida Open XML e entrega ao motor incremental existente. Cookies, tokens, senhas, PRT e transferência de sessão são proibidos. Graph é opcional/futuro. F5 não foi iniciada e depende de autorização expressa.
+F5 está concluída após validação real no Windows corporativo com SharePoint Online,
+Selenium + Edge e migração do SQLite existente. Interface, aquisição e processamento de
+versões, persistência, checkpoint e relatório com as três abas foram aceitos. O
+SharePoint permanece read-only; cookies, tokens, senhas, PRT, bypass e transferência de
+sessão continuam proibidos. A F6 foi iniciada com autorização expressa e deve avançar
+uma tarefa por vez, conforme a ordem do plano. A primeira tarefa é testes unitários.
 
 
 

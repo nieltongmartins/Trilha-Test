@@ -9,6 +9,54 @@
 
 ---
 
+# ACEITAÇÃO REAL DA F5 E INÍCIO DA F6 — 16/09/2026
+
+## Encerramento formal da F5
+
+A validação real foi concluída com sucesso no Windows corporativo, usando SharePoint
+Online real, Selenium + Microsoft Edge e o banco SQLite existente. A planilha
+`TEST001_RENOMEADO.xlsx` apresentou última versão auditada `1.3`, última disponível
+`1.3` e zero versões pendentes.
+
+Após a migração aditiva, o banco continha 2 planilhas, 3 versões processadas, 90
+alterações, 1 checkpoint, 16 execuções e 10 erros de processamento. Os 10 erros
+anteriores permaneceram como histórico, comprovando que a migração não apagou os dados
+existentes.
+
+Foram aceitos: aquisição e processamento de versões históricas, comparação, persistência
+das alterações, avanço do checkpoint e relatório produzido do banco com as abas
+`RESUMO`, `VERSOES` e `TRILHA`. O SharePoint permaneceu estritamente read-only; os XLSX
+históricos permaneceram temporários; o SQLite continuou como fonte canônica da trilha e
+dos checkpoints. Mensagens visuais de erro de download ou verificação do Edge podem
+ocorrer mesmo quando o arquivo foi criado e validado no filesystem; isso não autoriza
+alterar políticas do Edge, implementar bypass ou extrair credenciais ou artefatos de
+sessão.
+
+**Status final:** 🟢 F5 CONCLUÍDA.
+
+## Requisitos e riscos de produção registrados
+
+O cenário informado prevê aproximadamente 2.000 planilhas, algumas com mais de 3.000
+versões, e potencialmente milhões de alterações. A F6 deverá obter evidência de
+capacidade para índices, consultas, crescimento do banco, memória, relatórios, carga
+inicial, incrementais e lotes. SQLite não será substituído preventivamente.
+
+Um único banco canônico deverá suportar muitas planilhas, cada uma com identidade,
+versões, alterações, checkpoint, execuções e erros independentes. Também permanece um
+requisito de configuração/usabilidade tratar `SHAREPOINT_SITE_URL` e
+`SHAREPOINT_SCOPE_PATHS` sem hardcode de escopos transitórios como `Z-Testes VSC`.
+
+## Primeira tarefa da F6 — testes unitários
+
+**Status:** concluída. Foram executados somente os testes unitários isolados de
+configuração, banco, leitura, comparação, fonte SharePoint com fakes, relatório e
+interface com fakes. Testes de integração e os demais itens de Testes Finais não foram
+antecipados.
+
+**Próxima tarefa:** testes de integração, pendente de nova autorização.
+
+---
+
 # IMPLEMENTAÇÃO DA F5 — 16/09/2026
 
 **Fase:** F5 — Interface e Relatório. **Status:** 🟡 EM ANDAMENTO.
@@ -290,8 +338,8 @@ Utilizar:
 | F2 | Motor Excel e Comparação | 🟢 CONCLUÍDA | 4 |
 | F3 | Auditor Local Incremental | 🟢 CONCLUÍDA | 2 |
 | F4 | Aquisição de Versões SharePoint | 🟢 CONCLUÍDA | 4 |
-| F5 | Interface e Relatório | 🟡 EM ANDAMENTO | 1 |
-| F6 | Robustez e Preparação para Produção | ⬜ NÃO INICIADA | 0 |
+| F5 | Interface e Relatório | 🟢 CONCLUÍDA | 3 |
+| F6 | Robustez e Preparação para Produção | 🟡 EM ANDAMENTO | 1 |
 
 * A Fase 4 atingiu o limite original de commits durante a tentativa de
 integração Graph e o registro do bloqueio. O plano revisado autoriza,
@@ -860,13 +908,13 @@ expressa do responsável pelo projeto.
 
 ## F5 — Interface e Relatório
 
-**Status:** 🟡 EM ANDAMENTO
+**Status:** 🟢 CONCLUÍDA
 
 **Data de início:** 16/09/2026
 
-**Data de conclusão:** —
+**Data de conclusão:** 16/09/2026
 
-**Quantidade de commits:** 1
+**Quantidade de commits:** 3
 
 ### Objetivo
 
@@ -884,20 +932,23 @@ factual no início deste documento.
 
 ### Commits
 
-Primeiro commit da F5; hash informado no relatório da sessão.
+`0f95c32` implementou interface e relatório, `fdc12ad` corrigiu a validação real e
+`1b71aec` adicionou a migração de bancos SQLite legados. Os três commits constituem o
+limite ordinário da F5.
 
 ### Problemas encontrados
 
-Nenhum.
+A migração aditiva do SQLite foi necessária e posteriormente aceita no banco real. As
+mensagens visuais de download do Edge não representam, por si sós, falha do arquivo já
+validado no filesystem.
 
 ### Pendências
 
-- validar visualmente a janela em ambiente desktop com Edge;
-- validar o comando de abertura do relatório no aplicativo associado.
+Nenhuma pendência obrigatória da fase.
 
 ### Próximo passo
 
-Concluir a validação manual da F5. Não iniciar F6.
+F6 iniciada por autorização expressa; executar uma tarefa por vez.
 
 ---
 
@@ -905,13 +956,13 @@ Concluir a validação manual da F5. Não iniciar F6.
 
 ## F6 — Robustez e Preparação para Produção
 
-**Status:** ⬜ NÃO INICIADA
+**Status:** 🟡 EM ANDAMENTO
 
-**Data de início:** —
+**Data de início:** 16/09/2026
 
 **Data de conclusão:** —
 
-**Quantidade de commits:** 0
+**Quantidade de commits:** 1
 
 ### Objetivo
 
@@ -920,15 +971,17 @@ preparação da V1 para homologação.
 
 ### Implementado
 
-Ainda não iniciado.
+Primeira tarefa de Testes Finais: execução dos testes unitários isolados.
 
 ### Testes executados
 
-Nenhum.
+Testes unitários de configuração, persistência, reader, comparator, fonte SharePoint
+com fakes, relatório e interface com fakes — aprovados.
 
 ### Commits
 
-Nenhum.
+Primeiro commit da F6; identificador informado no relatório da sessão, pois o commit
+não pode registrar o próprio hash.
 
 ### Problemas encontrados
 
@@ -936,11 +989,11 @@ Nenhum.
 
 ### Pendências
 
-Aguardar conclusão e aprovação da Fase 5.
+Demais tarefas da F6, respeitando a ordem oficial e uma autorização por vez.
 
 ### Próximo passo
 
-Não autorizado.
+Testes de integração. Não executar sem nova autorização.
 
 ---
 
@@ -1432,21 +1485,21 @@ A presença nesta seção não significa autorização para implementação.
 
 # 25. ESTADO ATUAL OFICIAL
 
-**Data:** 15/09/2026
+**Data:** 16/09/2026
 
 **Projeto:** Auditor de Planilhas Excel — SharePoint Online
 
 **Versão planejada:** V1
 
-**Fase atual:** F5 — Interface e Relatório
+**Fase atual:** F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO
+**Status:** 🟡 EM ANDAMENTO — primeira tarefa concluída
 
-**Implementação:** núcleo local completo; integração Microsoft Graph
-implementada e testada isoladamente; validação Graph real inviabilizada no
-ambiente corporativo atual; investigação de aquisição alternativa em curso.
+**Implementação:** núcleo local, aquisição SharePoint Edge/REST, interface, migração
+SQLite e relatório validados no ambiente corporativo real; primeira tarefa de testes
+finais da F6 concluída.
 
-**Fases concluídas:** 4/6
+**Fases concluídas:** 5/6
 
 **Commits do ciclo original da Fase 4:** 3
 
@@ -1456,8 +1509,7 @@ ambiente corporativo atual; investigação de aquisição alternativa em curso.
 
 **Próxima ação:**
 
-Validar manualmente a interface em ambiente gráfico com Edge e encerrar a F5 se
-todos os critérios forem confirmados. Não iniciar F6.
+Solicitar autorização para a próxima tarefa da F6: testes de integração.
 
 ---
 
