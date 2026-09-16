@@ -194,6 +194,64 @@ commit não pode registrar o próprio identificador.
 **Próxima tarefa:** múltiplas planilhas controladas, pendente de nova autorização. Não
 foi executada nesta sessão.
 
+## Sétima tarefa da F6 — múltiplas planilhas controladas
+
+**Status:** concluída. Um teste automatizado e determinístico validou três planilhas
+com identidades técnicas distintas, fontes XLSX locais e um único SQLite canônico. Os
+IDs de versão foram deliberadamente repetidos entre as planilhas para comprovar que a
+identidade da planilha participa do isolamento. Nenhum SharePoint real foi acessado ou
+alterado.
+
+O estado controlado foi:
+
+- **Planilha A** (`site-a/drive-a/item-a`): histórico `1.0 → 1.1 → 1.2` já
+  consolidado; checkpoint inicial e final `1.2`; a reexecução processou zero versões,
+  adquiriu zero arquivos e preservou 2 pares, 3 alterações e os dados existentes;
+- **Planilha B** (`site-b/drive-b/item-b`): histórico inicialmente consolidado até
+  `2.1`; a execução incremental adquiriu apenas a base `2.1` e as novas versões `2.2`
+  e `2.3`, processou `2.1 → 2.2` e `2.2 → 2.3`, avançou exclusivamente seu checkpoint
+  de `2.1` para `2.3` e terminou com 3 pares e 5 alterações próprios;
+- **Planilha C** (`site-c/drive-c/item-c`): sem cadastro, histórico ou checkpoint
+  inicial; a auditoria inicial adquiriu `3.0`, `3.1` e `3.2`, processou `3.0 → 3.1` e
+  `3.1 → 3.2`, criou checkpoint `3.2` e persistiu 2 pares e 3 alterações próprios.
+
+Foram registradas 2 execuções para A (consolidação anterior e reexecução sem
+novidades), 2 para B (consolidação parcial e incremento) e 1 para C (auditoria
+inicial). Consultas cruzadas confirmaram zero alterações ligadas a uma versão de outra
+planilha e zero versões ligadas a uma execução de outra planilha. Cada par ocorreu uma
+única vez; os totais anteriores de A e B foram preservados e nenhuma perda ou
+duplicação foi observada.
+
+Um relatório individual foi gerado para cada planilha exclusivamente do SQLite. Cada
+relatório apresentou o DriveItem ID, as versões e as quantidades de alterações da
+planilha correspondente: A com versões `1.x` e 3 alterações, B com versões `2.x` e 5
+alterações, C com versões `3.x` e 3 alterações. Nenhum relatório conteve versões ou
+alterações das demais planilhas.
+
+**Comandos executados:**
+
+`pytest -q tests/test_multiple_spreadsheets.py` — `1 passed in 0.56s`.
+
+`pytest -q` — `43 passed in 1.83s`.
+
+`python -m compileall -q app tests` — concluído sem erros.
+
+`ruff check .` — concluído sem violações.
+
+No cenário compartilhado, `PRAGMA integrity_check` retornou `ok` e
+`PRAGMA foreign_key_check` não retornou violações. Não foi necessária alteração no
+código de produção ou na arquitetura. Não foram encontrados problemas, bloqueios,
+limitações estruturais ou riscos novos; esta validação funcional não constitui prova
+de capacidade para 2.000 planilhas e não executou carga nem otimização.
+
+O commit desta tarefa excede o limite ordinário da F6 exclusivamente porque o ambiente
+de execução impõe commit e criação de pull request; a exigência superior foi atendida
+com um único commit coerente. O hash é informado no relatório da sessão, pois um commit
+não pode registrar o próprio identificador.
+
+**Próxima tarefa oficial:** performance, seção 39 do plano, pendente de autorização.
+Não foi executada nesta sessão.
+
 ---
 
 # IMPLEMENTAÇÃO DA F5 — 16/09/2026
@@ -1110,10 +1168,11 @@ preparação da V1 para homologação.
 
 ### Implementado
 
-Seis primeiras tarefas de Testes Finais: testes unitários isolados, testes de
+As sete tarefas de Testes Finais: testes unitários isolados, testes de
 integração automatizados entre os componentes, reexecução idempotente após reabertura
 do banco, auditoria incremental a partir do checkpoint, falha/retomada transacional e
-geração determinística de relatório exclusivamente a partir do SQLite.
+geração determinística de relatório exclusivamente a partir do SQLite, além do cenário
+controlado de três planilhas isoladas no mesmo banco canônico.
 
 ### Testes executados
 
@@ -1121,7 +1180,8 @@ Testes unitários de configuração, persistência, reader, comparator, fonte Sh
 com fakes, relatório e interface com fakes — aprovados. Seleção de três testes de
 integração automatizados — `3 passed in 0.47s`. Reexecução idempotente e invariante
 read-only do provider — `2 passed in 0.35s`. Auditoria incremental — `1 passed in
-0.39s`; falha/retomada — `1 passed in 0.49s`; relatório — `3 passed in 0.36s`.
+0.39s`; falha/retomada — `1 passed in 0.49s`; relatório — `3 passed in 0.36s`;
+múltiplas planilhas — `1 passed in 0.56s`; suíte completa — `43 passed in 1.83s`.
 
 ### Commits
 
@@ -1145,7 +1205,7 @@ Demais tarefas da F6, respeitando a ordem oficial e uma autorização por vez.
 
 ### Próximo passo
 
-Múltiplas planilhas controladas. Não executar sem nova autorização.
+Performance. Não executar sem nova autorização.
 
 ---
 
@@ -1645,12 +1705,12 @@ A presença nesta seção não significa autorização para implementação.
 
 **Fase atual:** F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO — seis tarefas concluídas
+**Status:** 🟡 EM ANDAMENTO — sete tarefas concluídas
 
 **Implementação:** núcleo local, aquisição SharePoint Edge/REST, interface, migração
 SQLite e relatório validados no ambiente corporativo real; testes unitários, testes
 de integração automatizados, reexecução idempotente, auditoria incremental,
-falha/retomada e geração de relatório da F6 concluídos.
+falha/retomada, geração de relatório e múltiplas planilhas controladas da F6 concluídos.
 
 **Fases concluídas:** 5/6
 
@@ -1662,7 +1722,7 @@ falha/retomada e geração de relatório da F6 concluídos.
 
 **Próxima ação:**
 
-Solicitar autorização para a próxima tarefa da F6: múltiplas planilhas controladas. O limite
+Solicitar autorização para a próxima tarefa da F6: performance. O limite
 ordinário de três commits da fase foi ultrapassado por determinação do ambiente desta
 execução.
 
