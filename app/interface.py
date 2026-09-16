@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 import subprocess
 import sys
 import threading
@@ -13,6 +14,9 @@ from app.audit_service import AuditService
 from app.database import Database
 from app.report_service import ReportService
 from app.sources.base import SpreadsheetInfo, VersionSource
+
+
+logger = logging.getLogger("auditoria_excel.interface")
 
 
 class AuditApplication(ttk.Frame):
@@ -68,6 +72,11 @@ class AuditApplication(ttk.Frame):
         try:
             self.spreadsheets = list(self.source.list_spreadsheets())
         except Exception as error:
+            logger.warning(
+                "Falha controlada na descoberta de planilhas tipo_erro=%s erro=%s",
+                type(error).__name__,
+                error,
+            )
             self.status.set(f"Falha ao listar planilhas: {error}")
             return
         self.selector["values"] = [
@@ -124,6 +133,11 @@ class AuditApplication(ttk.Frame):
                 )
             )
         except Exception as error:
+            logger.warning(
+                "Falha controlada ao consultar versões tipo_erro=%s erro=%s",
+                type(error).__name__,
+                error,
+            )
             checkpoint = locals().get("checkpoint")
             self.details.set(
                 f"Última auditada: {checkpoint or '—'} | "
@@ -166,9 +180,19 @@ class AuditApplication(ttk.Frame):
                 "Relatório", "Audite a planilha antes de gerar o relatório."
             )
             return
-        self.last_report = ReportService(
-            self.database.connection, self.reports_directory
-        ).generate(row["id"])
+        try:
+            self.last_report = ReportService(
+                self.database.connection, self.reports_directory
+            ).generate(row["id"])
+        except Exception as error:
+            logger.error(
+                "Falha na geração de relatório planilha=%s tipo_erro=%s erro=%s",
+                spreadsheet.name,
+                type(error).__name__,
+                error,
+            )
+            self.status.set(f"Falha ao gerar relatório: {error}")
+            return
         self.status.set(f"Relatório gerado: {self.last_report}")
 
     def open_report(self) -> None:

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 import re
 import sqlite3
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
+
+
+logger = logging.getLogger("auditoria_excel.report")
 
 
 class ReportService:
@@ -20,6 +24,7 @@ class ReportService:
         self.output_directory = Path(output_directory)
 
     def generate(self, spreadsheet_id: int) -> Path:
+        logger.info("Geração de relatório iniciada planilha_id=%d", spreadsheet_id)
         spreadsheet = self.connection.execute(
             "SELECT * FROM planilha WHERE id = ?", (spreadsheet_id,)
         ).fetchone()
@@ -152,4 +157,12 @@ class ReportService:
             self.output_directory / f"{safe_name or 'Planilha'}_Trilha_Auditoria.xlsx"
         )
         workbook.save(output)
+        logger.info(
+            "Relatório gerado planilha_id=%d planilha=%s versoes=%d alteracoes=%d arquivo=%s",
+            spreadsheet_id,
+            spreadsheet["nome_atual"],
+            len(versions),
+            len(changes),
+            output,
+        )
         return output
