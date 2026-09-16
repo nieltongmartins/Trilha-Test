@@ -183,23 +183,77 @@ def test_incremental_audit_keeps_base_and_processes_only_new_pairs(
     database: Database, local_history: list[tuple[VersionInfo, Path]], tmp_path: Path,
 ) -> None:
     AuditService(database, source(local_history)).audit(SPREADSHEET)
+    processed_before = [
+        tuple(row)
+        for row in database.connection.execute(
+            "SELECT * FROM versao_processada ORDER BY id"
+        )
+    ]
+    changes_before = [
+        tuple(row)
+        for row in database.connection.execute("SELECT * FROM alteracao ORDER BY id")
+    ]
+
+    # Em uma continuação real, as versões anteriores ao checkpoint não precisam mais
+    # estar disponíveis localmente. A versão 0.99 permanece como base de 0.99 -> 1.00.
+    for _, path in local_history[:-1]:
+        path.unlink()
     extended = list(local_history)
     for number, value in [("1.00", "Um"), ("1.01", "Dois"), ("1.02", "Três")]:
         path = tmp_path / f"{number}.xlsx"
         make_workbook(path, {"Dados": {"A1": value, "C1": "Adicionado"}})
         extended.append((version(number), path))
 
-    result = AuditService(database, source(extended)).audit(SPREADSHEET)
+    incremental_source = source(extended)
+    acquired: list[str] = []
+    original_get_version = incremental_source.get_version
 
-    assert (result.processed_versions, result.final_version) == (3, "1.02")
-    pairs = database.connection.execute(
-        "SELECT versao_anterior_numero, versao_atual_numero "
-        "FROM versao_processada ORDER BY id"
-    ).fetchall()
-    assert [tuple(row) for row in pairs[-3:]] == [
+    def record_get_version(
+        spreadsheet: SpreadsheetInfo, item: VersionInfo,
+    ) -> Path:
+        acquired.append(item.number)
+        return original_get_version(spreadsheet, item)
+
+    incremental_source.get_version = record_get_version  # type: ignore[method-assign]
+    result = AuditService(database, incremental_source).audit(SPREADSHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    assert (
+        result.processed_versions,
+        result.changes,
+        result.initial_checkpoint,
+        result.final_version,
+    ) == (3, 3, "0.99", "1.02")
+    assert acquired == ["0.99", "1.00", "1.01", "1.02"]
+
+    connection = database.connection
+    processed = [
+        tuple(row)
+        for row in connection.execute("SELECT * FROM versao_processada ORDER BY id")
+    ]
+    changes = [
+        tuple(row) for row in connection.execute("SELECT * FROM alteracao ORDER BY id")
+    ]
+    assert processed[:3] == processed_before
+    assert changes[:4] == changes_before
+    assert [(row[3], row[5]) for row in processed[-3:]] == [
         ("0.99", "1.00"), ("1.00", "1.01"), ("1.01", "1.02")
     ]
-    assert scalar(database.connection, "SELECT COUNT(*) FROM versao_processada") == 6
+    assert len(processed) == 6
+    assert len(changes) == 7
+    checkpoint = connection.execute(
+        "SELECT versao_id, versao_numero FROM checkpoint"
+    ).fetchone()
+    assert tuple(checkpoint) == ("version-102", "1.02")
+    execution = connection.execute(
+        """SELECT checkpoint_inicial, versao_final, versoes_processadas,
+                  alteracoes_encontradas, status, fim, mensagem
+           FROM execucao_auditoria ORDER BY id DESC"""
+    ).fetchone()
+    assert tuple(execution[:5]) == ("0.99", "1.02", 3, 3, "CONCLUIDA")
+    assert execution[5] is not None and execution[6] is None
+    assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_failure_rolls_back_pair_keeps_last_checkpoint_and_can_resume(

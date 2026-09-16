@@ -102,6 +102,33 @@ ou alterado.
 commit ordinário da F6 foi consumido nesta tarefa; não realizar outro commit da fase
 sem autorização expressa ou procedimento previsto pela governança.
 
+## Quarta tarefa da F6 — auditoria incremental
+
+**Status:** concluída. O teste automatizado partiu de um histórico já consolidado até o
+checkpoint `0.99` e acrescentou as versões `1.00`, `1.01` e `1.02`. Os arquivos das
+versões anteriores a `0.99` foram removidos antes da continuação para comprovar que o
+histórico antigo não é readquirido; a aquisição observada ficou restrita à versão-base
+`0.99` e às três versões novas.
+
+Foram comprovados: processamento exclusivo dos pares `0.99 → 1.00`, `1.00 → 1.01` e
+`1.01 → 1.02`; preservação integral das versões e alterações anteriores; checkpoint
+inicial `0.99` e final `1.02`; três versões e três alterações novas; execução concluída
+com término e sem erro; `PRAGMA integrity_check` igual a `ok`; e
+`PRAGMA foreign_key_check` sem violações. A fonte utilizada foi local e somente leitura;
+nenhum SharePoint real foi acessado ou alterado.
+
+**Comando executado:**
+
+`pytest -q tests/test_audit_service.py::test_incremental_audit_keeps_base_and_processes_only_new_pairs`
+
+**Resultado:** `1 passed in 0.39s`. A suíte integral também foi executada com
+`pytest -q` e resultou em `41 passed in 1.22s`. `python -m compileall -q app main.py
+tests` e `git diff --check` concluíram com código zero. Nenhum problema ou bloqueio foi
+encontrado.
+
+**Próxima tarefa:** falha e retomada, pendente de nova autorização. O limite ordinário
+de três commits da F6 permanece atingido.
+
 ---
 
 # IMPLEMENTAÇÃO DA F5 — 16/09/2026
@@ -1018,16 +1045,17 @@ preparação da V1 para homologação.
 
 ### Implementado
 
-Três primeiras tarefas de Testes Finais: testes unitários isolados, testes de
-integração automatizados entre os componentes e reexecução idempotente após reabertura
-do banco.
+Quatro primeiras tarefas de Testes Finais: testes unitários isolados, testes de
+integração automatizados entre os componentes, reexecução idempotente após reabertura
+do banco e auditoria incremental a partir do checkpoint.
 
 ### Testes executados
 
 Testes unitários de configuração, persistência, reader, comparator, fonte SharePoint
 com fakes, relatório e interface com fakes — aprovados. Seleção de três testes de
 integração automatizados — `3 passed in 0.47s`. Reexecução idempotente e invariante
-read-only do provider — `2 passed in 0.35s`.
+read-only do provider — `2 passed in 0.35s`. Auditoria incremental — `1 passed in
+0.39s`; suíte integral após a tarefa — `41 passed in 1.22s`.
 
 ### Commits
 
@@ -1049,7 +1077,7 @@ Demais tarefas da F6, respeitando a ordem oficial e uma autorização por vez.
 
 ### Próximo passo
 
-Auditoria incremental. Não executar sem nova autorização e não realizar novo commit
+Falha e retomada. Não executar sem nova autorização e não realizar novo commit
 da F6 sem autorização expressa ou procedimento previsto pela governança.
 
 ---
@@ -1550,11 +1578,12 @@ A presença nesta seção não significa autorização para implementação.
 
 **Fase atual:** F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO — três tarefas concluídas
+**Status:** 🟡 EM ANDAMENTO — quatro tarefas concluídas
 
 **Implementação:** núcleo local, aquisição SharePoint Edge/REST, interface, migração
 SQLite e relatório validados no ambiente corporativo real; testes unitários, testes
-de integração automatizados e reexecução idempotente da F6 concluídos.
+de integração automatizados, reexecução idempotente e auditoria incremental da F6
+concluídos.
 
 **Fases concluídas:** 5/6
 
@@ -1566,7 +1595,7 @@ de integração automatizados e reexecução idempotente da F6 concluídos.
 
 **Próxima ação:**
 
-Solicitar autorização para a próxima tarefa da F6: auditoria incremental. O limite
+Solicitar autorização para a próxima tarefa da F6: falha e retomada. O limite
 ordinário de três commits da fase foi atingido.
 
 ---
