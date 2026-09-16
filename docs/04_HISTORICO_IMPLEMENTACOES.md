@@ -9,6 +9,46 @@
 
 ---
 
+# IMPLEMENTAÇÃO DA F5 — 16/09/2026
+
+**Fase:** F5 — Interface e Relatório. **Status:** 🟡 EM ANDAMENTO.
+
+Foi implementada a interface desktop Python com Tkinter/ttk, integrada ao provider
+Edge/REST e ao `AuditService`. A tela lista e seleciona planilhas, permite atualizar a
+lista depois da autenticação manual no Edge, mostra checkpoint, versão disponível e
+quantidade pendente, diferencia auditoria inicial de continuação e executa a auditoria
+em uma thread de trabalho para não bloquear permanentemente a janela.
+
+Foi implementado o `ReportService`, que consulta exclusivamente o banco SQLite e gera
+um arquivo regenerável `<nome>_Trilha_Auditoria.xlsx`. O arquivo possui as abas
+`RESUMO`, `VERSOES` e `TRILHA`, cabeçalhos, filtros, painéis congelados, larguras de
+coluna e os totais ADD/MOD/DEL. A interface também permite gerar e localizar/abrir o
+relatório.
+
+**Arquivos criados:** `app/interface.py`, `app/report_service.py` e
+`tests/test_report_service.py`.
+
+**Arquivos alterados:** `main.py`, `app/database.py`, `tests/test_main.py`, `README.md`
+e este histórico.
+
+**Testes executados:** `ruff check app/interface.py app/report_service.py
+app/database.py main.py tests/test_main.py tests/test_report_service.py` — aprovado;
+`pytest -q` — 35 testes aprovados. O Tk 8.6 está instalado, mas o ambiente da sessão
+não possui servidor gráfico (`DISPLAY`) nem `xvfb-run`; por isso a abertura visual da
+janela e a ação de abrir o arquivo no aplicativo associado permanecem sem validação
+manual neste ambiente.
+
+**Critérios verificados:** geração e regeneração do relatório, três abas, conteúdo
+originado do banco, filtros, inicialização headless e ausência de dependência Node.js.
+O fluxo visual completo permanece pendente de validação em ambiente desktop com Edge.
+
+**Commit:** primeiro commit da F5; o identificador real será apresentado no relatório
+da execução, pois o commit não pode registrar o próprio hash em seu conteúdo.
+
+**Próximo passo:** validar manualmente a interface em ambiente gráfico, ainda dentro
+da F5, e corrigir somente eventuais problemas necessários aos critérios de aceite. Não
+iniciar a F6.
+
 # ENCERRAMENTO REAL DA F4 — 16/09/2026
 
 **Branch:** `work`. **Estado inicial:** F4 em andamento; Edge/REST adquiria o histórico, mas versão atual e estabilidade do `UniqueId` estavam pendentes.
@@ -196,7 +236,7 @@ Utilizar:
 | F2 | Motor Excel e Comparação | 🟢 CONCLUÍDA | 4 |
 | F3 | Auditor Local Incremental | 🟢 CONCLUÍDA | 2 |
 | F4 | Aquisição de Versões SharePoint | 🟢 CONCLUÍDA | 4 |
-| F5 | Interface e Relatório | ⬜ NÃO INICIADA | 0 |
+| F5 | Interface e Relatório | 🟡 EM ANDAMENTO | 1 |
 | F6 | Robustez e Preparação para Produção | ⬜ NÃO INICIADA | 0 |
 
 * A Fase 4 atingiu o limite original de commits durante a tentativa de
@@ -766,13 +806,13 @@ expressa do responsável pelo projeto.
 
 ## F5 — Interface e Relatório
 
-**Status:** ⬜ NÃO INICIADA
+**Status:** 🟡 EM ANDAMENTO
 
-**Data de início:** —
+**Data de início:** 16/09/2026
 
 **Data de conclusão:** —
 
-**Quantidade de commits:** 0
+**Quantidade de commits:** 1
 
 ### Objetivo
 
@@ -781,15 +821,16 @@ Excel consolidado.
 
 ### Implementado
 
-Ainda não iniciado.
+Interface Tkinter/ttk e relatório consolidado implementados conforme o registro
+factual no início deste documento.
 
 ### Testes executados
 
-Nenhum.
+`pytest -q` — 35 testes aprovados. `ruff check` nos arquivos da entrega — aprovado.
 
 ### Commits
 
-Nenhum.
+Primeiro commit da F5; hash informado no relatório da sessão.
 
 ### Problemas encontrados
 
@@ -797,31 +838,12 @@ Nenhum.
 
 ### Pendências
 
-### Pendências
-
-- identificar mecanismos suportados e autorizados disponíveis no ambiente;
-- validar autenticação e autorização do mecanismo candidato;
-- comprovar aquisição programática de versão histórica;
-- comprovar descoberta/enumeração das versões necessárias;
-- validar versões secundárias;
-- validar identidade técnica estável da planilha;
-- recuperar os metadados disponíveis;
-- validar ordenação das versões;
-- integrar o mecanismo escolhido à SharePointSource;
-- executar auditoria controlada real;
-- comprovar ausência de operações de escrita.
+- validar visualmente a janela em ambiente desktop com Edge;
+- validar o comando de abertura do relatório no aplicativo associado.
 
 ### Próximo passo
 
-### Próximo passo
-
-Continuar somente a investigação técnica da F4 revisada.
-
-Não implementar solução de aquisição ainda sem validação do mecanismo.
-
-Não adotar importação manual como solução oficial sem decisão expressa.
-
-Não iniciar F5.
+Concluir a validação manual da F5. Não iniciar F6.
 
 ---
 
@@ -1362,9 +1384,9 @@ A presença nesta seção não significa autorização para implementação.
 
 **Versão planejada:** V1
 
-**Fase atual:** F4 — Aquisição de Versões SharePoint
+**Fase atual:** F5 — Interface e Relatório
 
-**Status:** 🟢 CONCLUÍDA
+**Status:** 🟡 EM ANDAMENTO
 
 **Implementação:** núcleo local completo; integração Microsoft Graph
 implementada e testada isoladamente; validação Graph real inviabilizada no
@@ -1380,9 +1402,8 @@ ambiente corporativo atual; investigação de aquisição alternativa em curso.
 
 **Próxima ação:**
 
-Aguardar autorização expressa para F5.
-
-Não iniciar F5.
+Validar manualmente a interface em ambiente gráfico com Edge e encerrar a F5 se
+todos os critérios forem confirmados. Não iniciar F6.
 
 ---
 

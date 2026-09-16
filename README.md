@@ -28,7 +28,10 @@ python main.py
 ```
 
 O comando cria os diretórios operacionais e, se necessário, o banco em
-`data/database/auditoria.db`. A inicialização é idempotente.
+`data/database/auditoria.db`. Em um ambiente gráfico, abre o Edge visível para
+autenticação manual e apresenta a interface Tkinter. Nela é possível selecionar
+a planilha, consultar o checkpoint, auditar sem bloquear a janela e gerar ou abrir
+o relatório consolidado. A inicialização é idempotente.
 
 ## Testes
 
@@ -36,8 +39,9 @@ O comando cria os diretórios operacionais e, se necessário, o banco em
 pytest
 ```
 
-O núcleo inclui persistência, leitura/comparação Excel, auditoria incremental e a
-fonte SharePoint da F4. Interface e relatório pertencem à F5 e não foram iniciados.
+O núcleo inclui persistência, leitura/comparação Excel, auditoria incremental,
+fonte SharePoint, interface desktop e relatório Excel regenerável com as abas
+`RESUMO`, `VERSOES` e `TRILHA`.
 
 ## Fonte SharePoint da F4
 
