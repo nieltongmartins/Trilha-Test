@@ -178,14 +178,15 @@ class AuditService:
                 INSERT INTO versao_processada (
                     planilha_id, versao_anterior_id, versao_anterior_numero,
                     versao_atual_id, versao_atual_numero, data_hora_versao,
-                    autor, comentario, tamanho, quantidade_alteracoes, status,
-                    execucao_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    autor, autor_email, autor_login, comentario, tamanho,
+                    url_origem, versao_atual, quantidade_alteracoes, status, execucao_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (spreadsheet_id, previous.id, previous.number, current.id,
                  current.number, current.modified_at, current.author,
-                 current.comment, current.size, len(changes), status.value,
-                 execution_id),
+                 current.author_email, current.author_login, current.comment,
+                 current.size, current.source_url, int(current.is_current),
+                 len(changes), status.value, execution_id),
             )
             processed_id = cursor.lastrowid
             assert processed_id is not None

@@ -1,11 +1,45 @@
 # HISTÓRICO DE IMPLEMENTAÇÕES
 ## Auditor de Planilhas Excel — SharePoint Online
 
-**Documento:** 04_HISTORICO_IMPLEMENTACOES.md  
+**Documento:** 04_HISTORICO_IMPLEMENTACOES.md
 **Versão:** 1.1
 **Status:** Oficial
 **Data de criação:** 15/09/2026
 **Última revisão:** 15/09/2026
+
+---
+
+# REGISTRO REAL DA CONTINUAÇÃO DA F4 — EDGE/REST
+
+**Branch inspecionada:** `work`
+**Commits F4 anteriores efetivamente incorporados:** `1a7421a` e `ee013b3`.
+**Correção histórica:** `df7943f` não existe no repositório desta branch; a afirmação
+de três commits originais não refletia o Git real. `1a7421a` introduziu o provider Graph
+e registrou o bloqueio; `ee013b3` revisou a documentação. Esta sessão utiliza o terceiro
+e único commit adicional efetivo da F4.
+
+O Graph foi bloqueado por política/consentimento corporativo e foi mantido como provider
+opcional. O POC autorizado com Python, Selenium e Edge comprovou autenticação manual,
+`/_api/web`, enumeração REST com `CreatedBy`, download por `/Versions(ID)/$value`,
+XLSX válido e aquisição integral das 98 versões históricas retornadas (0.1–0.98, IDs
+1–98) com metadados. Não houve captura de senha, cookies ou tokens.
+
+A implementação oficial adiciona descoberta recursiva e dinâmica em escopos
+configurados, preserva `UniqueId`, caminho, pasta, ID/label, UTC, autor da versão,
+email/login, comentário, tamanho, URL e indicador corrente retornado. Todas as chamadas
+autenticadas são GET same-origin dentro do Edge. Downloads são temporários e validados
+como Open XML. O AuditService mantém o checkpoint como baseline e interrompe em falha
+intermediária, sem pular versões.
+
+**Testes automatizados:** `pytest -q` — 28 passed. Cobrem descoberta em pastas, nomes
+iguais com IDs distintos, metadados, ordem por ID, encoding, download/validação XLSX,
+falha intermediária, checkpoint, retomada/idempotência e bloqueio de endpoint externo.
+Não dependem do tenant real.
+
+**Estado:** F4 permanece EM ANDAMENTO. A coleção REST comprovada é histórica; a versão
+atual ainda requer teste corporativo read-only. Também resta confirmar operacionalmente
+a estabilidade de `UniqueId` nos cenários de renomeação/movimentação relevantes. F5
+não foi iniciada.
 
 ---
 

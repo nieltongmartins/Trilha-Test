@@ -16,6 +16,7 @@ class SpreadsheetInfo:
     drive_item_id: str
     name: str
     path: str | None = None
+    folder: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,10 @@ class VersionInfo:
     author: str | None = None
     comment: str | None = None
     size: int | None = None
+    author_email: str | None = None
+    author_login: str | None = None
+    source_url: str | None = None
+    is_current: bool = False
 
 
 class VersionSource(Protocol):

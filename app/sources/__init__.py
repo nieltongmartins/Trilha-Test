@@ -2,9 +2,11 @@
 
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 from app.sources.local import LocalSource
-from app.sources.sharepoint import GraphReadError, SharePointSource
+from app.sources.graph import GraphReadError, GraphSharePointSource
+from app.sources.sharepoint import BrowserSharePointSource, SharePointReadError, SharePointSource
 
 __all__ = [
-    "GraphReadError", "LocalSource", "SharePointSource", "SpreadsheetInfo",
+    "BrowserSharePointSource", "GraphReadError", "GraphSharePointSource", "LocalSource",
+    "SharePointReadError", "SharePointSource", "SpreadsheetInfo",
     "VersionInfo", "VersionSource",
 ]
