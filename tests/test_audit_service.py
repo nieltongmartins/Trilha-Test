@@ -121,17 +121,62 @@ def test_reexecution_without_new_versions_is_idempotent(
     database: Database, local_history: list[tuple[VersionInfo, Path]],
 ) -> None:
     service = AuditService(database, source(local_history))
-    service.audit(SPREADSHEET)
-    result = service.audit(SPREADSHEET)
+    first = service.audit(SPREADSHEET)
+    connection = database.connection
+    checkpoint_before = tuple(connection.execute("SELECT * FROM checkpoint").fetchone())
+    processed_before = [
+        tuple(row)
+        for row in connection.execute("SELECT * FROM versao_processada ORDER BY id")
+    ]
+    changes_before = [
+        tuple(row) for row in connection.execute("SELECT * FROM alteracao ORDER BY id")
+    ]
 
+    # Simula o encerramento da aplicação. Os XLSX podem desaparecer depois da
+    # primeira auditoria: sem novidades, a reexecução não deve tentar relê-los.
+    database.close()
+    for _, path in local_history:
+        path.unlink()
+    database.initialize()
+
+    result = AuditService(database, source(local_history)).audit(SPREADSHEET)
+
+    assert first.status is AuditExecutionStatus.COMPLETED
     assert result.status is AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES
-    assert (result.processed_versions, result.changes, result.final_version) == (0, 0, "0.99")
-    assert scalar(database.connection, "SELECT COUNT(*) FROM versao_processada") == 3
-    assert scalar(database.connection, "SELECT COUNT(*) FROM alteracao") == 4
-    statuses = database.connection.execute(
-        "SELECT status FROM execucao_auditoria ORDER BY id"
+    assert (
+        result.processed_versions,
+        result.changes,
+        result.initial_checkpoint,
+        result.final_version,
+    ) == (0, 0, "0.99", "0.99")
+
+    connection = database.connection
+    assert tuple(connection.execute("SELECT * FROM checkpoint").fetchone()) == (
+        checkpoint_before
+    )
+    assert [
+        tuple(row)
+        for row in connection.execute("SELECT * FROM versao_processada ORDER BY id")
+    ] == processed_before
+    assert [
+        tuple(row) for row in connection.execute("SELECT * FROM alteracao ORDER BY id")
+    ] == changes_before
+    assert scalar(connection, "SELECT COUNT(*) FROM planilha") == 1
+
+    executions = connection.execute(
+        """SELECT codigo_execucao, checkpoint_inicial, versao_final,
+                  versoes_processadas, alteracoes_encontradas, status, fim, mensagem
+           FROM execucao_auditoria ORDER BY id"""
     ).fetchall()
-    assert [row[0] for row in statuses] == ["CONCLUIDA", "CONCLUIDA_SEM_NOVIDADES"]
+    assert len(executions) == 2
+    assert executions[0][0] != executions[1][0]
+    assert executions[0][5] == "CONCLUIDA"
+    assert tuple(executions[1][1:6]) == (
+        "0.99", "0.99", 0, 0, "CONCLUIDA_SEM_NOVIDADES",
+    )
+    assert executions[1][6] is not None and executions[1][7] is None
+    assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_incremental_audit_keeps_base_and_processes_only_new_pairs(

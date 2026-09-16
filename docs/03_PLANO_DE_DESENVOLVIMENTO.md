@@ -1377,15 +1377,16 @@ Não adicionar funcionalidades grandes nesta fase.
 Executar, nesta ordem e como tarefas independentes:
 
 - [x] testes unitários;
-- [ ] testes de integração;
-- [ ] reexecução;
+- [x] testes de integração;
+- [x] reexecução;
 - [ ] auditoria incremental;
 - [ ] falha e retomada;
 - [ ] geração de relatório;
 - [ ] múltiplas planilhas controladas.
 
-O primeiro item foi executado após a autorização de início da F6. Os itens seguintes
-continuam pendentes e não estão implicitamente autorizados pela conclusão do anterior.
+Os três primeiros itens foram executados, cada um após autorização própria. Os itens
+seguintes continuam pendentes e não estão implicitamente autorizados pela conclusão do
+anterior.
 
 ---
 
@@ -1735,12 +1736,13 @@ FASE 2 — CONCLUÍDA
 FASE 3 — CONCLUÍDA
 FASE 4 — CONCLUÍDA
 FASE 5 — CONCLUÍDA
-FASE 6 — EM ANDAMENTO (PRIMEIRA TAREFA CONCLUÍDA)
+FASE 6 — EM ANDAMENTO (TRÊS TAREFAS CONCLUÍDAS)
 
 Situação atual:
 
 A F5 foi aceita em ambiente corporativo real. A F6 foi iniciada por autorização
-expressa e concluiu somente a primeira tarefa do backlog, testes unitários.
+expressa e concluiu as três primeiras tarefas do backlog: testes unitários, testes de
+integração automatizados e reexecução.
 
 Os requisitos de capacidade e operação com várias planilhas em um banco canônico estão
 registrados para validação posterior na ordem do backlog da F6.
@@ -1753,7 +1755,9 @@ Progresso da V1:
 
 # 55. PRÓXIMA AÇÃO OFICIAL
 
-Próxima atividade: testes de integração da F6. Não executar sem nova autorização.
+Próxima atividade: auditoria incremental da F6. Não executar sem nova autorização.
+O limite ordinário de três commits da F6 foi atingido; qualquer novo commit exige
+autorização expressa ou procedimento previsto pela governança.
 
 Não implementar importação manual como solução oficial sem nova decisão.
 
