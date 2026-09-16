@@ -1446,6 +1446,12 @@ Nenhum arquivo temporário deverá ser confundido com evidência oficial.
 
 # 42. INTEGRIDADE
 
+**Status:** concluída em 16/09/2026. O SHA-256 dos bytes do XLSX efetivamente usado
+como versão atual de cada comparação é calculado em blocos antes do descarte do
+temporário e persistido em `versao_processada.hash_origem`. O mecanismo é uma
+impressão digital para conferência de igualdade do conteúdo observado, sem alegar
+autoria, autenticidade da origem ou armazenamento permanente.
+
 Avaliar/implementar SHA-256 das versões processadas quando tecnicamente
 adequado.
 
@@ -1751,14 +1757,14 @@ FASE 2 — CONCLUÍDA
 FASE 3 — CONCLUÍDA
 FASE 4 — CONCLUÍDA
 FASE 5 — CONCLUÍDA
-FASE 6 — EM ANDAMENTO (TESTES FINAIS, PERFORMANCE, LOGS E TEMPORÁRIOS CONCLUÍDOS)
+FASE 6 — EM ANDAMENTO (TESTES FINAIS, PERFORMANCE, LOGS, TEMPORÁRIOS E INTEGRIDADE CONCLUÍDOS)
 
 Situação atual:
 
 A F5 foi aceita em ambiente corporativo real. Na F6, os testes finais, a medição de
-performance, a revisão/fortalecimento de logs e o controle de arquivos temporários
-foram concluídos. A fase permanece em andamento e as tarefas posteriores não foram
-executadas.
+performance, a revisão/fortalecimento de logs, o controle de arquivos temporários e a
+integridade por SHA-256 foram concluídos. A fase permanece em andamento e as tarefas
+posteriores não foram executadas.
 
 Os requisitos de capacidade e operação com várias planilhas em um banco canônico estão
 registrados para validação posterior na ordem do backlog da F6.
@@ -1771,7 +1777,7 @@ Progresso da V1:
 
 # 55. PRÓXIMA AÇÃO OFICIAL
 
-Próxima atividade: integridade, seção 42 da F6. Não executar sem nova
+Próxima atividade: backup, seção 43 da F6. Não executar sem nova
 autorização.
 O limite ordinário de três commits da F6 foi atingido; qualquer novo commit exige
 autorização expressa ou procedimento previsto pela governança.

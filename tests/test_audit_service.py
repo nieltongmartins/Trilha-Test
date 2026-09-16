@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 import sqlite3
 
@@ -6,6 +7,7 @@ import pytest
 
 from app.audit_service import AuditService
 from app.database import Database
+from app.integrity import sha256_file
 from app.models import AuditExecutionStatus
 from app.sources import LocalSource, SpreadsheetInfo, VersionInfo
 
@@ -99,13 +101,13 @@ def test_complete_audit_records_changes_empty_version_checkpoint_and_execution(
         "version-099", "0.99"
     )
     processed = connection.execute(
-        "SELECT versao_atual_numero, status, quantidade_alteracoes "
+        "SELECT versao_atual_numero, status, quantidade_alteracoes, hash_origem "
         "FROM versao_processada ORDER BY id"
     ).fetchall()
     assert [tuple(row) for row in processed] == [
-        ("0.85", "PROCESSADA", 3),
-        ("0.86", "SEM_ALTERACOES", 0),
-        ("0.99", "PROCESSADA", 1),
+        ("0.85", "PROCESSADA", 3, sha256_file(local_history[1][1])),
+        ("0.86", "SEM_ALTERACOES", 0, sha256_file(local_history[2][1])),
+        ("0.99", "PROCESSADA", 1, sha256_file(local_history[3][1])),
     ]
     assert {
         tuple(row) for row in connection.execute(
@@ -179,6 +181,22 @@ def test_reexecution_without_new_versions_is_idempotent(
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def test_hashes_content_of_sharepoint_current_version(
+    database: Database, local_history: list[tuple[VersionInfo, Path]],
+) -> None:
+    history = list(local_history)
+    current_info, current_path = history[-1]
+    history[-1] = (replace(current_info, is_current=True), current_path)
+
+    AuditService(database, source(history)).audit(SPREADSHEET)
+
+    row = database.connection.execute(
+        """SELECT versao_atual_id, versao_atual, hash_origem
+           FROM versao_processada ORDER BY id DESC LIMIT 1"""
+    ).fetchone()
+    assert tuple(row) == (current_info.id, 1, sha256_file(current_path))
+
+
 def test_incremental_audit_keeps_base_and_processes_only_new_pairs(
     database: Database, local_history: list[tuple[VersionInfo, Path]], tmp_path: Path,
 ) -> None:
@@ -241,6 +259,9 @@ def test_incremental_audit_keeps_base_and_processes_only_new_pairs(
     ]
     assert len(processed) == 6
     assert len(changes) == 7
+    assert [row["hash_origem"] for row in connection.execute(
+        "SELECT hash_origem FROM versao_processada ORDER BY id DESC LIMIT 3"
+    )][::-1] == [sha256_file(path) for _, path in extended[-3:]]
     checkpoint = connection.execute(
         "SELECT versao_id, versao_numero FROM checkpoint"
     ).fetchone()

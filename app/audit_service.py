@@ -11,6 +11,7 @@ from uuid import uuid4
 from app.database import Database
 from app.excel.comparator import CellChange, compare_snapshots
 from app.excel.reader import CellValue, Snapshot, read_workbook
+from app.integrity import sha256_file
 from app.models import AuditExecutionStatus, ProcessedVersionStatus
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 
@@ -116,11 +117,14 @@ class AuditService:
                     current.number,
                 )
                 if previous_snapshot is None:
-                    previous_snapshot = self._read_temporary_version(spreadsheet, previous)
-                current_snapshot = self._read_temporary_version(spreadsheet, current)
+                    previous_snapshot, _ = self._read_temporary_version(spreadsheet, previous)
+                current_snapshot, current_hash = self._read_temporary_version(
+                    spreadsheet, current
+                )
                 changes = compare_snapshots(previous_snapshot, current_snapshot)
                 self._persist_comparison(
-                    connection, spreadsheet_id, execution_id, previous, current, changes
+                    connection, spreadsheet_id, execution_id, previous, current,
+                    current_hash, changes,
                 )
                 logger.debug(
                     "Comparação concluída execucao=%s planilha=%s versao_atual=%s alteracoes=%d",
@@ -159,10 +163,13 @@ class AuditService:
 
     def _read_temporary_version(
         self, spreadsheet: SpreadsheetInfo, version: VersionInfo
-    ) -> Snapshot:
+    ) -> tuple[Snapshot, str]:
         path = self.source.get_version(spreadsheet, version)
         try:
-            return read_workbook(path)
+            # O digest representa exatamente o binário adquirido nesta execução,
+            # antes que o XLSX temporário seja descartado pela fonte.
+            digest = sha256_file(path)
+            return read_workbook(path), digest
         finally:
             try:
                 self.source.release_version(path)
@@ -226,6 +233,7 @@ class AuditService:
         execution_id: int,
         previous: VersionInfo,
         current: VersionInfo,
+        current_hash: str,
         changes: list[CellChange],
     ) -> None:
         status = (
@@ -240,14 +248,15 @@ class AuditService:
                     planilha_id, versao_anterior_id, versao_anterior_numero,
                     versao_atual_id, versao_atual_numero, data_hora_versao,
                     autor, autor_email, autor_login, comentario, tamanho,
-                    url_origem, versao_atual, quantidade_alteracoes, status, execucao_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    url_origem, versao_atual, quantidade_alteracoes, status,
+                    hash_origem, execucao_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (spreadsheet_id, previous.id, previous.number, current.id,
                  current.number, current.modified_at, current.author,
                  current.author_email, current.author_login, current.comment,
                  current.size, current.source_url, int(current.is_current),
-                 len(changes), status.value, execution_id),
+                 len(changes), status.value, current_hash, execution_id),
             )
             processed_id = cursor.lastrowid
             assert processed_id is not None

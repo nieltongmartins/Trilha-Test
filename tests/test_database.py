@@ -82,7 +82,6 @@ def create_legacy_database(path: Path) -> None:
                 tamanho INTEGER CHECK (tamanho IS NULL OR tamanho >= 0),
                 quantidade_alteracoes INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL,
-                hash_origem TEXT,
                 data_processamento TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 execucao_id INTEGER NOT NULL,
                 UNIQUE (planilha_id, versao_anterior_id, versao_atual_id)
@@ -90,10 +89,10 @@ def create_legacy_database(path: Path) -> None:
             INSERT INTO versao_processada (
                 id, planilha_id, versao_anterior_id, versao_anterior_numero,
                 versao_atual_id, versao_atual_numero, autor, comentario,
-                tamanho, status, hash_origem, execucao_id
+                tamanho, status, execucao_id
             ) VALUES (
                 7, 2, '512', '1.0', '513', '1.1', 'Autor legado',
-                'dado preservado', 19440, 'PROCESSADA', 'hash-legado', 11
+                'dado preservado', 19440, 'PROCESSADA', 11
             );
             """
         )
@@ -123,7 +122,8 @@ def test_initialize_migrates_legacy_database_and_preserves_data(tmp_path: Path) 
         assert row["autor_login"] is None
         assert row["url_origem"] is None
         assert row["versao_atual"] == 0
-        assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert row["hash_origem"] is None
+        assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def test_schema_migration_is_idempotent(tmp_path: Path) -> None:

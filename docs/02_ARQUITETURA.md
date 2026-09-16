@@ -1080,8 +1080,24 @@ O hash NÃO substitui:
 Sua função é auxiliar na verificação de integridade e
 reprodutibilidade.
 
-A implementação poderá ser introduzida somente quando seu uso estiver
-claramente integrado ao fluxo.
+A implementação calcula o SHA-256, em blocos, sobre os bytes exatos do XLSX
+adquirido que ocupa o lado atual de cada comparação. O cálculo ocorre antes da
+leitura pelo `openpyxl` e antes da liberação do temporário, sem modificar o arquivo.
+O hexadecimal em minúsculas é persistido em
+`versao_processada.hash_origem`, na mesma transação que registra a comparação e
+avança o checkpoint. Isso vale tanto para versões históricas quanto para a versão
+atual, conforme a posição oficial devolvida pela fonte; ID e `VersionLabel` não são
+usados como substitutos do conteúdo.
+
+O campo representa uma impressão digital do conteúdo binário efetivamente observado
+naquela comparação. Ele permite conferir posteriormente a igualdade de outro binário
+disponível, mas não preserva o XLSX e não comprova autoria ou autenticidade da origem.
+Também não substitui a trilha de alterações, o checkpoint, a identidade SharePoint,
+controle de acesso, backup, assinatura digital ou proteção do banco. A primeira versão
+usada apenas como baseline de uma auditoria inicial não possui linha própria em
+`versao_processada`; seu conteúdo não recebe registro isolado de hash. Em retomadas, a
+baseline é relida para a comparação, enquanto o hash já consolidado da versão que foi
+o lado atual da comparação anterior permanece inalterado.
 
 ---
 
