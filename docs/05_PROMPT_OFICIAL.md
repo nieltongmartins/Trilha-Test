@@ -8,7 +8,9 @@ Selenium + Edge e migração do SQLite existente. Interface, aquisição e proce
 versões, persistência, checkpoint e relatório com as três abas foram aceitos. O
 SharePoint permanece read-only; cookies, tokens, senhas, PRT, bypass e transferência de
 sessão continuam proibidos. A F6 foi iniciada com autorização expressa e deve avançar
-uma tarefa por vez, conforme a ordem do plano. A primeira tarefa é testes unitários.
+uma tarefa por vez, conforme a ordem do plano. Testes unitários, testes de integração
+automatizados e reexecução foram concluídos; a próxima tarefa é auditoria incremental e
+aguarda autorização. Os três commits ordinários da F6 foram consumidos.
 
 
 

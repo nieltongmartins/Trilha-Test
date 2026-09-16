@@ -55,6 +55,53 @@ antecipados.
 
 **Próxima tarefa:** testes de integração, pendente de nova autorização.
 
+## Segunda tarefa da F6 — testes de integração
+
+**Status:** concluída. Foram executados exclusivamente os testes automatizados que
+integram componentes, sem antecipar os cenários independentes de reexecução, auditoria
+incremental, falha/retomada ou relatório. A seleção exercitou: fonte local →
+`AuditService` → reader/comparator → SQLite; inicialização da aplicação → configuração
+→ criação do banco/log; e provider Edge/REST fake → endpoints históricos/atual →
+download e validação Open XML.
+
+**Comando executado:**
+
+`pytest -q tests/test_audit_service.py::test_complete_audit_records_changes_empty_version_checkpoint_and_execution tests/test_main.py::test_application_starts_and_creates_database tests/test_sharepoint_source.py::test_downloads_historical_and_current_using_distinct_read_only_endpoints`
+
+**Resultado:** `3 passed in 0.47s`. Nenhuma conexão externa, credencial ou operação no
+SharePoint foi utilizada. A integração real já aceita na F5 não foi repetida neste
+ambiente, que não possui a sessão corporativa Edge/SharePoint. Nenhum problema ou
+bloqueio foi encontrado.
+
+**Próxima tarefa:** reexecução, pendente de nova autorização.
+
+## Terceira tarefa da F6 — reexecução
+
+**Status:** concluída. O teste automatizado executou uma auditoria completa, encerrou e
+reabriu a conexão da aplicação com o mesmo SQLite e reexecutou a auditoria sem novas
+versões. Antes da reexecução, os XLSX temporários foram removidos para comprovar que o
+conteúdo já processado não é relido nem readquirido quando não há novidades.
+
+Foram comprovados: nenhum novo registro em `versao_processada`, `alteracao` ou
+`planilha`; checkpoint integralmente preservado; dados anteriormente persistidos sem
+modificação; resultado determinístico `CONCLUIDA_SEM_NOVIDADES`, com zero versões e
+zero alterações; nova execução com código próprio, checkpoint inicial/final `0.99`,
+término registrado e sem mensagem de erro; `PRAGMA integrity_check` igual a `ok`; e
+`PRAGMA foreign_key_check` sem violações. A fonte da reexecução foi local e somente
+listou metadados. O teste de segurança do provider confirmou novamente que o código
+embutido usa apenas GET same-origin sob `/_api/`; nenhum SharePoint real foi acessado
+ou alterado.
+
+**Comando executado:**
+
+`pytest -q tests/test_audit_service.py::test_reexecution_without_new_versions_is_idempotent tests/test_sharepoint_source.py::test_only_get_same_origin_api_is_embedded`
+
+**Resultado:** `2 passed in 0.35s`. Nenhum problema ou bloqueio foi encontrado.
+
+**Próxima tarefa:** auditoria incremental, pendente de nova autorização. O terceiro
+commit ordinário da F6 foi consumido nesta tarefa; não realizar outro commit da fase
+sem autorização expressa ou procedimento previsto pela governança.
+
 ---
 
 # IMPLEMENTAÇÃO DA F5 — 16/09/2026
@@ -962,7 +1009,7 @@ F6 iniciada por autorização expressa; executar uma tarefa por vez.
 
 **Data de conclusão:** —
 
-**Quantidade de commits:** 1
+**Quantidade de commits:** 3
 
 ### Objetivo
 
@@ -971,17 +1018,26 @@ preparação da V1 para homologação.
 
 ### Implementado
 
-Primeira tarefa de Testes Finais: execução dos testes unitários isolados.
+Três primeiras tarefas de Testes Finais: testes unitários isolados, testes de
+integração automatizados entre os componentes e reexecução idempotente após reabertura
+do banco.
 
 ### Testes executados
 
 Testes unitários de configuração, persistência, reader, comparator, fonte SharePoint
-com fakes, relatório e interface com fakes — aprovados.
+com fakes, relatório e interface com fakes — aprovados. Seleção de três testes de
+integração automatizados — `3 passed in 0.47s`. Reexecução idempotente e invariante
+read-only do provider — `2 passed in 0.35s`.
 
 ### Commits
 
-Primeiro commit da F6; identificador informado no relatório da sessão, pois o commit
-não pode registrar o próprio hash.
+`e34c1f8` — inicia a F6 com testes unitários.
+
+`2539e9b` — executa testes de integração da F6.
+
+O terceiro commit registra a reexecução e tem seu identificador informado no relatório
+da sessão, pois um commit não pode registrar o próprio hash. Com ele, o limite ordinário
+de três commits da F6 está atingido.
 
 ### Problemas encontrados
 
@@ -993,7 +1049,8 @@ Demais tarefas da F6, respeitando a ordem oficial e uma autorização por vez.
 
 ### Próximo passo
 
-Testes de integração. Não executar sem nova autorização.
+Auditoria incremental. Não executar sem nova autorização e não realizar novo commit
+da F6 sem autorização expressa ou procedimento previsto pela governança.
 
 ---
 
@@ -1493,11 +1550,11 @@ A presença nesta seção não significa autorização para implementação.
 
 **Fase atual:** F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO — primeira tarefa concluída
+**Status:** 🟡 EM ANDAMENTO — três tarefas concluídas
 
 **Implementação:** núcleo local, aquisição SharePoint Edge/REST, interface, migração
-SQLite e relatório validados no ambiente corporativo real; primeira tarefa de testes
-finais da F6 concluída.
+SQLite e relatório validados no ambiente corporativo real; testes unitários, testes
+de integração automatizados e reexecução idempotente da F6 concluídos.
 
 **Fases concluídas:** 5/6
 
@@ -1509,7 +1566,8 @@ finais da F6 concluída.
 
 **Próxima ação:**
 
-Solicitar autorização para a próxima tarefa da F6: testes de integração.
+Solicitar autorização para a próxima tarefa da F6: auditoria incremental. O limite
+ordinário de três commits da fase foi atingido.
 
 ---
 
