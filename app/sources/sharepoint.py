@@ -7,13 +7,13 @@ from pathlib import Path
 import logging
 import re
 import shutil
-import tempfile
 import time
 from typing import Any, Protocol
 from urllib.parse import quote, urlsplit
 import zipfile
 
 from app.sources.base import SpreadsheetInfo, VersionInfo
+from app.temp_files import TemporaryWorkspace
 
 
 logger = logging.getLogger("auditoria_excel.sharepoint")
@@ -108,12 +108,9 @@ class BrowserSharePointSource:
         self._owns_browser = owns_browser
         self._download_timeout = download_timeout
         self._poll_interval = poll_interval
-        Path(temp_directory).mkdir(parents=True, exist_ok=True)
-        self._temporary_directory = tempfile.TemporaryDirectory(
-            prefix="sharepoint-browser-", dir=temp_directory
-        )
+        self._workspace = TemporaryWorkspace(temp_directory)
         self.download_directory = Path(
-            download_directory or self._temporary_directory.name
+            download_directory or self._workspace.path
         )
         self.download_directory.mkdir(parents=True, exist_ok=True)
 
@@ -130,9 +127,8 @@ class BrowserSharePointSource:
 
         root = Path(temp_directory)
         root.mkdir(parents=True, exist_ok=True)
-        download_directory = Path(
-            tempfile.mkdtemp(prefix="sharepoint-edge-", dir=root)
-        ).resolve()
+        download_workspace = TemporaryWorkspace(root)
+        download_directory = download_workspace.path
         options = webdriver.EdgeOptions()
         options.add_experimental_option(
             "prefs",
@@ -158,9 +154,10 @@ class BrowserSharePointSource:
                 owns_browser=True,
                 download_directory=download_directory,
             )
+            source._download_workspace = download_workspace
         except Exception:
             browser.quit()
-            shutil.rmtree(download_directory, ignore_errors=True)
+            download_workspace.close()
             raise
         browser.get(site_url)
         logger.info(
@@ -170,12 +167,10 @@ class BrowserSharePointSource:
         return source
 
     def close(self) -> None:
-        external_download = self.download_directory != Path(
-            self._temporary_directory.name
-        )
-        self._temporary_directory.cleanup()
-        if external_download:
-            shutil.rmtree(self.download_directory, ignore_errors=True)
+        self._workspace.close()
+        download_workspace = getattr(self, "_download_workspace", None)
+        if download_workspace is not None:
+            download_workspace.close()
         if self._owns_browser:
             self._browser.quit()
 
@@ -407,13 +402,17 @@ class BrowserSharePointSource:
         before = set(self.download_directory.iterdir())
         self._browser.get(url)
         downloaded = self._wait_for_download(before)
-        safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", version.number)
-        destination = Path(self._temporary_directory.name) / (
-            f"{spreadsheet.drive_item_id}_{version.id}_{safe_label}.xlsx"
+        destination = self._workspace.filename(
+            spreadsheet.site_id, spreadsheet.drive_id,
+            spreadsheet.drive_item_id, version.id,
         )
         if downloaded.resolve() != destination.resolve():
             shutil.move(str(downloaded), destination)
-        self._validate_xlsx(destination)
+        try:
+            self._validate_xlsx(destination)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
         logger.debug(
             "Versão adquirida planilha=%s identidade=%s versao=%s atual=%s",
             spreadsheet.name,
@@ -422,6 +421,9 @@ class BrowserSharePointSource:
             version.is_current,
         )
         return destination
+
+    def release_version(self, path: Path) -> None:
+        self._workspace.release(path)
 
     def _wait_for_download(self, before: set[Path]) -> Path:
         deadline = time.monotonic() + self._download_timeout

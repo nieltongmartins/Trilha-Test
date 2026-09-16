@@ -10,8 +10,9 @@ SharePoint permanece read-only; cookies, tokens, senhas, PRT, bypass e transfer�
 sessão continuam proibidos. A F6 foi iniciada com autorização expressa e deve avançar
 uma tarefa por vez, conforme a ordem do plano. Testes unitários, testes de integração
 automatizados, reexecução, auditoria incremental, falha/retomada, geração de relatório
-e múltiplas planilhas controladas, além da medição de performance e da revisão de logs,
-foram concluídos; a próxima tarefa é arquivos temporários e aguarda autorização. Os
+e múltiplas planilhas controladas, além da medição de performance, da revisão de logs
+e do controle de arquivos temporários, foram concluídos; a próxima tarefa é integridade
+e aguarda autorização. Os
 três commits ordinários da F6 foram consumidos; commits
 adicionais ocorrem somente quando impostos pelo ambiente de execução.
 

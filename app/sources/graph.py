@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import json
+import os
 from pathlib import Path
-import tempfile
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from app.config import Settings
 from app.sources.base import SpreadsheetInfo, VersionInfo
+from app.temp_files import TemporaryWorkspace
 
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
@@ -88,10 +89,7 @@ class GraphSharePointSource:
         self._token_provider = token_provider
         self._get_request = get_request
         self._graph_base_url = graph_base_url.rstrip("/")
-        Path(temp_directory).mkdir(parents=True, exist_ok=True)
-        self._temporary_directory = tempfile.TemporaryDirectory(
-            prefix="sharepoint-", dir=temp_directory
-        )
+        self._workspace = TemporaryWorkspace(temp_directory)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "GraphSharePointSource":
@@ -104,7 +102,7 @@ class GraphSharePointSource:
         )
 
     def close(self) -> None:
-        self._temporary_directory.cleanup()
+        self._workspace.close()
 
     def __enter__(self) -> "GraphSharePointSource":
         return self
@@ -203,9 +201,17 @@ class GraphSharePointSource:
         version_id = quote(version.id, safe="")
         url = f"{self._graph_base_url}/drives/{drive}/items/{item}/versions/{version_id}/content"
         body, _ = self._get(url)
-        path = Path(self._temporary_directory.name) / f"{len(list(Path(self._temporary_directory.name).iterdir())):06d}.xlsx"
-        path.write_bytes(body)
+        path = self._workspace.filename(
+            spreadsheet.site_id, spreadsheet.drive_id,
+            spreadsheet.drive_item_id, version.id,
+        )
+        temporary = path.with_suffix(f".{os.getpid()}.part")
+        temporary.write_bytes(body)
+        temporary.replace(path)
         return path
+
+    def release_version(self, path: Path) -> None:
+        self._workspace.release(path)
 
     def _validate_identity(self, spreadsheet: SpreadsheetInfo) -> None:
         if spreadsheet.site_id != self.site_id or spreadsheet.drive_id != self.drive_id:

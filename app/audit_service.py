@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from app.database import Database
 from app.excel.comparator import CellChange, compare_snapshots
-from app.excel.reader import CellValue, read_workbook
+from app.excel.reader import CellValue, Snapshot, read_workbook
 from app.models import AuditExecutionStatus, ProcessedVersionStatus
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 
@@ -116,12 +116,8 @@ class AuditService:
                     current.number,
                 )
                 if previous_snapshot is None:
-                    previous_snapshot = read_workbook(
-                        self.source.get_version(spreadsheet, previous)
-                    )
-                current_snapshot = read_workbook(
-                    self.source.get_version(spreadsheet, current)
-                )
+                    previous_snapshot = self._read_temporary_version(spreadsheet, previous)
+                current_snapshot = self._read_temporary_version(spreadsheet, current)
                 changes = compare_snapshots(previous_snapshot, current_snapshot)
                 self._persist_comparison(
                     connection, spreadsheet_id, execution_id, previous, current, changes
@@ -160,6 +156,23 @@ class AuditService:
             execution_code, AuditExecutionStatus.COMPLETED, processed,
             total_changes, initial_checkpoint, final,
         )
+
+    def _read_temporary_version(
+        self, spreadsheet: SpreadsheetInfo, version: VersionInfo
+    ) -> Snapshot:
+        path = self.source.get_version(spreadsheet, version)
+        try:
+            return read_workbook(path)
+        finally:
+            try:
+                self.source.release_version(path)
+            except Exception as error:
+                logger.warning(
+                    "Falha ao remover XLSX temporário planilha=%s versao=%s erro=%s",
+                    spreadsheet.name,
+                    version.number,
+                    error,
+                )
 
     @staticmethod
     def _pending_pairs(
