@@ -1391,6 +1391,11 @@ bloco não autoriza implicitamente a tarefa seguinte da F6.
 
 # 39. PERFORMANCE
 
+**Status:** concluída em 16/09/2026, com carga sintética local e sem acesso ao
+SharePoint. A medição encontrou gargalo objetivo na geração de relatório com
+100.000 alterações; nenhuma otimização foi aplicada nesta tarefa, preservando a
+regra de medir antes de alterar produção. Evidências e limitações estão no histórico.
+
 Medir:
 
 - tempo por versão;

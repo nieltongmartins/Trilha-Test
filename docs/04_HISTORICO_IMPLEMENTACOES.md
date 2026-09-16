@@ -252,6 +252,111 @@ não pode registrar o próprio identificador.
 **Próxima tarefa oficial:** performance, seção 39 do plano, pendente de autorização.
 Não foi executada nesta sessão.
 
+## Medição de performance da F6 — 16/09/2026
+
+**Fase:** F6 — Robustez e Preparação para Produção. **Status:** tarefa de performance
+concluída; a F6 permanece em andamento.
+
+### Confirmação documental anterior às alterações
+
+A governança, especificação, arquitetura, plano, histórico, prompt oficial, estado do
+Git e implementações alcançáveis foram revistos antes da criação do cenário. A fase
+oficial era F6; as sete tarefas de testes finais da seção 38 estavam concluídas; a
+próxima tarefa era performance, expressamente autorizada nesta sessão. Os critérios da
+seção 39 eram medir tempo por versão e planilha, células, memória, banco e relatório,
+otimizando somente gargalos observados. Não havia bloqueio ativo nem conflito técnico,
+documental ou de governança: SQLite continuava canônico, SharePoint permanecia
+read-only e a tarefa não autorizava logs nem qualquer item posterior. O commit adicional
+é realizado somente porque o ambiente de execução o exige, exceção já registrada para
+a F6.
+
+### Método e volumes efetivamente medidos
+
+Foi acrescentado um cenário manual reproduzível em `tests/performance_scenarios.py`.
+Ele usa exclusivamente `TemporaryDirectory`, SQLite e XLSX sintéticos locais, remove os
+artefatos ao terminar e não acessa o SharePoint. Para evitar 3.001 arquivos redundantes,
+um XLSX de 100 células é reutilizado como conteúdo controlado de todas as versões; cada
+par ainda percorre leitura Open XML, comparação e persistência. `tracemalloc` mede o pico
+de alocações Python de cada operação, não o RSS total do processo.
+
+Em uma única execução foram medidos:
+
+- auditoria inicial de 3.001 versões (3.000 comparações), 100 células por versão;
+- auditoria incremental de duas versões novas sobre o histórico já consolidado;
+- inserção de 100.000 alterações sintéticas;
+- geração das três abas do relatório a partir dessas 100.000 alterações e 3.003 pares;
+- coexistência de 2.000 planilhas no mesmo banco;
+- planos das consultas de checkpoint e relatório;
+- `PRAGMA integrity_check` e `PRAGMA foreign_key_check` após toda a carga.
+
+### Resultados observados
+
+- auditoria inicial: **98,081 s**, ou **0,032694 s por comparação**, 3.001 aquisições
+  locais, pico Python de **3.806.485 bytes** e banco com **557.056 bytes**;
+- incremental: **0,0561 s**, duas comparações, somente três aquisições (baseline e duas
+  novas versões) e pico Python de **648.641 bytes**;
+- 1.999 planilhas adicionais: **0,0239 s**, atingindo 2.000 planilhas no banco, com pico
+  Python de **493.078 bytes**;
+- 100.000 alterações: **0,9572 s** para inserção controlada; o banco atingiu
+  **8.667.136 bytes**, com 3.003 pares, 100.000 alterações e três execuções;
+- relatório: **118,6445 s**, pico Python de **375.368.981 bytes** e XLSX final de
+  **3.179.199 bytes**.
+
+O relatório foi a operação mais cara e apresentou o único gargalo concreto: para
+100.000 alterações, a implementação materializa todas as linhas e mantém o workbook
+inteiro em memória. O resultado é relevante diante da possibilidade de milhões de
+alterações. Nenhuma otimização de produção foi aplicada: a tarefa priorizou medição, não
+existe ainda um limite operacional oficial de tempo/memória e uma alteração do modo de
+escrita do relatório deve preservar formatação e comportamento por validação própria.
+
+A consulta de checkpoint usou o índice único de `planilha_id`. A consulta de alterações
+do relatório usou `idx_alteracao_planilha` e a chave primária de `versao_processada`.
+As consultas de versões e da última execução usaram respectivamente
+`idx_versao_planilha` e `idx_execucao_planilha`, mas criaram B-tree temporária para o
+`ORDER BY id`. Com apenas 3.003 versões e três execuções, não houve evidência de custo
+relevante que justificasse novo índice. Os índices atuais foram suficientes para os
+volumes de consulta efetivamente medidos.
+
+`PRAGMA integrity_check` retornou `ok`; `PRAGMA foreign_key_check` retornou zero
+violações. O incremental permaneceu proporcional às duas versões novas: não releu os
+3.001 XLSX históricos e manteve em memória apenas a baseline e a versão corrente. A
+enumeração ainda percorre a lista de metadados do histórico, custo observado como baixo
+neste volume.
+
+### Limitações e decisão
+
+Não foram materializadas 2.000 planilhas com 3.000 versões cada, nem milhões de
+alterações, planilhas densas, múltiplas abas grandes, disco/rede corporativos ou
+SharePoint real. O cenário de versões reutilizou conteúdo idêntico e portanto gerou
+zero diferenças de célula; custo de alterações foi isolado por carga SQLite controlada.
+Os números medidos neste ambiente não são garantia de SLA nem extrapolação de capacidade
+de produção. Em particular, não se declara comprovada a combinação de 2.000 planilhas ×
+3.000 versões.
+
+Não houve mudança no código de produção, arquitetura, banco ou dependências. O gargalo
+de relatório está documentado como evidência para decisão posterior; não foi encontrada
+evidência que justificasse migração do SQLite ou mudança estrutural nesta tarefa.
+
+**Comandos executados:**
+
+`python tests/performance_scenarios.py` — cenário concluído com os volumes e resultados
+acima.
+
+`pytest -q` — `43 passed in 1.36s`.
+
+`python -m compileall -q app tests` — concluído sem erros.
+
+`ruff check .` — concluído sem violações.
+
+`git diff --check` — concluído sem erros.
+
+Os critérios da seção 39 foram atendidos: volumes, tempos, células, memória, banco,
+relatório, consulta, integridade, inicial versus incremental e limitações foram medidos
+e registrados. A F6 não está concluída.
+
+**Próxima tarefa oficial:** logs, seção 40 do plano, pendente de autorização. Não foi
+executada nesta sessão.
+
 ---
 
 # IMPLEMENTAÇÃO DA F5 — 16/09/2026
@@ -1173,6 +1278,9 @@ integração automatizados entre os componentes, reexecução idempotente após 
 do banco, auditoria incremental a partir do checkpoint, falha/retomada transacional e
 geração determinística de relatório exclusivamente a partir do SQLite, além do cenário
 controlado de três planilhas isoladas no mesmo banco canônico.
+Também foi concluída a tarefa de performance com carga sintética de 3.001 versões,
+100.000 alterações e 2.000 planilhas, comparação entre auditoria inicial e incremental,
+planos de consulta, integridade e geração de relatório.
 
 ### Testes executados
 
@@ -1205,7 +1313,7 @@ Demais tarefas da F6, respeitando a ordem oficial e uma autorização por vez.
 
 ### Próximo passo
 
-Performance. Não executar sem nova autorização.
+Logs. Não executar sem nova autorização.
 
 ---
 
@@ -1705,12 +1813,14 @@ A presença nesta seção não significa autorização para implementação.
 
 **Fase atual:** F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO — sete tarefas concluídas
+**Status:** 🟡 EM ANDAMENTO — testes finais e performance concluídos
 
 **Implementação:** núcleo local, aquisição SharePoint Edge/REST, interface, migração
 SQLite e relatório validados no ambiente corporativo real; testes unitários, testes
 de integração automatizados, reexecução idempotente, auditoria incremental,
-falha/retomada, geração de relatório e múltiplas planilhas controladas da F6 concluídos.
+falha/retomada, geração de relatório, múltiplas planilhas controladas e medição de
+performance da F6 concluídos. A medição identificou consumo elevado na geração de
+relatório com 100.000 alterações, sem mudança de produção nesta tarefa.
 
 **Fases concluídas:** 5/6
 
@@ -1722,7 +1832,7 @@ falha/retomada, geração de relatório e múltiplas planilhas controladas da F6
 
 **Próxima ação:**
 
-Solicitar autorização para a próxima tarefa da F6: performance. O limite
+Solicitar autorização para a próxima tarefa da F6: logs. O limite
 ordinário de três commits da fase foi ultrapassado por determinação do ambiente desta
 execução.
 
