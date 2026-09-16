@@ -1411,6 +1411,12 @@ Otimizar somente gargalos observados.
 
 # 40. LOGS
 
+**Status:** concluída em 16/09/2026. O log operacional UTF-8 passou a cobrir
+inicialização, banco, autenticação manual, descoberta, aquisição, auditoria,
+comparações em `DEBUG`, checkpoint, execução sem novidades, falhas e relatório. O
+arquivo persiste entre execuções, possui rotação local limitada e redação defensiva de
+segredos. Os testes e limitações estão registrados no histórico.
+
 Revisar:
 
 - logs técnicos;
@@ -1472,7 +1478,7 @@ for viável disponibilizar executável.
 
 [ ] falhas não corrompem checkpoint;
 
-[ ] logs adequados;
+[x] logs adequados;
 
 [ ] temporários controlados;
 
@@ -1740,13 +1746,13 @@ FASE 2 — CONCLUÍDA
 FASE 3 — CONCLUÍDA
 FASE 4 — CONCLUÍDA
 FASE 5 — CONCLUÍDA
-FASE 6 — EM ANDAMENTO (QUATRO TAREFAS CONCLUÍDAS)
+FASE 6 — EM ANDAMENTO (TESTES FINAIS, PERFORMANCE E LOGS CONCLUÍDOS)
 
 Situação atual:
 
-A F5 foi aceita em ambiente corporativo real. A F6 foi iniciada por autorização
-expressa e concluiu as quatro primeiras tarefas do backlog: testes unitários, testes de
-integração automatizados, reexecução e auditoria incremental.
+A F5 foi aceita em ambiente corporativo real. Na F6, os testes finais, a medição de
+performance e a revisão/fortalecimento de logs foram concluídos. A fase permanece em
+andamento e as tarefas posteriores não foram executadas.
 
 Os requisitos de capacidade e operação com várias planilhas em um banco canônico estão
 registrados para validação posterior na ordem do backlog da F6.
@@ -1759,7 +1765,8 @@ Progresso da V1:
 
 # 55. PRÓXIMA AÇÃO OFICIAL
 
-Próxima atividade: falha e retomada da F6. Não executar sem nova autorização.
+Próxima atividade: arquivos temporários, seção 41 da F6. Não executar sem nova
+autorização.
 O limite ordinário de três commits da F6 foi atingido; qualquer novo commit exige
 autorização expressa ou procedimento previsto pela governança.
 

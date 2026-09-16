@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 import sqlite3
 from uuid import uuid4
 
@@ -12,6 +13,9 @@ from app.excel.comparator import CellChange, compare_snapshots
 from app.excel.reader import CellValue, read_workbook
 from app.models import AuditExecutionStatus, ProcessedVersionStatus
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
+
+
+logger = logging.getLogger("auditoria_excel.audit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +59,26 @@ class AuditService:
         ).lastrowid
         connection.commit()
         assert execution_id is not None
+        logger.info(
+            "Auditoria iniciada execucao=%s planilha=%s identidade=%s/%s/%s checkpoint=%s",
+            execution_code,
+            spreadsheet.name,
+            spreadsheet.site_id,
+            spreadsheet.drive_id,
+            spreadsheet.drive_item_id,
+            initial_checkpoint or "nenhum",
+        )
 
         try:
             versions = list(self.source.list_versions(spreadsheet))
             pairs = self._pending_pairs(versions, checkpoint["versao_id"] if checkpoint else None)
+            logger.info(
+                "Versões descobertas execucao=%s planilha=%s total=%d comparacoes_pendentes=%d",
+                execution_code,
+                spreadsheet.name,
+                len(versions),
+                len(pairs),
+            )
         except Exception as error:
             return self._record_failure(
                 connection, execution_id, spreadsheet_id, execution_code,
@@ -71,6 +91,12 @@ class AuditService:
                 connection, execution_id, AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES,
                 final, 0, 0, None,
             )
+            logger.info(
+                "Auditoria sem novidades execucao=%s planilha=%s checkpoint=%s",
+                execution_code,
+                spreadsheet.name,
+                final or "nenhum",
+            )
             return AuditResult(
                 execution_code, AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES,
                 0, 0, initial_checkpoint, final,
@@ -82,6 +108,13 @@ class AuditService:
         previous_snapshot = None
         for previous, current in pairs:
             try:
+                logger.debug(
+                    "Comparação iniciada execucao=%s planilha=%s versao_anterior=%s versao_atual=%s",
+                    execution_code,
+                    spreadsheet.name,
+                    previous.number,
+                    current.number,
+                )
                 if previous_snapshot is None:
                     previous_snapshot = read_workbook(
                         self.source.get_version(spreadsheet, previous)
@@ -92,6 +125,13 @@ class AuditService:
                 changes = compare_snapshots(previous_snapshot, current_snapshot)
                 self._persist_comparison(
                     connection, spreadsheet_id, execution_id, previous, current, changes
+                )
+                logger.debug(
+                    "Comparação concluída execucao=%s planilha=%s versao_atual=%s alteracoes=%d",
+                    execution_code,
+                    spreadsheet.name,
+                    current.number,
+                    len(changes),
                 )
             except Exception as error:
                 connection.rollback()
@@ -107,6 +147,14 @@ class AuditService:
         self._finish_execution(
             connection, execution_id, AuditExecutionStatus.COMPLETED,
             final, processed, total_changes, None,
+        )
+        logger.info(
+            "Auditoria concluída execucao=%s planilha=%s versoes_processadas=%d alteracoes=%d checkpoint=%s",
+            execution_code,
+            spreadsheet.name,
+            processed,
+            total_changes,
+            final or "nenhum",
         )
         return AuditResult(
             execution_code, AuditExecutionStatus.COMPLETED, processed,
@@ -269,6 +317,16 @@ class AuditService:
         self._finish_execution(
             connection, execution_id, AuditExecutionStatus.FAILED,
             final, processed, changes, message,
+        )
+        logger.error(
+            "Auditoria falhou execucao=%s planilha_id=%d etapa=%s->%s tipo_erro=%s checkpoint_preservado=%s erro=%s",
+            execution_code,
+            spreadsheet_id,
+            previous.number if previous else "listagem",
+            current.number if current else "listagem",
+            type(error).__name__,
+            final or "nenhum",
+            error,
         )
         return AuditResult(
             execution_code, AuditExecutionStatus.FAILED, processed, changes,

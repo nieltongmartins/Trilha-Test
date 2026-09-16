@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+import logging
 import re
 import shutil
 import tempfile
@@ -13,6 +14,9 @@ from urllib.parse import quote, urlsplit
 import zipfile
 
 from app.sources.base import SpreadsheetInfo, VersionInfo
+
+
+logger = logging.getLogger("auditoria_excel.sharepoint")
 
 
 class SharePointReadError(RuntimeError):
@@ -139,6 +143,11 @@ class BrowserSharePointSource:
                 "safebrowsing.enabled": True,
             },
         )
+        logger.info(
+            "Abrindo Edge para autenticação manual SharePoint site=%s escopos=%d modo=read-only",
+            site_url,
+            len(scope_paths),
+        )
         browser = webdriver.Edge(options=options)
         try:
             source = cls(
@@ -154,6 +163,10 @@ class BrowserSharePointSource:
             shutil.rmtree(download_directory, ignore_errors=True)
             raise
         browser.get(site_url)
+        logger.info(
+            "Edge aberto; aguardando autenticação manual do usuário site=%s",
+            site_url,
+        )
         return source
 
     def close(self) -> None:
@@ -203,6 +216,11 @@ class BrowserSharePointSource:
         return payload
 
     def list_spreadsheets(self) -> tuple[SpreadsheetInfo, ...]:
+        logger.info(
+            "Descoberta de planilhas iniciada site=%s escopos=%d modo=read-only",
+            self.site_url,
+            len(self.scope_paths),
+        )
         found: dict[str, SpreadsheetInfo] = {}
         pending = list(self.scope_paths)
         visited: set[str] = set()
@@ -252,7 +270,14 @@ class BrowserSharePointSource:
                 if isinstance((path := item.get("ServerRelativeUrl")), str)
                 and item.get("Name") != "Forms"
             )
-        return tuple(sorted(found.values(), key=lambda item: item.path or ""))
+        result = tuple(sorted(found.values(), key=lambda item: item.path or ""))
+        logger.info(
+            "Descoberta de planilhas concluída site=%s pastas=%d planilhas=%d",
+            self.site_url,
+            len(visited),
+            len(result),
+        )
+        return result
 
     def _file_metadata(self, spreadsheet: SpreadsheetInfo) -> Mapping[str, Any]:
         encoded = _escape_odata_path(spreadsheet.path or "")
@@ -325,6 +350,12 @@ class BrowserSharePointSource:
             v for v in historical if v.id != current.id and v.number != current.number
         ]
         combined.append(current)
+        logger.info(
+            "Versões enumeradas planilha=%s identidade=%s total=%d modo=read-only",
+            spreadsheet.name,
+            spreadsheet.drive_item_id,
+            len(combined),
+        )
         return tuple(combined)
 
     @staticmethod
@@ -383,6 +414,13 @@ class BrowserSharePointSource:
         if downloaded.resolve() != destination.resolve():
             shutil.move(str(downloaded), destination)
         self._validate_xlsx(destination)
+        logger.debug(
+            "Versão adquirida planilha=%s identidade=%s versao=%s atual=%s",
+            spreadsheet.name,
+            spreadsheet.drive_item_id,
+            version.number,
+            version.is_current,
+        )
         return destination
 
     def _wait_for_download(self, before: set[Path]) -> Path:

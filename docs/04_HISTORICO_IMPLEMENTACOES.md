@@ -9,6 +9,100 @@
 
 ---
 
+# REVISÃO E FORTALECIMENTO DE LOGS DA F6 — 16/09/2026
+
+**Fase:** F6 — Robustez e Preparação para Produção. **Status:** tarefa de logs
+concluída; a F6 permanece em andamento.
+
+## Confirmação documental anterior às alterações
+
+A documentação obrigatória, o estado limpo da branch `work`, os commits alcançáveis e
+a implementação foram inspecionados antes das alterações. A seção 40 do plano define
+quatro critérios: revisar logs técnicos, mensagens de erro, ausência de segredos e
+rastreabilidade das execuções. Testes finais e performance já estavam concluídos, e o
+histórico e o estado oficial do prompt apontavam logs como a próxima tarefa. A seção 55
+do plano ainda citava a antiga tarefa de falha/retomada; tratava-se de texto obsoleto,
+resolvido de forma inequívoca pela autorização expressa atual, pelos status das seções
+38/39 e pelo histórico factual. Não houve conflito de requisito, segurança ou
+arquitetura.
+
+Antes desta tarefa, `app/logging_config.py` já criava `logs/auditoria.log` (ou o caminho
+configurado), escrevia em UTF-8 e acrescentava conteúdo entre execuções. Entretanto,
+somente `main.py` emitia uma mensagem, depois da abertura do banco. Auditoria,
+checkpoint, aquisição SharePoint, autenticação manual, descoberta, comparação, falha,
+retomada, execução sem novidades e relatório não produziam evidência operacional; o
+arquivo também crescia sem limite e não tinha proteção defensiva caso um erro contivesse
+um campo de autenticação. Essa divergência em relação à seção 40 da arquitetura exigia
+fortalecimento, mas não mudança arquitetural: foi mantido o módulo central e utilizado o
+logging padrão já existente.
+
+## Alterações realizadas
+
+- o arquivo permanece persistente e UTF-8, no diretório configurável `logs/` por
+  padrão, agora com rotação de 5 MiB e cinco cópias de retenção;
+- o formato ganhou timestamp, nível e logger de origem; um formatador redige valores
+  associados a senha, token, segredo, cookie e autorização, inclusive em texto de
+  exceção;
+- a inicialização registra abertura/configuração do SQLite e encerramento; erros
+  inesperados são registrados como `CRITICAL` com traceback e continuam sendo
+  propagados;
+- autenticação manual no Edge, operação SharePoint read-only, descoberta de planilhas e
+  contagens de versões passaram a ser registradas sem cookies, tokens ou credenciais;
+- cada auditoria recebe nos logs o mesmo `codigo_execucao` persistido no SQLite, junto
+  de planilha/identidade, checkpoint, contagens, conclusão, ausência de novidades ou
+  falha. Comparações e aquisições individuais usam somente `DEBUG`, evitando milhares
+  de mensagens no nível operacional `INFO`; nenhuma alteração célula a célula é
+  registrada;
+- geração de relatório registra início, arquivo e totais. Falhas controladas da
+  interface registram tipo e mensagem úteis ao diagnóstico;
+- foram adicionados testes determinísticos com diretórios temporários para arquivo,
+  persistência entre reinicializações, auditoria concluída, execução sem novidades,
+  relatório, falha controlada, redação de segredos e rotação.
+
+## Validação realizada
+
+`pytest -q tests/test_logging.py tests/test_main.py` — `4 passed in 0.36s`.
+
+`ruff check .` — aprovado.
+
+`python -m compileall -q app main.py tests` — concluído sem erros.
+
+`pytest -q` — `46 passed in 1.40s`.
+
+`git diff --check` — concluído sem erros.
+
+No cenário de reinicialização do teste de logs, `PRAGMA integrity_check` retornou `ok`
+e `PRAGMA foreign_key_check` não retornou violações. Nenhum SharePoint real foi
+acessado; os testes usaram fonte local/fakes. O provider continua estritamente
+read-only e nenhuma captura de senha, cookie, token, cabeçalho de autenticação ou
+credencial foi adicionada.
+
+## Limitações, riscos e decisão
+
+A redação é uma defesa adicional para campos de autenticação identificáveis, não uma
+autorização para capturar dados de sessão nem uma garantia de classificar todo texto
+arbitrário fornecido por sistemas externos. Por isso, o código continua sem coletar
+segredos. Nome, identidade e caminho de planilha são dados operacionais presentes no
+log e o diretório deve receber as permissões adequadas do usuário operacional. Se o
+diretório/arquivo não puder ser criado ou escrito, a configuração falha explicitamente
+em vez de simular persistência. A política local mantém no máximo o arquivo ativo mais
+cinco cópias de 5 MiB; não foi introduzida observabilidade externa.
+
+Não foi repetido o cenário completo de performance. O nível `INFO` registra eventos por
+execução e contagens agregadas; os eventos por versão/comparação ficam em `DEBUG`, e não
+há logging por célula. Não foi identificado impacto relevante no caminho operacional
+padrão. A retomada transacional continua coberta pelos testes anteriores da F6 e agora
+cada nova tentativa possui código correlacionável próprio.
+
+O commit adicional é realizado exclusivamente porque o ambiente exige commit e criação
+de pull request, apesar de o limite ordinário da F6 já ter sido ultrapassado. O hash é
+informado no relatório da sessão, pois um commit não pode conter o próprio hash.
+
+**Próxima tarefa oficial:** arquivos temporários, seção 41 do plano, pendente de nova
+autorização. Não foi executada nesta sessão. A F6 não está concluída.
+
+---
+
 # ACEITAÇÃO REAL DA F5 E INÍCIO DA F6 — 16/09/2026
 
 ## Encerramento formal da F5
