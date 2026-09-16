@@ -21,6 +21,8 @@ class Settings:
     sharepoint_client_secret: str | None = None
     sharepoint_site_id: str | None = None
     sharepoint_drive_id: str | None = None
+    sharepoint_site_url: str | None = None
+    sharepoint_scope_paths: tuple[str, ...] = ()
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -40,6 +42,12 @@ class Settings:
             sharepoint_client_secret=os.getenv("SHAREPOINT_CLIENT_SECRET") or None,
             sharepoint_site_id=os.getenv("SHAREPOINT_SITE_ID") or None,
             sharepoint_drive_id=os.getenv("SHAREPOINT_DRIVE_ID") or None,
+            sharepoint_site_url=os.getenv("SHAREPOINT_SITE_URL") or None,
+            sharepoint_scope_paths=tuple(
+                path.strip()
+                for path in os.getenv("SHAREPOINT_SCOPE_PATHS", "").split(";")
+                if path.strip()
+            ),
         )
 
     def require_sharepoint(self) -> tuple[str, str, str, str, str]:
@@ -57,6 +65,17 @@ class Settings:
                 "Configuração SharePoint incompleta: " + ", ".join(missing)
             )
         return tuple(values.values())  # type: ignore[return-value]
+
+    def require_browser_sharepoint(self) -> tuple[str, tuple[str, ...]]:
+        """Valida somente localizações não sensíveis usadas pela sessão Edge."""
+        missing = []
+        if not self.sharepoint_site_url:
+            missing.append("SHAREPOINT_SITE_URL")
+        if not self.sharepoint_scope_paths:
+            missing.append("SHAREPOINT_SCOPE_PATHS")
+        if missing:
+            raise ValueError("Configuração SharePoint incompleta: " + ", ".join(missing))
+        return self.sharepoint_site_url, self.sharepoint_scope_paths
 
     def create_directories(self) -> None:
         """Cria os diretórios locais usados pela aplicação."""

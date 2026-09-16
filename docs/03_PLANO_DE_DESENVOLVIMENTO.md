@@ -9,6 +9,25 @@
 
 ---
 
+# ATUALIZAÇÃO DO PLANO — F4 AUTORIZADA
+
+O histórico Git real da branch deve prevalecer sobre hashes meramente citados em
+documentação. Nesta branch, `1a7421a` contém a implementação Graph e o registro do
+bloqueio; `ee013b3` contém a revisão documental. O hash `df7943f` citado anteriormente
+não existe no repositório e não deve ser contado. Assim, esta entrega usa um único
+commit adicional da F4, dentro do máximo ordinário de três commits efetivos, sem
+invocar a exceção documental baseada na premissa incorreta de três commits anteriores.
+
+A tarefa autorizada é implementar e testar `BrowserSharePointSource`: descoberta
+recursiva, identidade `UniqueId`, versões históricas e metadados, download pelo ID,
+validação XLSX, integração incremental e controles GET-only. O teste corporativo já
+comprovou `/_api/web` (sem o espaço), `/Versions`, `CreatedBy`, `/Versions(ID)/$value`
+e aquisição de 0.1–0.98. A versão atual e a estabilidade operacional do `UniqueId`
+após cenários de movimentação/renomeação ainda requerem validação controlada. F4
+permanece em andamento por essas pendências. F5 não está autorizada.
+
+---
+
 # 1. OBJETIVO
 
 Este documento define o plano oficial de desenvolvimento da V1 do

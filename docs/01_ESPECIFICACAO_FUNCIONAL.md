@@ -8,6 +8,35 @@
 
 ---
 
+# REVISÃO F4 — AQUISIÇÃO SHAREPOINT VALIDADA
+
+Para a V1, a aquisição utiliza Selenium com Microsoft Edge visível e autenticação
+interativa realizada pelo usuário. Toda leitura autenticada ocorre por `fetch` GET
+dentro da própria sessão do navegador contra SharePoint REST; é proibido extrair
+ou persistir senha, cookies, access/refresh tokens, PRT ou credenciais do Office/Windows.
+
+A descoberta percorre recursivamente os escopos server-relative configurados, aceita
+apenas `.xlsx` e preserva `UniqueId`, nome, pasta e caminho. O `UniqueId` retornado
+pelo REST é a identidade técnica adotada nesta implementação; nome e caminho não são
+chaves. As versões históricas são enumeradas por
+`GetFileByServerRelativeUrl(...)/Versions?$expand=CreatedBy`, ordenadas pelo `ID`
+técnico retornado e baixadas por `Versions(ID)/$value`. `VersionLabel` nunca é usado
+como substituto do ID. São preservados `Created`, autor da versão (não autor da
+célula), email/login, comentário, tamanho, URL e indicador corrente quando retornados.
+
+Cada download deve existir, ser não vazio e ser ZIP/Open XML com
+`xl/workbook.xml`. Falha intermediária interrompe a cadeia, sem comparação não
+adjacente e sem avanço falso do checkpoint. O checkpoint continua disponível como
+baseline da primeira comparação nova; reexecuções não baixam histórico já consolidado
+além da baseline necessária. Artefatos ficam em diretório temporário descartável.
+
+O POC corporativo adquiriu 98 versões históricas (labels 0.1 a 0.98; IDs 1 a 98)
+do arquivo controlado, mas essa coincidência não é regra. O endpoint `/Versions` não
+foi comprovado como fonte da versão atual; obtenção e inclusão da versão atual exigem
+novo teste real e permanecem pendentes. Graph fica como provider opcional/futuro.
+
+---
+
 # 1. OBJETIVO
 
 Este documento define os requisitos funcionais, regras de negócio,

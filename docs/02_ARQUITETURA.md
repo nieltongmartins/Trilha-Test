@@ -9,6 +9,29 @@ Data: 15/09/2026
 
 ---
 
+# REVISÃO ARQUITETURAL F4 — PROVIDER EDGE/REST
+
+Fluxo oficial da V1: `BrowserSharePointSource` descobre arquivos recursivamente nos
+escopos configurados, normaliza identidade/proveniência e enumera/baixa versões;
+`AuditService` mantém pares adjacentes, transação e checkpoint; SQLite continua fonte
+canônica. O provider Graph permanece isolado em `app/sources/graph.py` e não é
+dependência da V1.
+
+O transporte do provider oficial recebe somente URL e resposta através de Selenium.
+Ele permite exclusivamente GET same-origin sob `/_api/`, usa `credentials: same-origin`
+dentro do Edge e nunca lê cookies, storage ou tokens. A sessão começa em Edge visível
+e o usuário conclui a autenticação Microsoft normalmente.
+
+Descoberta: `GetFolderByServerRelativeUrl(...)/Files` e `/Folders`, recursivamente;
+identidade: `File.UniqueId` retornado pelo REST, com site e escopo como contexto;
+localização: `ServerRelativeUrl`; versões históricas: `/Versions?$expand=CreatedBy`;
+conteúdo: `/Versions(ID)/$value`. O ID é preservado separadamente do label e fornece
+a ordem técnica observada. Os binários são validados antes da comparação e removidos
+com o diretório temporário. A versão atual permanece explicitamente fora da coleção
+histórica até validação real de metadados e conteúdo por endpoints read-only.
+
+---
+
 # 1. OBJETIVO
 
 Este documento define a arquitetura técnica oficial da aplicação

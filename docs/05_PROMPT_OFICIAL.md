@@ -1,5 +1,21 @@
 # PROJETO: AUDITOR DE PLANILHAS SHAREPOINT
 
+
+
+======================================================================
+DIRETRIZ ATUAL DA F4 — SHAREPOINT REST NO EDGE
+======================================================================
+
+Na F4, usar `BrowserSharePointSource` com Selenium/Edge visível, autenticação manual e
+SharePoint REST executado na sessão do navegador. Não solicitar nem extrair cookies,
+tokens, senha, PRT ou credenciais; não repassar a sessão a `requests`/`urllib`. Permitir
+somente GET same-origin em `/_api/`. Descobrir `.xlsx` recursivamente em escopos
+configurados, usar o `UniqueId` retornado como identidade técnica contextualizada e o
+server-relative path apenas como localização. Enumerar histórico com `/Versions`, usar
+sempre o ID retornado para download e preservar label/metadados separadamente. Validar
+Open XML antes de comparar e nunca saltar uma versão com falha. Manter a baseline do
+checkpoint e a idempotência. Graph é opcional/futuro. Não assumir que `/Versions` inclui
+a versão atual. Não iniciar F5.
 Você atuará como agente de desenvolvimento deste projeto.
 
 Sua responsabilidade é implementar uma aplicação simples, funcional,

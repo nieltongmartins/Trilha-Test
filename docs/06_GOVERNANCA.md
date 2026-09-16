@@ -9,6 +9,24 @@
 
 ---
 
+# DECISÃO DE GOVERNANÇA APLICÁVEL À CONTINUAÇÃO DA F4
+
+O responsável autorizou o provider Selenium/Edge + SharePoint REST como mecanismo da
+V1. Isso não autoriza reutilização externa da sessão: toda comunicação autenticada deve
+permanecer no navegador, somente com GET same-origin sob `/_api/`; captura de cookies,
+tokens, senha, PRT ou credenciais permanece proibida. Descoberta deve ser dinâmica e
+recursiva; nome/caminho não substituem identidade técnica; ID de versão e VersionLabel
+devem permanecer distintos; falha intermediária interrompe a cadeia e o checkpoint só
+avança após persistência. Graph pode permanecer isolado e opcional.
+
+Para contagem de commits, somente objetos efetivamente alcançáveis na branch contam.
+Hashes apenas documentados ou pertencentes a PR fechado sem merge não consomem o
+limite. Na branch inspecionada, os trabalhos F4 anteriores alcançáveis são `1a7421a` e
+`ee013b3`; `df7943f` não existe. Aplica-se o máximo ordinário de três commits efetivos,
+sem fragmentação. Esta decisão não autoriza F5.
+
+---
+
 # 1. OBJETIVO
 
 Este documento estabelece as regras de governança do projeto
