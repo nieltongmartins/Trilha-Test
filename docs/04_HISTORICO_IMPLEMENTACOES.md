@@ -9,6 +9,73 @@
 
 ---
 
+# ESTRATÉGIA MÍNIMA DE BACKUP DA F6 — 16/09/2026
+
+**Fase:** F6 — Robustez e Preparação para Produção. **Status:** tarefa de backup
+concluída; a F6 permanece em andamento.
+
+## Confirmação documental e decisão
+
+A seção 43 continuava sendo a próxima tarefa oficial e possui exatamente dois
+critérios: documentar uma estratégia mínima de backup do banco e considerar o banco de
+auditoria um ativo crítico. A arquitetura já estabelecia o SQLite em
+`data/database/auditoria.db` como fonte canônica e indicava que uma estratégia de
+produção deveria tratar backup, controle de acesso, retenção e restauração, mas não
+definia infraestrutura, frequência, prazo de retenção ou procedimento de restauração.
+Não existia estratégia anterior nem código específico de backup.
+
+Por isso, esta tarefa é exclusivamente documental, conforme o verbo e o limite da
+seção 43. Não foi criada funcionalidade de produção, política arbitrária de retenção ou
+restauração fora do escopo. A ausência das decisões operacionais foi registrada como
+limitação a resolver antes de depender do backup em produção, sem conflito documental,
+técnico ou de governança que impedisse a documentação da estratégia.
+
+## Estratégia documentada
+
+- o único ativo canônico incluído é o arquivo SQLite configurado, contendo planilhas,
+  versões processadas, alterações, checkpoints, execuções, erros, hashes, metadados e
+  relacionamentos definidos pelo schema;
+- XLSX históricos de `data/temp/`, relatórios regeneráveis, logs, Git e código-fonte são
+  excluídos;
+- uma implementação futura deverá usar `sqlite3.Connection.backup`, API oficial de
+  backup online do SQLite, em vez de copiar ingenuamente um banco aberto. Isso permite
+  snapshot consistente diante de escrita por outra conexão;
+- o destino deverá ser protegido e separado do arquivo ativo. O nome deverá usar o
+  identificador do banco e timestamp UTC com microssegundos; arquivo existente não
+  poderá ser silenciosamente substituído;
+- somente uma cópia concluída e aprovada por `PRAGMA integrity_check` e
+  `PRAGMA foreign_key_check` poderá ser publicada como válida. Falhas e artefatos
+  parciais não poderão alterar o banco original nem sua trilha/checkpoint;
+- não haverá upload externo, criptografia própria, retenção ou limpeza automática sem
+  decisão formal. Frequência, destino concreto, responsável, acesso e retenção seguem
+  pendentes para o ambiente de produção;
+- restauração não faz parte do critério oficial. Foram registrados apenas guardrails
+  para sua futura definição: aplicação parada, cópia validada, ausência de substituição
+  silenciosa e nova validação antes do uso.
+
+## Validação e limites
+
+Não houve alteração de código ou schema e, portanto, não foram criados testes de
+backup/restauração nem executada restauração. A revisão estática confirmou que o banco
+canônico concentra as seis tabelas oficiais e que temporários, relatórios e logs são
+diretórios separados. `pytest -q` foi executado como regressão da documentação e teve
+50 testes aprovados. `git diff --check` foi concluído sem erros.
+
+Não há resultado novo de `integrity_check` ou `foreign_key_check` sobre backup, pois
+nenhum arquivo de backup foi criado; alegar esses resultados ampliaria ou falsearia o
+escopo documental. Os resultados da tarefa de integridade anterior permanecem válidos
+somente para seus bancos temporários de teste. Não houve medição nem impacto de
+performance.
+
+O commit adicional é realizado exclusivamente porque o ambiente exige commit e criação
+de pull request, apesar do limite ordinário da F6 já ultrapassado. O hash é informado no
+relatório da sessão.
+
+**Próxima tarefa oficial:** empacotamento, seção 44 do plano, pendente de nova
+autorização. Não foi executada. A F6 não está concluída.
+
+---
+
 # INTEGRIDADE POR SHA-256 DA F6 — 16/09/2026
 
 **Fase:** F6 — Robustez e Preparação para Produção. **Status:** tarefa de integridade
@@ -2051,14 +2118,15 @@ A presença nesta seção não significa autorização para implementação.
 
 **Fase atual:** F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO — testes finais e performance concluídos
+**Status:** 🟡 EM ANDAMENTO — backup concluído
 
 **Implementação:** núcleo local, aquisição SharePoint Edge/REST, interface, migração
 SQLite e relatório validados no ambiente corporativo real; testes unitários, testes
 de integração automatizados, reexecução idempotente, auditoria incremental,
 falha/retomada, geração de relatório, múltiplas planilhas controladas e medição de
-performance da F6 concluídos. A medição identificou consumo elevado na geração de
-relatório com 100.000 alterações, sem mudança de produção nesta tarefa.
+performance, logs, temporários, integridade por SHA-256 e estratégia mínima de backup
+da F6 concluídos. A estratégia de backup foi somente documentada, como exigido pela
+seção 43, sem implementação operacional.
 
 **Fases concluídas:** 5/6
 
@@ -2070,7 +2138,7 @@ relatório com 100.000 alterações, sem mudança de produção nesta tarefa.
 
 **Próxima ação:**
 
-Solicitar autorização para a próxima tarefa da F6: logs. O limite
+Solicitar autorização para a próxima tarefa da F6: empacotamento. O limite
 ordinário de três commits da fase foi ultrapassado por determinação do ambiente desta
 execução.
 

@@ -1461,6 +1461,12 @@ Registrar claramente sua finalidade.
 
 # 43. BACKUP
 
+**Status:** concluída em 16/09/2026. Foi documentada a estratégia mínima para proteger
+o SQLite canônico por meio da Online Backup API, com validação antes da publicação e
+sem incluir temporários, relatórios ou logs. Infraestrutura, frequência, retenção,
+controle de acesso concreto e restauração permanecem decisões operacionais não
+definidas; nenhum mecanismo foi implementado além do critério documental desta seção.
+
 Documentar estratégia mínima de backup do banco.
 
 O banco de auditoria deverá ser considerado ativo crítico.
@@ -1757,13 +1763,14 @@ FASE 2 — CONCLUÍDA
 FASE 3 — CONCLUÍDA
 FASE 4 — CONCLUÍDA
 FASE 5 — CONCLUÍDA
-FASE 6 — EM ANDAMENTO (TESTES FINAIS, PERFORMANCE, LOGS, TEMPORÁRIOS E INTEGRIDADE CONCLUÍDOS)
+FASE 6 — EM ANDAMENTO (TESTES FINAIS, PERFORMANCE, LOGS, TEMPORÁRIOS, INTEGRIDADE E BACKUP CONCLUÍDOS)
 
 Situação atual:
 
 A F5 foi aceita em ambiente corporativo real. Na F6, os testes finais, a medição de
-performance, a revisão/fortalecimento de logs, o controle de arquivos temporários e a
-integridade por SHA-256 foram concluídos. A fase permanece em andamento e as tarefas
+performance, a revisão/fortalecimento de logs, o controle de arquivos temporários, a
+integridade por SHA-256 e a estratégia mínima de backup foram concluídos. A fase
+permanece em andamento e as tarefas
 posteriores não foram executadas.
 
 Os requisitos de capacidade e operação com várias planilhas em um banco canônico estão
@@ -1777,7 +1784,7 @@ Progresso da V1:
 
 # 55. PRÓXIMA AÇÃO OFICIAL
 
-Próxima atividade: backup, seção 43 da F6. Não executar sem nova
+Próxima atividade: empacotamento, seção 44 da F6. Não executar sem nova
 autorização.
 O limite ordinário de três commits da F6 foi atingido; qualquer novo commit exige
 autorização expressa ou procedimento previsto pela governança.
