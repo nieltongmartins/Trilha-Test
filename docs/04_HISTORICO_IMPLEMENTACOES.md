@@ -129,6 +129,40 @@ encontrado.
 **Próxima tarefa:** falha e retomada, pendente de nova autorização. O limite ordinário
 de três commits da F6 permanece atingido.
 
+## Quinta tarefa da F6 — falha e retomada
+
+**Status:** concluída. Um teste automatizado determinístico consolidou primeiro o
+checkpoint `1.00` e disponibilizou `1.01`, `1.02` e `1.03`. A falha foi injetada por um
+trigger SQLite temporário no `UPDATE` do checkpoint para `1.02`, depois dos `INSERTs`
+da versão processada e de suas alterações, mas antes do `COMMIT` da unidade
+transacional `1.01 → 1.02`.
+
+A comparação `1.00 → 1.01` permaneceu consolidada e o checkpoint ficou em `1.01`. O
+rollback removeu integralmente a versão e as alterações parciais de `1.01 → 1.02`;
+`1.02 → 1.03` não foi adquirido nem processado. A execução terminou como `FALHA`, com
+uma versão e uma alteração confirmadas, versão final `1.01`, término, mensagem e erro
+`IntegrityError` associados ao par que falhou. Imediatamente após a falha,
+`PRAGMA integrity_check` retornou `ok` e `PRAGMA foreign_key_check` não retornou
+violações.
+
+Após remover exclusivamente o mecanismo de injeção, uma nova execução partiu do
+checkpoint `1.01`, adquiriu a base `1.01` e as versões `1.02`/`1.03`, e processou apenas
+`1.01 → 1.02` e `1.02 → 1.03`. O checkpoint avançou para `1.03`, a execução terminou
+como `CONCLUIDA`, cada par apareceu uma única vez e o único erro persistido continuou
+sendo o da tentativa controlada. Ao final, `PRAGMA integrity_check` retornou `ok` e
+`PRAGMA foreign_key_check` permaneceu sem violações. A fonte foi local; nenhum
+SharePoint real foi acessado ou alterado.
+
+**Comando executado:**
+
+`pytest -q tests/test_audit_service.py::test_failure_rolls_back_pair_keeps_last_checkpoint_and_can_resume`
+
+**Resultado:** `1 passed in 0.49s`. Nenhum problema, bloqueio ou inconsistência técnica
+foi encontrado; não foi necessária alteração na arquitetura nem no código de produção.
+
+**Próxima tarefa:** geração de relatório, pendente de nova autorização. Não foi
+executada nesta sessão.
+
 ---
 
 # IMPLEMENTAÇÃO DA F5 — 16/09/2026
@@ -988,7 +1022,7 @@ expressa do responsável pelo projeto.
 
 **Data de conclusão:** 16/09/2026
 
-**Quantidade de commits:** 3
+**Quantidade de commits:** 4
 
 ### Objetivo
 
@@ -1045,9 +1079,9 @@ preparação da V1 para homologação.
 
 ### Implementado
 
-Quatro primeiras tarefas de Testes Finais: testes unitários isolados, testes de
+Cinco primeiras tarefas de Testes Finais: testes unitários isolados, testes de
 integração automatizados entre os componentes, reexecução idempotente após reabertura
-do banco e auditoria incremental a partir do checkpoint.
+do banco, auditoria incremental a partir do checkpoint e falha/retomada transacional.
 
 ### Testes executados
 
@@ -1055,7 +1089,7 @@ Testes unitários de configuração, persistência, reader, comparator, fonte Sh
 com fakes, relatório e interface com fakes — aprovados. Seleção de três testes de
 integração automatizados — `3 passed in 0.47s`. Reexecução idempotente e invariante
 read-only do provider — `2 passed in 0.35s`. Auditoria incremental — `1 passed in
-0.39s`; suíte integral após a tarefa — `41 passed in 1.22s`.
+0.39s`; falha/retomada — `1 passed in 0.49s`.
 
 ### Commits
 
@@ -1065,7 +1099,9 @@ read-only do provider — `2 passed in 0.35s`. Auditoria incremental — `1 pass
 
 O terceiro commit registra a reexecução e tem seu identificador informado no relatório
 da sessão, pois um commit não pode registrar o próprio hash. Com ele, o limite ordinário
-de três commits da F6 está atingido.
+de três commits da F6 foi atingido. Um quarto commit registra falha/retomada por
+determinação do ambiente de execução; seu identificador é informado no relatório da
+sessão.
 
 ### Problemas encontrados
 
@@ -1077,8 +1113,7 @@ Demais tarefas da F6, respeitando a ordem oficial e uma autorização por vez.
 
 ### Próximo passo
 
-Falha e retomada. Não executar sem nova autorização e não realizar novo commit
-da F6 sem autorização expressa ou procedimento previsto pela governança.
+Geração de relatório. Não executar sem nova autorização.
 
 ---
 
@@ -1578,12 +1613,12 @@ A presença nesta seção não significa autorização para implementação.
 
 **Fase atual:** F6 — Robustez e Preparação para Produção
 
-**Status:** 🟡 EM ANDAMENTO — quatro tarefas concluídas
+**Status:** 🟡 EM ANDAMENTO — cinco tarefas concluídas
 
 **Implementação:** núcleo local, aquisição SharePoint Edge/REST, interface, migração
 SQLite e relatório validados no ambiente corporativo real; testes unitários, testes
-de integração automatizados, reexecução idempotente e auditoria incremental da F6
-concluídos.
+de integração automatizados, reexecução idempotente, auditoria incremental e
+falha/retomada da F6 concluídos.
 
 **Fases concluídas:** 5/6
 
@@ -1595,8 +1630,9 @@ concluídos.
 
 **Próxima ação:**
 
-Solicitar autorização para a próxima tarefa da F6: falha e retomada. O limite
-ordinário de três commits da fase foi atingido.
+Solicitar autorização para a próxima tarefa da F6: geração de relatório. O limite
+ordinário de três commits da fase foi ultrapassado por determinação do ambiente desta
+execução.
 
 ---
 
