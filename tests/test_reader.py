@@ -22,9 +22,11 @@ def test_reader_preserves_formulas_values_and_sheets(
     assert snapshot["Detalhes"] == {"B2": "Nova informação"}
 
 
-def test_reader_ignores_cells_without_content(cql028_versions: Path) -> None:
+def test_reader_ignores_explicitly_empty_cells(cql028_versions: Path) -> None:
     snapshot = read_workbook(cql028_versions / "0.84.xlsx")
 
+    # B2 é gravada como None pela fixture programática; openpyxl a materializa
+    # como uma célula vazia e o snapshot não deve preservá-la.
     assert "B2" not in snapshot["Resumo"]
     assert "Detalhes" in snapshot
     assert snapshot["Detalhes"] == {}

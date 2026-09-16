@@ -8,6 +8,16 @@ import pytest
 WorkbookState = Mapping[str, Mapping[str, object]]
 
 
+@pytest.fixture(autouse=True)
+def discard_temporary_xlsx(tmp_path: Path) -> Iterator[None]:
+    """Garante que nenhuma planilha temporária sobreviva ao teste."""
+
+    yield
+
+    for workbook_path in tmp_path.rglob("*.xlsx"):
+        workbook_path.unlink(missing_ok=True)
+
+
 def _write_workbook(path: Path, sheets: WorkbookState) -> None:
     """Cria uma versão Excel controlada no diretório temporário do teste."""
 
@@ -37,6 +47,9 @@ def cql028_versions(tmp_path: Path) -> Iterator[Path]:
         "0.84.xlsx": {
             "Resumo": {
                 "A1": 10,
+                # Célula vazia explícita: deve ser descartada pelo reader sem
+                # confundir esse caso com os valores válidos 0 e False.
+                "B2": None,
                 "C3": "Pendente",
                 "F6": "=SUM(A1:A10)",
             },
