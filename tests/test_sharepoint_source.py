@@ -10,6 +10,7 @@ from app.config import Settings
 from app.database import Database
 from app.models import AuditExecutionStatus
 from app.sources import BrowserSharePointSource, SharePointReadError, SpreadsheetInfo
+from app.sources.sharepoint import _odata_object
 
 SITE = "https://tenant.sharepoint.com/sites/qualidade"
 ROOT = "/sites/qualidade/Documentos Compartilhados"
@@ -109,20 +110,18 @@ def file_metadata(
     unique_id: str = "UUID-A", label: str = "0.99", ui_version: int = 99
 ) -> dict[str, object]:
     return {
-        "value": {
-            "Name": "Arquivo.xlsx",
-            "ServerRelativeUrl": f"{ROOT}/Setor A/Arquivo.xlsx",
-            "UniqueId": unique_id,
-            "UIVersion": ui_version,
-            "UIVersionLabel": label,
-            "TimeLastModified": "2026-09-16T11:35:49Z",
-            "Length": "226665",
-            "ModifiedBy": {
-                "Title": "Autora Atual",
-                "Email": "atual@example.com",
-                "LoginName": "login-atual",
-            },
-        }
+        "Name": "Arquivo.xlsx",
+        "ServerRelativeUrl": f"{ROOT}/Setor A/Arquivo.xlsx",
+        "UniqueId": unique_id,
+        "UIVersion": ui_version,
+        "UIVersionLabel": label,
+        "TimeLastModified": "2026-09-16T11:35:49Z",
+        "Length": "226665",
+        "ModifiedBy": {
+            "Title": "Autora Atual",
+            "Email": "atual@example.com",
+            "LoginName": "login-atual",
+        },
     }
 
 
@@ -156,6 +155,16 @@ def test_configuration_has_multiple_scopes_and_no_browser_secrets(
         not any(word in name for word in ("password", "token", "cookie"))
         for name in browser_fields
     )
+
+
+def test_odata_object_accepts_real_nometadata_entity_and_legacy_envelopes() -> None:
+    direct = {"UniqueId": "UUID-A", "UIVersion": 99}
+
+    assert _odata_object(direct) is direct
+    assert _odata_object({"value": direct}) is direct
+    assert _odata_object({"d": direct}) is direct
+    with pytest.raises(SharePointReadError, match="objeto inválido"):
+        _odata_object({"value": [direct]})
 
 
 def test_recursively_discovers_same_name_as_distinct_unique_ids(tmp_path: Path) -> None:

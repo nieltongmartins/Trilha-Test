@@ -53,7 +53,16 @@ def _odata_results(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
 
 def _odata_object(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    value = _odata_value(payload)
+    # With ``odata=nometadata`` SharePoint returns a single entity as the
+    # top-level JSON object.  Collections still use ``value`` and older OData
+    # modes can use ``d``.  Keep all three documented wire shapes separate so
+    # a direct entity is not mistaken for a malformed collection response.
+    if "value" in payload:
+        value = payload["value"]
+    elif isinstance(payload.get("d"), Mapping):
+        value = payload["d"]
+    else:
+        value = payload
     if not isinstance(value, Mapping):
         raise SharePointReadError("SharePoint REST retornou objeto inválido")
     return value
