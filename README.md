@@ -31,7 +31,9 @@ O comando cria os diretórios operacionais e, se necessário, o banco em
 `data/database/auditoria.db`. Em um ambiente gráfico, abre o Edge visível para
 autenticação manual e apresenta a interface Tkinter. Nela é possível selecionar
 a planilha, consultar o checkpoint, auditar sem bloquear a janela e gerar ou abrir
-o relatório consolidado. A inicialização é idempotente.
+o relatório consolidado. Conclua o login/MFA no Edge e somente então clique em
+**Atualizar lista**; a abertura da janela não dispara consultas enquanto a
+autenticação manual ainda está em andamento. A inicialização é idempotente.
 
 ## Testes
 

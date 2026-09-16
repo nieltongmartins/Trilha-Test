@@ -13,6 +13,35 @@
 
 **Fase:** F5 — Interface e Relatório. **Status:** 🟡 EM ANDAMENTO.
 
+## Correção após validação real da F5 no Windows — 16/09/2026
+
+A validação real foi executada no Windows pelo VS Code/PowerShell, com Edge,
+Selenium, autenticação manual e o escopo
+`/controle_qualidade/Documentos Compartilhados1/Z-Testes VSC`. O Edge abriu e a
+descoberta chegou à consulta de versões, mas a aplicação encerrou com
+`SharePointReadError: SharePoint REST retornou objeto inválido` ao ler os metadados
+do arquivo atual.
+
+A causa raiz foi a incompatibilidade entre o formato real da entidade REST e o fake
+usado pelos testes: com o cabeçalho `Accept: application/json;odata=nometadata`, a
+entidade de metadados veio diretamente no objeto JSON, enquanto `_odata_object()` e o
+fake exigiam incorretamente um envelope `value`. O parser agora aceita a entidade
+direta de `nometadata` e mantém compatibilidade com os envelopes `value` e `d`; as
+coleções continuam sujeitas ao parser estrito de coleção. Não foi necessário usar o
+tratamento XML/`innerText` observado na investigação da F4, pois o fluxo concreto
+atual usa `fetch(...).json()` dentro do Edge e a falha ocorreu depois dessa conversão.
+
+A interface deixou de consultar o SharePoint durante o construtor: ela abre e orienta
+o usuário a concluir a autenticação antes de acionar **Atualizar lista**. Falhas de
+descoberta já eram exibidas no status; falhas de metadados/versões agora também são
+capturadas e apresentadas sem destruir a janela. Foram adicionados testes com fakes
+para a entidade REST direta, para a ausência de consulta no construtor e para a falha
+recuperável de versões. Permanecem intactos os GETs same-origin, a autenticação manual,
+a proibição de extrair sessão, o `UniqueId` e o SQLite canônico.
+
+**Status após a correção:** 🟡 F5 EM VALIDAÇÃO. A fase não está concluída e
+deve ser novamente testada no mesmo Windows corporativo antes de qualquer F6.
+
 Foi implementada a interface desktop Python com Tkinter/ttk, integrada ao provider
 Edge/REST e ao `AuditService`. A tela lista e seleciona planilhas, permite atualizar a
 lista depois da autenticação manual no Edge, mostra checkpoint, versão disponível e

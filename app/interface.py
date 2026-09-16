@@ -31,10 +31,11 @@ class AuditApplication(ttk.Frame):
         self.reports_directory = Path(reports_directory)
         self.spreadsheets: list[SpreadsheetInfo] = []
         self.last_report: Path | None = None
-        self.status = tk.StringVar(value="Carregando planilhas...")
+        self.status = tk.StringVar(
+            value="Autentique-se no Edge e clique em Atualizar lista."
+        )
         self.details = tk.StringVar(value="Selecione uma planilha.")
         self._build()
-        self.refresh()
 
     def _build(self) -> None:
         self.grid(sticky="nsew")
@@ -96,10 +97,10 @@ class AuditApplication(ttk.Frame):
         ).fetchone()
 
     def show_status(self) -> None:
-        spreadsheet = self._selected()
-        row = self._database_row(spreadsheet)
-        checkpoint = row["versao_numero"] if row else None
         try:
+            spreadsheet = self._selected()
+            row = self._database_row(spreadsheet)
+            checkpoint = row["versao_numero"] if row else None
             versions = list(self.source.list_versions(spreadsheet))
             latest = versions[-1].number if versions else "—"
             ids = [version.id for version in versions]
@@ -122,8 +123,14 @@ class AuditApplication(ttk.Frame):
                     else max(len(versions) - 1, 0)
                 )
             )
-        except (ValueError, TypeError, IndexError):
-            latest, pending = "indisponível", "indisponível"
+        except Exception as error:
+            checkpoint = locals().get("checkpoint")
+            self.details.set(
+                f"Última auditada: {checkpoint or '—'} | "
+                "Última disponível: indisponível | Pendentes: indisponível"
+            )
+            self.status.set(f"Falha ao consultar versões: {error}")
+            return
         self.details.set(
             f"Última auditada: {checkpoint or '—'} | Última disponível: {latest} | Pendentes: {pending}"
         )
