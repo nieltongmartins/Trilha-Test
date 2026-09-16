@@ -9,6 +9,77 @@
 
 ---
 
+# INTEGRIDADE POR SHA-256 DA F6 — 16/09/2026
+
+**Fase:** F6 — Robustez e Preparação para Produção. **Status:** tarefa de integridade
+concluída; a F6 permanece em andamento.
+
+## Confirmação documental e decisão
+
+A seção 42 continuava sendo a próxima tarefa oficial e continha somente dois critérios:
+avaliar/implementar SHA-256 das versões processadas quando tecnicamente adequado e
+registrar claramente sua finalidade. A especificação proibia falsa garantia de
+segurança ou imutabilidade, e a arquitetura já previa o campo opcional
+`versao_processada.hash_origem` para uma impressão digital do binário usado. Portanto,
+foi considerado adequado preencher o campo existente, sem ampliar a tarefa para uma
+revisão geral de integridade e sem mudança conceitual do schema.
+
+O SHA-256 que já existia no controle de temporários não atendia a esse objetivo: ele é
+derivado dos identificadores contextuais e serve somente para produzir um nome seguro,
+sem colisões de caminho. O mecanismo desta tarefa usa os bytes reais do XLSX e permite
+conferir que outro binário é idêntico ao conteúdo adquirido e processado naquela
+comparação. Não comprova autoria nem autenticidade da origem; não substitui trilha,
+checkpoint, identidade SharePoint, assinatura, backup ou proteção do SQLite; e não
+transforma o XLSX temporário em evidência permanente.
+
+## Implementação e comportamento
+
+- `app/integrity.py` calcula SHA-256 em blocos de 1 MiB com `hashlib`, produzindo
+  hexadecimal minúsculo determinístico sem carregar o arquivo inteiro em memória;
+- o `AuditService` calcula o digest antes de ler o workbook e antes de liberar o
+  temporário, sobre o binário exato adquirido para o lado atual da comparação;
+- `hash_origem` é gravado atomicamente com `versao_processada`, alterações e checkpoint,
+  para versões históricas ou para a versão atual conforme a ordem oficial da fonte;
+- o schema já continha `hash_origem`. A migração idempotente passou a acrescentá-lo
+  apenas em bancos legados que não o possuem, preservando registros existentes, e o
+  `user_version` passou a 2;
+- auditorias inicial e incremental registram o hash de cada versão consolidada como
+  lado atual. Retomada conserva hashes confirmados e grava apenas pares pendentes;
+  execução sem novidades não relê XLSX nem cria/duplica hashes;
+- a primeira versão usada somente como baseline inicial não possui linha própria de
+  versão processada nem hash isolado, em conformidade com o modelo singular existente;
+- os temporários continuam removidos imediatamente, e relatórios continuam regeneráveis
+  exclusivamente a partir do banco.
+
+## Validação e limites
+
+`pytest -q` — `50 passed in 1.71s`.
+
+O teste novo valida mesmo conteúdo, inclusive lido em blocos pequenos, produzindo o
+mesmo SHA-256 esperado e conteúdo diferente produzindo digest diferente. Testes do
+serviço validam a persistência para versões históricas, versão sem alterações e fluxo
+incremental; a suíte existente cobre versão atual SharePoint, reinicialização,
+idempotência, falha/retomada, descarte de temporários e relatório sem XLSX históricos.
+A migração foi validada contra banco legado sem a coluna, com reinicialização
+idempotente e preservação dos dados. Nenhum SharePoint real foi acessado.
+
+`PRAGMA integrity_check` retornou `ok` e `PRAGMA foreign_key_check` não encontrou
+violações nos cenários de auditoria incremental, reexecução e retomada da suíte.
+
+O cálculo acrescenta uma leitura sequencial do XLSX por versão. O uso de blocos limita
+memória e não altera o arquivo; não foi repetido o benchmark completo porque não houve
+evidência objetiva para fazê-lo. A conferência futura depende de o binário candidato
+ainda estar disponível por meio autorizado; o hash sozinho não o recupera.
+
+O commit adicional é realizado exclusivamente porque o ambiente exige commit e criação
+de pull request, apesar do limite ordinário da F6 já ultrapassado. O hash é informado no
+relatório da sessão.
+
+**Próxima tarefa oficial:** backup, seção 43 do plano, pendente de nova autorização.
+Não foi executada. A F6 não está concluída.
+
+---
+
 # CONTROLE DE ARQUIVOS TEMPORÁRIOS DA F6 — 16/09/2026
 
 **Fase:** F6 — Robustez e Preparação para Produção. **Status:** tarefa de arquivos
