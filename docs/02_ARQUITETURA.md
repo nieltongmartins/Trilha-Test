@@ -1447,6 +1447,45 @@ Em produção deverá existir estratégia de:
 A definição da infraestrutura de backup poderá ocorrer na fase de
 preparação para produção.
 
+## 46.1 Estratégia mínima definida na F6
+
+O objeto canônico a proteger é exclusivamente o arquivo SQLite configurado por
+`AUDIT_DATABASE_PATH` (por padrão, `data/database/auditoria.db`). Ele reúne o schema e
+todos os registros persistentes da trilha: planilhas, versões processadas, alterações,
+checkpoints, execuções, erros, hashes e seus relacionamentos. Arquivos XLSX em
+`data/temp/`, relatórios em `data/reports/`, logs, código-fonte e arquivos Git não fazem
+parte do backup canônico; temporários e relatórios permanecem descartáveis ou
+regeneráveis.
+
+A cópia operacional deverá usar a Online Backup API do SQLite, exposta no Python por
+`sqlite3.Connection.backup`, e não uma cópia simples do arquivo possivelmente aberto.
+Esse mecanismo obtém um snapshot consistente mesmo quando outra conexão escreve no
+banco; a publicação do resultado deverá ocorrer somente depois do término bem-sucedido
+e das verificações `PRAGMA integrity_check` e `PRAGMA foreign_key_check`. Um artefato
+parcial não deverá substituir nem ser apresentado como backup válido, e qualquer falha
+deverá preservar sem alteração o banco de origem e ser diagnosticável sem registrar
+conteúdo sensível.
+
+O destino deverá ser armazenamento protegido, gravável pelo operador de backup e
+separado do arquivo ativo. O nome deverá identificar o banco e conter timestamp UTC,
+por exemplo `auditoria-AAAAMMDDTHHMMSS.ffffffZ.db`; colisões não deverão sobrescrever
+um arquivo existente. Backups contêm os mesmos dados sensíveis do banco e, portanto,
+deverão herdar controle de acesso compatível. Não haverá upload externo, criptografia
+própria nem inclusão automática de outros artefatos.
+
+A infraestrutura de destino, a frequência, o responsável, a política de retenção e o
+controle de acesso concretos dependem do ambiente de produção e não estão definidos
+nos requisitos da V1. Assim, não se estabelece retenção arbitrária nem remoção
+automática nesta tarefa. A operação de produção não deverá depender desta estratégia
+até que essas decisões sejam formalmente tomadas e o procedimento seja implementado e
+validado.
+
+A restauração não integra os critérios da seção 43. Quando for formalmente definida,
+deverá partir de uma cópia validada, ocorrer com a aplicação parada, usar caminho novo
+ou exigir confirmação explícita para substituir um banco e repetir as duas verificações
+de integridade antes da entrada em operação. Nenhuma restauração automática ou sobre o
+banco real foi implementada nesta tarefa.
+
 ---
 
 # 47. TESTABILIDADE

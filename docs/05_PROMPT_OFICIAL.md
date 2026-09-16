@@ -11,8 +11,8 @@ sessão continuam proibidos. A F6 foi iniciada com autorização expressa e deve
 uma tarefa por vez, conforme a ordem do plano. Testes unitários, testes de integração
 automatizados, reexecução, auditoria incremental, falha/retomada, geração de relatório
 e múltiplas planilhas controladas, além da medição de performance, da revisão de logs,
-do controle de arquivos temporários e da integridade por SHA-256 foram concluídos; a
-próxima tarefa é backup e aguarda autorização. Os
+do controle de arquivos temporários, da integridade por SHA-256 e da estratégia mínima
+de backup foram concluídos; a próxima tarefa é empacotamento e aguarda autorização. Os
 três commits ordinários da F6 foram consumidos; commits
 adicionais ocorrem somente quando impostos pelo ambiente de execução.
 
