@@ -252,6 +252,32 @@ def test_recursively_discovers_same_name_as_distinct_unique_ids(tmp_path: Path) 
     assert all("/_api/" in url for url in browser.calls)
 
 
+def test_lists_immediate_folders_for_ui_selection(tmp_path: Path) -> None:
+    source, browser = make_source(tmp_path, discovery_responses())
+
+    with source:
+        folders = source.list_folders()
+
+    assert folders == (
+        ("Setor A", f"{ROOT}/Setor A"),
+        ("Setor B", f"{ROOT}/Setor B"),
+    )
+    assert len(browser.calls) == 3
+    assert browser.calls[0].endswith(
+        "Documentos%20Compartilhados')/Folders?$select=Name,ServerRelativeUrl"
+    )
+
+
+def test_selected_folder_replaces_source_scope_without_new_browser(
+    tmp_path: Path,
+) -> None:
+    source, _ = make_source(tmp_path, discovery_responses())
+
+    source.set_scope_paths(["/Documentos Compartilhados/Setor A"])
+
+    assert source.scope_paths == (f"{ROOT}/Setor A",)
+
+
 def test_unique_id_keeps_identity_when_name_and_path_change() -> None:
     original = SpreadsheetInfo(
         SITE, "sharepoint-rest", "stable-id", "antes.xlsx", "/raiz/antes.xlsx"

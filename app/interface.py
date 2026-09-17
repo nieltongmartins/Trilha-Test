@@ -52,7 +52,8 @@ class AuditApplication(ttk.Frame):
         )
         self.site_url = tk.StringVar(value=site_url)
         self.scope_paths = tk.StringVar(value=";".join(scope_paths))
-        self.folder_names = tk.StringVar(value="")
+        self.selected_folder = tk.StringVar(value="")
+        self.folder_paths: list[str] = []
         self.status = tk.StringVar(
             value=(
                 "Conectado. Atualize a lista."
@@ -86,14 +87,20 @@ class AuditApplication(ttk.Frame):
         ttk.Label(config, text="Pasta(s):").grid(
             row=2, column=0, sticky="w", pady=(6, 0)
         )
-        ttk.Entry(config, textvariable=self.folder_names).grid(
+        self.folder_selector = ttk.Combobox(
+            config, textvariable=self.selected_folder, state="readonly"
+        )
+        self.folder_selector.grid(
             row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
         )
+        self.copy_folder_button = ttk.Button(
+            config, text="Copiar para escopo", command=self.copy_folder_to_scope
+        )
+        self.copy_folder_button.grid(row=2, column=2, padx=(6, 0), pady=(6, 0))
         ttk.Label(
             config,
             text=(
-                "Pastas são adicionadas ao(s) escopo(s); "
-                "separe vários valores por ponto e vírgula."
+                "Após conectar, selecione uma pasta e copie seu caminho para o escopo."
             ),
         ).grid(
             row=3, column=1, sticky="w"
@@ -179,6 +186,39 @@ class AuditApplication(ttk.Frame):
                 )
         self.status.set("Conectado ao SharePoint. Clique em Atualizar lista.")
         self._set_action_state()
+        list_folders = getattr(source, "list_folders", None)
+        if callable(list_folders):
+            self._start_work(
+                "Carregando pastas do SharePoint...",
+                lambda: list(list_folders()),
+                self._folders_loaded,
+            )
+
+    def _folders_loaded(self, folders: list[tuple[str, str]]) -> None:
+        self.folder_paths = [path for _name, path in folders]
+        self.folder_selector["values"] = [name for name, _path in folders]
+        if folders:
+            self.folder_selector.current(0)
+            self.status.set("Pastas carregadas. Selecione uma ou atualize a lista.")
+        else:
+            self.status.set(
+                "Nenhuma subpasta encontrada; o escopo atual pode ser usado."
+            )
+
+    def copy_folder_to_scope(self) -> None:
+        index = self.folder_selector.current()
+        if index < 0 or index >= len(self.folder_paths):
+            self.status.set("Selecione uma pasta para copiar para o escopo.")
+            return
+        path = self.folder_paths[index]
+        self.scope_paths.set(path)
+        if self.source is not None:
+            set_scope_paths = getattr(self.source, "set_scope_paths", None)
+            if callable(set_scope_paths):
+                set_scope_paths((path,))
+        if self.save_configuration is not None:
+            self.save_configuration(self.site_url.get().strip().rstrip("/"), (path,))
+        self.status.set("Escopo atualizado. Clique em Atualizar lista.")
 
     def refresh(self) -> None:
         if self.source is None:
@@ -368,6 +408,8 @@ class AuditApplication(ttk.Frame):
         for name in ("connect_button",):
             if hasattr(self, name):
                 getattr(self, name).configure(state=state)
+        if hasattr(self, "copy_folder_button"):
+            self.copy_folder_button.configure(state=connected_state)
         for name in ("refresh_button", "audit_button", "report_button"):
             if hasattr(self, name):
                 getattr(self, name).configure(state=connected_state)

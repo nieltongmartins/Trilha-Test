@@ -103,13 +103,13 @@ validação Open XML. O SharePoint permanece estritamente somente leitura.
    `$env:SHAREPOINT_SCOPE_PATHS`.
 5. Confirme a abertura imediata da janela **Trilha de Auditoria** e que o Edge
    ainda não foi aberto.
-6. Informe/confira o site e o caminho do escopo. Opcionalmente, mantenha a biblioteca
-   no campo **Escopo(s)** e informe uma ou mais subpastas no campo **Pasta(s)**; não
-   use uma pasta transitória de testes como configuração definitiva.
+6. Informe/confira o site e o caminho da biblioteca no campo **Escopo(s)**.
 7. Clique em **Conectar**.
 8. Autentique-se manualmente no Edge e conclua o MFA.
-9. Volte à aplicação, clique em **Atualizar lista** e confirme a atualização do
-   estado, a seleção e a auditoria das planilhas.
-10. Feche a aplicação e o Edge.
-11. Abra novamente com `python main.py`.
-12. Confirme que site e escopo foram recuperados sem comandos `$env:`.
+9. A aplicação carregará as subpastas no campo **Pasta(s)**. Para restringir a
+   auditoria, selecione uma pasta e clique em **Copiar para escopo**.
+10. Clique em **Atualizar lista** e confirme a atualização do estado, a seleção e a
+    auditoria das planilhas.
+11. Feche a aplicação e o Edge.
+12. Abra novamente com `python main.py`.
+13. Confirme que site e escopo foram recuperados sem comandos `$env:`.

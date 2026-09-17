@@ -131,18 +131,10 @@ class BrowserSharePointSource:
         parsed = urlsplit(site_url)
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("A URL do site SharePoint deve usar HTTPS")
-        scopes = tuple(
-            dict.fromkeys(
-                _normalize_scope_path(path, parsed.path)
-                for path in scope_paths
-                if path.strip("/")
-            )
-        )
-        if not scopes:
-            raise ValueError("Ao menos um escopo SharePoint deve ser configurado")
         self.site_url = site_url.rstrip("/")
         self._origin = f"{parsed.scheme}://{parsed.netloc}"
-        self.scope_paths = scopes
+        self._site_path = parsed.path
+        self.set_scope_paths(scope_paths)
         self._browser = browser
         self._owns_browser = owns_browser
         self._download_timeout = download_timeout
@@ -152,6 +144,19 @@ class BrowserSharePointSource:
             download_directory or self._workspace.path
         )
         self.download_directory.mkdir(parents=True, exist_ok=True)
+
+    def set_scope_paths(self, scope_paths: Sequence[str]) -> None:
+        """Atualiza raízes de leitura sem recriar a sessão autenticada."""
+        scopes = tuple(
+            dict.fromkeys(
+                _normalize_scope_path(path, self._site_path)
+                for path in scope_paths
+                if path.strip("/")
+            )
+        )
+        if not scopes:
+            raise ValueError("Ao menos um escopo SharePoint deve ser configurado")
+        self.scope_paths = scopes
 
     @classmethod
     def open_edge(
@@ -342,6 +347,35 @@ class BrowserSharePointSource:
         )
         return result
 
+    def list_folders(self) -> tuple[tuple[str, str], ...]:
+        """Lista recursivamente as subpastas dos escopos para seleção na interface."""
+        found: dict[str, str] = {}
+        pending = list(self.scope_paths)
+        visited: set[str] = set()
+        while pending:
+            folder = pending.pop(0)
+            if folder in visited:
+                continue
+            visited.add(folder)
+            encoded = _escape_odata_path(folder)
+            payload = self._json(
+                f"web/GetFolderByServerRelativeUrl('{encoded}')/Folders"
+                "?$select=Name,ServerRelativeUrl"
+            )
+            for item in _odata_results(payload):
+                name, path = item.get("Name"), item.get("ServerRelativeUrl")
+                if (
+                    isinstance(name, str)
+                    and isinstance(path, str)
+                    and name != "Forms"
+                ):
+                    found[path] = name
+                    pending.append(path)
+        return tuple(
+            (name, path)
+            for path, name in sorted(found.items(), key=lambda item: item[1].casefold())
+        )
+
     def _file_metadata(self, spreadsheet: SpreadsheetInfo) -> Mapping[str, Any]:
         encoded = _escape_odata_path(spreadsheet.path or "")
         return _odata_object(
@@ -477,7 +511,11 @@ class BrowserSharePointSource:
         result = self._browser.execute_async_script(
             _DOWNLOAD_SCRIPT, url, destination.name
         )
-        if not isinstance(result, Mapping) or result.get("error") or not result.get("ok"):
+        if (
+            not isinstance(result, Mapping)
+            or result.get("error")
+            or not result.get("ok")
+        ):
             detail = (
                 result.get("error")
                 if isinstance(result, Mapping)
