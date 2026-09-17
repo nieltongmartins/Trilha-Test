@@ -97,6 +97,22 @@ def main(*, launch_ui: bool | None = None) -> int:
     database = Database(settings.database_path)
     application = None
     lifecycle = None
+    previous_threading_excepthook = threading.excepthook
+
+    def diagnostic_threading_excepthook(args: threading.ExceptHookArgs) -> None:
+        logger.error(
+            "Exceção não capturada em worker nome=%s ident=%s daemon=%s "
+            "tipo_erro=%s erro=%r",
+            args.thread.name if args.thread is not None else "desconhecida",
+            args.thread.ident if args.thread is not None else None,
+            args.thread.daemon if args.thread is not None else None,
+            args.exc_type.__name__,
+            args.exc_value,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+        previous_threading_excepthook(args)
+
+    threading.excepthook = diagnostic_threading_excepthook
     try:
         if launch_ui is None:
             launch_ui = sys.platform == "win32" or bool(os.environ.get("DISPLAY"))
@@ -138,10 +154,25 @@ def main(*, launch_ui: bool | None = None) -> int:
             save_configuration=settings.save_browser_sharepoint,
         )
         logger.info("Interface pronta; aguardando ação do usuário para conectar")
+        logger.info("Entrando em root.mainloop")
         lifecycle._log(
             "antes de mainloop", origin="main.py", reason="início do loop Tk"
         )
-        root.mainloop()
+        try:
+            root.mainloop()
+            if lifecycle.close_requested:
+                logger.info("root.mainloop retornou após solicitação de fechamento")
+            else:
+                logger.warning(
+                    "root.mainloop RETORNOU NORMALMENTE sem solicitação de fechamento"
+                )
+        except BaseException as error:
+            logger.exception(
+                "root.mainloop terminou por BaseException tipo_erro=%s erro=%r",
+                type(error).__name__,
+                error,
+            )
+            raise
         lifecycle._log(
             "depois de mainloop",
             origin="main.py",
@@ -155,6 +186,7 @@ def main(*, launch_ui: bool | None = None) -> int:
         logger.critical("Erro inesperado encerrou a aplicação", exc_info=True)
         raise
     finally:
+        threading.excepthook = previous_threading_excepthook
         if lifecycle is not None:
             lifecycle._log(
                 "finally",

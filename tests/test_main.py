@@ -77,6 +77,59 @@ def test_ui_is_created_without_opening_sharepoint(tmp_path: Path, monkeypatch) -
     assert events == ["tk", "ui", "mainloop"]
 
 
+def test_mainloop_base_exception_is_logged_and_propagated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class InterruptingRoot:
+        def title(self, _title: str) -> None:
+            pass
+
+        def minsize(self, *_size: int) -> None:
+            pass
+
+        def mainloop(self) -> None:
+            raise KeyboardInterrupt("interrupção de diagnóstico")
+
+        def protocol(self, *_args) -> None:
+            pass
+
+        def bind(self, *_args, **_kwargs) -> None:
+            pass
+
+        def winfo_exists(self) -> int:
+            return 1
+
+        def winfo_viewable(self) -> int:
+            return 1
+
+        def state(self) -> str:
+            return "normal"
+
+    class ApplicationFake:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def close_source(self) -> None:
+            pass
+
+    monkeypatch.setenv("AUDIT_DATABASE_PATH", str(tmp_path / "audit.db"))
+    log_path = tmp_path / "audit.log"
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(log_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(main.tk, "Tk", InterruptingRoot)
+    monkeypatch.setattr(main, "AuditApplication", ApplicationFake)
+    try:
+        main.main(launch_ui=True)
+    except KeyboardInterrupt as error:
+        assert repr(error) == "KeyboardInterrupt('interrupção de diagnóstico')"
+    else:
+        raise AssertionError("KeyboardInterrupt deveria ser propagado")
+
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "root.mainloop terminou por BaseException" in log_text
+    assert "tipo_erro=KeyboardInterrupt" in log_text
+
+
 class LifecycleRootFake:
     def __init__(self) -> None:
         self.protocols = {}
