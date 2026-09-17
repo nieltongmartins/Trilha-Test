@@ -1,7 +1,8 @@
-"""Interface desktop simples para operar a auditoria e gerar relatórios."""
+"""Interface desktop responsiva para configurar, conectar e auditar."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from pathlib import Path
 import logging
 import subprocess
@@ -10,33 +11,49 @@ import threading
 from tkinter import messagebox, ttk
 import tkinter as tk
 
-from app.audit_service import AuditService
+from app.audit_service import AuditResult, AuditService
 from app.database import Database
 from app.report_service import ReportService
 from app.sources.base import SpreadsheetInfo, VersionSource
 
 
 logger = logging.getLogger("auditoria_excel.interface")
+SourceFactory = Callable[[str, tuple[str, ...]], VersionSource]
+ConfigurationSaver = Callable[[str, tuple[str, ...]], None]
 
 
 class AuditApplication(ttk.Frame):
-    """Tela operacional deliberadamente pequena, sem estado fora do SQLite."""
+    """Tela operacional; todo trabalho demorado ocorre fora da thread Tk."""
 
     def __init__(
         self,
         master: tk.Misc,
         database: Database,
-        source: VersionSource,
+        source: VersionSource | None,
         reports_directory: str | Path,
+        *,
+        site_url: str = "",
+        scope_paths: Sequence[str] = (),
+        connect_source: SourceFactory | None = None,
+        save_configuration: ConfigurationSaver | None = None,
     ) -> None:
         super().__init__(master, padding=12)
         self.database = database
         self.source = source
+        self.connect_source = connect_source
+        self.save_configuration = save_configuration
         self.reports_directory = Path(reports_directory)
         self.spreadsheets: list[SpreadsheetInfo] = []
         self.last_report: Path | None = None
+        self._busy = False
+        self.site_url = tk.StringVar(value=site_url)
+        self.scope_paths = tk.StringVar(value=";".join(scope_paths))
         self.status = tk.StringVar(
-            value="Autentique-se no Edge e clique em Atualizar lista."
+            value=(
+                "Conectado. Atualize a lista."
+                if source is not None
+                else "Desconectado. Confira a configuração e clique em Conectar."
+            )
         )
         self.details = tk.StringVar(value="Selecione uma planilha.")
         self._build()
@@ -47,38 +64,107 @@ class AuditApplication(ttk.Frame):
         ttk.Label(
             self, text="Auditor de Planilhas", font=("TkDefaultFont", 14, "bold")
         ).grid(sticky="w")
-        self.selector = ttk.Combobox(self, state="readonly", width=70)
-        self.selector.grid(row=1, column=0, sticky="ew", pady=8)
-        self.selector.bind("<<ComboboxSelected>>", lambda _event: self.show_status())
-        ttk.Label(self, textvariable=self.details).grid(row=2, column=0, sticky="w")
-        buttons = ttk.Frame(self)
-        buttons.grid(row=3, column=0, sticky="w", pady=10)
-        ttk.Button(buttons, text="Atualizar lista", command=self.refresh).pack(
-            side="left", padx=(0, 6)
+
+        config = ttk.LabelFrame(self, text="Conexão SharePoint", padding=8)
+        config.grid(row=1, column=0, sticky="ew", pady=(8, 4))
+        config.columnconfigure(1, weight=1)
+        ttk.Label(config, text="URL do site:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(config, textvariable=self.site_url).grid(
+            row=0, column=1, sticky="ew", padx=(8, 0)
         )
+        ttk.Label(config, text="Escopo(s):").grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Entry(config, textvariable=self.scope_paths).grid(
+            row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
+        )
+        ttk.Label(config, text="Separe vários caminhos por ponto e vírgula.").grid(
+            row=2, column=1, sticky="w"
+        )
+        self.connect_button = ttk.Button(config, text="Conectar", command=self.connect)
+        self.connect_button.grid(row=3, column=1, sticky="e", pady=(8, 0))
+
+        self.selector = ttk.Combobox(self, state="readonly", width=70)
+        self.selector.grid(row=2, column=0, sticky="ew", pady=8)
+        self.selector.bind("<<ComboboxSelected>>", lambda _event: self.show_status())
+        ttk.Label(self, textvariable=self.details).grid(row=3, column=0, sticky="w")
+        buttons = ttk.Frame(self)
+        buttons.grid(row=4, column=0, sticky="w", pady=10)
+        self.refresh_button = ttk.Button(
+            buttons, text="Atualizar lista", command=self.refresh
+        )
+        self.refresh_button.pack(side="left", padx=(0, 6))
         self.audit_button = ttk.Button(
             buttons, text="Auditar histórico", command=self.audit
         )
         self.audit_button.pack(side="left", padx=(0, 6))
-        ttk.Button(buttons, text="Gerar relatório", command=self.generate_report).pack(
-            side="left", padx=6
+        self.report_button = ttk.Button(
+            buttons, text="Gerar relatório", command=self.generate_report
         )
+        self.report_button.pack(side="left", padx=6)
         ttk.Button(buttons, text="Abrir relatório", command=self.open_report).pack(
             side="left", padx=6
         )
-        ttk.Label(self, textvariable=self.status).grid(row=4, column=0, sticky="w")
+        ttk.Label(self, textvariable=self.status, wraplength=720).grid(
+            row=5, column=0, sticky="w"
+        )
+        self._set_action_state()
+
+    def _configured_values(self) -> tuple[str, tuple[str, ...]]:
+        site_url = self.site_url.get().strip().rstrip("/")
+        scopes = tuple(
+            dict.fromkeys(
+                part.strip()
+                for part in self.scope_paths.get().split(";")
+                if part.strip()
+            )
+        )
+        return site_url, scopes
+
+    def connect(self) -> None:
+        if self.connect_source is None:
+            self.status.set("Conexão SharePoint não está disponível.")
+            return
+        connect_source = self.connect_source
+        site_url, scopes = self._configured_values()
+        try:
+            if self.save_configuration is not None:
+                self.save_configuration(site_url, scopes)
+        except (OSError, ValueError) as error:
+            self.status.set(f"Configuração inválida: {error}")
+            return
+        self._start_work(
+            "Abrindo Edge para autenticação manual...",
+            lambda: connect_source(site_url, scopes),
+            self._connected,
+        )
+
+    def _connected(self, source: VersionSource) -> None:
+        previous = self.source
+        self.source = source
+        if previous is not None and previous is not source:
+            try:
+                previous.close()  # type: ignore[attr-defined]
+            except (AttributeError, RuntimeError):
+                logger.warning(
+                    "Falha ao fechar sessão SharePoint anterior", exc_info=True
+                )
+        self.status.set("Edge aberto. Conclua o login/MFA e clique em Atualizar lista.")
+        self._set_action_state()
 
     def refresh(self) -> None:
-        try:
-            self.spreadsheets = list(self.source.list_spreadsheets())
-        except Exception as error:
-            logger.warning(
-                "Falha controlada na descoberta de planilhas tipo_erro=%s erro=%s",
-                type(error).__name__,
-                error,
-            )
-            self.status.set(f"Falha ao listar planilhas: {error}")
+        if self.source is None:
+            self.status.set("Conecte ao SharePoint antes de atualizar a lista.")
             return
+        source = self.source
+        self._start_work(
+            "Consultando planilhas no SharePoint...",
+            lambda: list(source.list_spreadsheets()),
+            self._refresh_finished,
+        )
+
+    def _refresh_finished(self, spreadsheets: list[SpreadsheetInfo]) -> None:
+        self.spreadsheets = spreadsheets
         self.selector["values"] = [
             f"{item.name} — {item.path or item.drive_item_id}"
             for item in self.spreadsheets
@@ -108,45 +194,39 @@ class AuditApplication(ttk.Frame):
     def show_status(self) -> None:
         try:
             spreadsheet = self._selected()
-            row = self._database_row(spreadsheet)
-            checkpoint = row["versao_numero"] if row else None
-            versions = list(self.source.list_versions(spreadsheet))
-            latest = versions[-1].number if versions else "—"
-            ids = [version.id for version in versions]
-            pending = (
-                max(len(versions) - 1, 0)
-                if not row
-                else (
-                    max(
-                        len(versions)
-                        - ids.index(
-                            self.database.connection.execute(
-                                "SELECT versao_id FROM checkpoint WHERE planilha_id=?",
-                                (row["id"],),
-                            ).fetchone()["versao_id"]
-                        )
-                        - 1,
-                        0,
-                    )
-                    if checkpoint
-                    else max(len(versions) - 1, 0)
-                )
-            )
-        except Exception as error:
-            logger.warning(
-                "Falha controlada ao consultar versões tipo_erro=%s erro=%s",
-                type(error).__name__,
-                error,
-            )
-            checkpoint = locals().get("checkpoint")
-            self.details.set(
-                f"Última auditada: {checkpoint or '—'} | "
-                "Última disponível: indisponível | Pendentes: indisponível"
-            )
-            self.status.set(f"Falha ao consultar versões: {error}")
+        except ValueError as error:
+            self.status.set(str(error))
             return
+        self._start_work(
+            "Consultando versões...",
+            lambda: self._spreadsheet_status(spreadsheet),
+            self._show_status_finished,
+        )
+
+    def _spreadsheet_status(self, spreadsheet: SpreadsheetInfo):
+        if self.source is None:
+            raise RuntimeError("Conecte ao SharePoint antes de consultar versões.")
+        row = self._database_row(spreadsheet)
+        checkpoint = row["versao_numero"] if row else None
+        versions = list(self.source.list_versions(spreadsheet))
+        latest = versions[-1].number if versions else "—"
+        ids = [version.id for version in versions]
+        pending = max(len(versions) - 1, 0)
+        if row and checkpoint:
+            checkpoint_row = self.database.connection.execute(
+                "SELECT versao_id FROM checkpoint WHERE planilha_id=?", (row["id"],)
+            ).fetchone()
+            if checkpoint_row and checkpoint_row["versao_id"] in ids:
+                pending = max(
+                    len(versions) - ids.index(checkpoint_row["versao_id"]) - 1, 0
+                )
+        return checkpoint, latest, pending
+
+    def _show_status_finished(self, result: tuple[str | None, str, int]) -> None:
+        checkpoint, latest, pending = result
         self.details.set(
-            f"Última auditada: {checkpoint or '—'} | Última disponível: {latest} | Pendentes: {pending}"
+            f"Última auditada: {checkpoint or '—'} | "
+            f"Última disponível: {latest} | Pendentes: {pending}"
         )
         self.audit_button.configure(
             text="Continuar auditoria" if checkpoint else "Auditar histórico"
@@ -154,46 +234,104 @@ class AuditApplication(ttk.Frame):
         self.status.set("Pronto.")
 
     def audit(self) -> None:
-        spreadsheet = self._selected()
-        self.audit_button.configure(state="disabled")
-        self.status.set("Auditoria em andamento...")
-        threading.Thread(
-            target=self._audit_worker, args=(spreadsheet,), daemon=True
-        ).start()
+        try:
+            spreadsheet = self._selected()
+        except ValueError as error:
+            self.status.set(str(error))
+            return
+        if self.source is None:
+            self.status.set("Conecte ao SharePoint antes de auditar.")
+            return
+        source = self.source
+        self._start_work(
+            "Auditoria em andamento...",
+            lambda: AuditService(self.database, source).audit(spreadsheet),
+            self._audit_finished,
+        )
 
-    def _audit_worker(self, spreadsheet: SpreadsheetInfo) -> None:
-        result = AuditService(self.database, self.source).audit(spreadsheet)
-        self.after(0, self._audit_finished, result)
-
-    def _audit_finished(self, result) -> None:
-        self.audit_button.configure(state="normal")
+    def _audit_finished(self, result: AuditResult) -> None:
         self.status.set(
-            f"{result.status.value}: {result.processed_versions} versões, {result.changes} alterações."
+            f"{result.status.value}: {result.processed_versions} versões, "
+            f"{result.changes} alterações."
         )
         self.show_status()
 
     def generate_report(self) -> None:
-        spreadsheet = self._selected()
+        try:
+            spreadsheet = self._selected()
+        except ValueError as error:
+            self.status.set(str(error))
+            return
         row = self._database_row(spreadsheet)
         if row is None:
             messagebox.showinfo(
                 "Relatório", "Audite a planilha antes de gerar o relatório."
             )
             return
-        try:
-            self.last_report = ReportService(
+        self._start_work(
+            "Gerando relatório...",
+            lambda: ReportService(
                 self.database.connection, self.reports_directory
-            ).generate(row["id"])
-        except Exception as error:
-            logger.error(
-                "Falha na geração de relatório planilha=%s tipo_erro=%s erro=%s",
-                spreadsheet.name,
-                type(error).__name__,
-                error,
-            )
-            self.status.set(f"Falha ao gerar relatório: {error}")
-            return
+            ).generate(row["id"]),
+            self._report_finished,
+        )
+
+    def _report_finished(self, report: Path) -> None:
+        self.last_report = report
         self.status.set(f"Relatório gerado: {self.last_report}")
+
+    def _start_work(
+        self, message: str, operation: Callable[[], object], finished: Callable
+    ) -> None:
+        if self._busy:
+            self.status.set("Aguarde a operação atual terminar.")
+            return
+        self._busy = True
+        self.status.set(message)
+        self._set_action_state()
+
+        def worker() -> None:
+            try:
+                result = operation()
+            except Exception as error:
+                logger.warning(
+                    "Operação da interface falhou tipo_erro=%s erro=%s",
+                    type(error).__name__,
+                    error,
+                    exc_info=True,
+                )
+                self.after(0, self._work_failed, error)
+            else:
+                self.after(0, self._work_finished, finished, result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _work_finished(self, finished: Callable, result: object) -> None:
+        self._busy = False
+        self._set_action_state()
+        finished(result)
+
+    def _work_failed(self, error: Exception) -> None:
+        self._busy = False
+        self._set_action_state()
+        self.status.set(f"Falha na operação: {error}")
+
+    def _set_action_state(self) -> None:
+        state = "disabled" if self._busy else "normal"
+        connected_state = state if self.source is not None else "disabled"
+        for name in ("connect_button",):
+            if hasattr(self, name):
+                getattr(self, name).configure(state=state)
+        for name in ("refresh_button", "audit_button", "report_button"):
+            if hasattr(self, name):
+                getattr(self, name).configure(state=connected_state)
+
+    def close_source(self) -> None:
+        if self.source is not None:
+            close = getattr(self.source, "close", None)
+            if close is not None:
+                close()
+            self.source = None
 
     def open_report(self) -> None:
         if self.last_report is None or not self.last_report.exists():

@@ -18,32 +18,48 @@ def main(*, launch_ui: bool | None = None) -> int:
     logger = configure_logging(settings.log_path, settings.log_level)
     logger.info("Inicialização da aplicação iniciada")
     database = Database(settings.database_path)
-    source = None
+    application = None
     try:
-        logger.info("Abertura/configuração do banco iniciada arquivo=%s", settings.database_path)
-        database.initialize()
-        logger.info("Banco aberto e configurado arquivo=%s", settings.database_path)
         if launch_ui is None:
             launch_ui = sys.platform == "win32" or bool(os.environ.get("DISPLAY"))
         if not launch_ui:
+            logger.info(
+                "Abertura/configuração do banco iniciada arquivo=%s",
+                settings.database_path,
+            )
+            database.initialize()
             logger.info("Aplicação inicializada sem interface gráfica")
             return 0
 
-        site_url, scopes = settings.require_browser_sharepoint()
-        source = BrowserSharePointSource.open_edge(
-            site_url, scopes, temp_directory=settings.temp_directory
-        )
         root = tk.Tk()
-        root.title("Auditor de Planilhas SharePoint")
-        root.minsize(760, 220)
-        AuditApplication(root, database, source, settings.reports_directory)
+        root.title("Trilha de Auditoria")
+        root.minsize(760, 390)
+        logger.info("Janela Tk criada; nenhuma conexão SharePoint foi iniciada")
+        database.initialize()
+
+        def connect_source(site_url: str, scopes: tuple[str, ...]):
+            return BrowserSharePointSource.open_edge(
+                site_url, scopes, temp_directory=settings.temp_directory
+            )
+
+        application = AuditApplication(
+            root,
+            database,
+            None,
+            settings.reports_directory,
+            site_url=settings.sharepoint_site_url or "",
+            scope_paths=settings.sharepoint_scope_paths,
+            connect_source=connect_source,
+            save_configuration=settings.save_browser_sharepoint,
+        )
+        logger.info("Interface pronta; aguardando ação do usuário para conectar")
         root.mainloop()
     except Exception:
         logger.critical("Erro inesperado encerrou a aplicação", exc_info=True)
         raise
     finally:
-        if source is not None:
-            source.close()
+        if application is not None:
+            application.close_source()
         database.close()
         logger.info("Aplicação encerrada")
     return 0

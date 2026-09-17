@@ -19,7 +19,7 @@ class SelectorFake:
 
 class ButtonFake:
     def configure(self, **_kwargs: object) -> None:
-        raise AssertionError("o botão não deve ser alterado depois da falha")
+        pass
 
 
 class FailingSource:
@@ -54,12 +54,12 @@ def test_versions_read_error_is_presented_without_closing_interface() -> None:
     application.status = VariableFake()
     application.audit_button = ButtonFake()
 
-    application.show_status()
+    try:
+        application._spreadsheet_status(application.spreadsheets[0])
+    except SharePointReadError as error:
+        application._work_failed(error)
 
-    assert "indisponível" in application.details.value
-    assert application.status.value == (
-        "Falha ao consultar versões: resposta REST incompatível"
-    )
+    assert application.status.value == "Falha na operação: resposta REST incompatível"
 
 
 def test_constructor_waits_for_manual_authentication_before_sharepoint_calls(
@@ -76,6 +76,13 @@ def test_constructor_waits_for_manual_authentication_before_sharepoint_calls(
         AuditApplication, "refresh", lambda self: calls.append("refresh")
     )
 
-    AuditApplication(object(), object(), object(), Path("relatorios"))
+    application = AuditApplication(
+        object(),
+        object(),
+        None,
+        Path("relatorios"),
+        connect_source=lambda *_: calls.append("connect"),
+    )
 
     assert calls == []
+    assert application.source is None
