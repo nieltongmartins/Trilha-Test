@@ -1,4 +1,5 @@
 from io import BytesIO
+import base64
 from pathlib import Path
 import zipfile
 
@@ -10,7 +11,7 @@ from app.config import Settings
 from app.database import Database
 from app.models import AuditExecutionStatus
 from app.sources import BrowserSharePointSource, SharePointReadError, SpreadsheetInfo
-from app.sources.sharepoint import _odata_object
+from app.sources.sharepoint import _normalize_scope_path, _odata_object
 
 SITE = "https://tenant.sharepoint.com/sites/qualidade"
 ROOT = "/sites/qualidade/Documentos Compartilhados"
@@ -26,15 +27,14 @@ def workbook_bytes(value: str) -> bytes:
 
 
 class FakeBrowser:
-    def __init__(
-        self, responses: dict[str, object], download_directory: Path | None = None
-    ) -> None:
+    def __init__(self, responses: dict[str, object]) -> None:
         self.responses = responses
         self.calls: list[str] = []
         self.visited: list[str] = []
         self.quit_called = False
-        self.download_directory = download_directory
         self.current_url = SITE
+        self.download_blob: bytes | None = None
+        self.script_timeout: float | None = None
 
     def _response(self, url: str) -> object:
         matches = [(key, value) for key, value in self.responses.items() if key in url]
@@ -44,27 +44,44 @@ class FakeBrowser:
 
     def get(self, url: str) -> None:
         self.visited.append(url)
-        value = self._response(url)
-        if isinstance(value, bytes):
-            assert self.download_directory is not None
-            (self.download_directory / "$value").write_bytes(value)
-        elif value == "partial":
-            assert self.download_directory is not None
-            (self.download_directory / "$value.crdownload").write_bytes(b"parcial")
 
     def execute_async_script(self, script: str, *args: object) -> object:
+        if "window.__auditDownloadBlob = null" in script:
+            self.download_blob = None
+            return {"ok": True}
+        if "blob.slice" in script:
+            assert self.download_blob is not None
+            offset, length = int(args[0]), int(args[1])
+            data = self.download_blob[offset : offset + length]
+            return {
+                "ok": True,
+                "data": base64.b64encode(data).decode("ascii"),
+                "length": len(data),
+            }
         url = str(args[0])
         assert "method: 'GET'" in script
         assert "document.cookie" not in script and "localStorage" not in script
-        assert "arrayBuffer" not in script
         self.calls.append(url)
         value = self._response(url)
+        if "response.blob()" in script:
+            self.visited.append(url)
+            if isinstance(value, bytes):
+                self.download_blob = value
+                return {"ok": True, "size": len(value)}
+            if value == "partial":
+                self.download_blob = b"parcial"
+                return {"ok": True, "size": len(self.download_blob)}
+            if isinstance(value, Exception):
+                return {"error": str(value)}
         if isinstance(value, Exception):
             return {"error": str(value)}
         return {"json": value}
 
     def quit(self) -> None:
         self.quit_called = True
+
+    def set_script_timeout(self, time_to_wait: float) -> None:
+        self.script_timeout = time_to_wait
 
 
 def discovery_responses() -> dict[str, object]:
@@ -129,17 +146,12 @@ def file_metadata(
 def make_source(
     tmp_path: Path, responses: dict[str, object]
 ) -> tuple[BrowserSharePointSource, FakeBrowser]:
-    downloads = tmp_path / "downloads"
-    downloads.mkdir(parents=True, exist_ok=True)
-    browser = FakeBrowser(responses, downloads)
+    browser = FakeBrowser(responses)
     source = BrowserSharePointSource(
         SITE,
         [ROOT],
         browser,
         temp_directory=tmp_path / "temp",
-        download_directory=downloads,
-        poll_interval=0.001,
-        download_timeout=0.02,
     )
     return source, browser
 
@@ -166,6 +178,39 @@ def test_odata_object_accepts_real_nometadata_entity_and_legacy_envelopes() -> N
     assert _odata_object({"d": direct}) is direct
     with pytest.raises(SharePointReadError, match="objeto inválido"):
         _odata_object({"value": [direct]})
+
+
+def test_scope_relative_to_site_is_converted_to_server_relative_path() -> None:
+    assert (
+        _normalize_scope_path("/Documentos Compartilhados1", "/controle_qualidade")
+        == "/controle_qualidade/Documentos Compartilhados1"
+    )
+    assert (
+        _normalize_scope_path(
+            "/controle_qualidade/Documentos Compartilhados1",
+            "/controle_qualidade",
+        )
+        == "/controle_qualidade/Documentos Compartilhados1"
+    )
+
+
+def test_source_uses_normalized_scope_in_sharepoint_request(tmp_path: Path) -> None:
+    browser = FakeBrowser(discovery_responses())
+    source = BrowserSharePointSource(
+        SITE,
+        ["/Documentos Compartilhados"],
+        browser,
+        temp_directory=tmp_path,
+    )
+
+    with source:
+        source.list_spreadsheets()
+
+    assert source.scope_paths == (ROOT,)
+    assert any(
+        "/sites/qualidade/Documentos%20Compartilhados')" in url
+        for url in browser.calls
+    )
 
 
 def test_wait_until_authenticated_validates_site_with_rest(
@@ -294,8 +339,9 @@ def test_rejects_changed_unique_id_in_current_metadata(tmp_path: Path) -> None:
 
 
 def test_downloads_historical_and_current_using_distinct_read_only_endpoints(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("app.sources.sharepoint._DOWNLOAD_CHUNK_SIZE", 32)
     responses = discovery_responses()
     responses["/Versions?"] = {"value": [{"ID": 98, "VersionLabel": "0.98"}]}
     responses[")?$select=Name"] = file_metadata()
@@ -322,6 +368,26 @@ def test_downloads_historical_and_current_using_distinct_read_only_endpoints(
     assert all("/_api/" in url for url in browser.visited)
 
 
+def test_download_failure_from_fetch_is_reported_without_waiting(
+    tmp_path: Path,
+) -> None:
+    source, _ = make_source(
+        tmp_path,
+        {"Versions(7)/$value": RuntimeError("HTTP 403")},
+    )
+    spreadsheet = SpreadsheetInfo(
+        SITE,
+        "sharepoint-rest",
+        "UUID-A",
+        "Arquivo.xlsx",
+        f"{ROOT}/Setor A/Arquivo.xlsx",
+    )
+    from app.sources.base import VersionInfo
+
+    with source, pytest.raises(SharePointReadError, match="HTTP 403"):
+        source.get_version(spreadsheet, VersionInfo("7", "0.7"))
+
+
 def test_rejects_invalid_open_xml_and_incomplete_download(tmp_path: Path) -> None:
     responses = discovery_responses()
     responses["Versions(7)/$value"] = "não é xlsx".encode()
@@ -340,7 +406,7 @@ def test_rejects_invalid_open_xml_and_incomplete_download(tmp_path: Path) -> Non
 
     responses["Versions(7)/$value"] = "partial"
     source, _ = make_source(tmp_path / "second", responses)
-    with source, pytest.raises(SharePointReadError, match="crdownload"):
+    with source, pytest.raises(SharePointReadError, match="XLSX/ZIP"):
         source.get_version(spreadsheet, VersionInfo("7", "0.7"))
 
 

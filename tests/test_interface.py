@@ -20,8 +20,18 @@ class VariableFake:
 
 
 class SelectorFake:
-    def current(self) -> int:
-        return 0
+    def __init__(self) -> None:
+        self.index = 0
+        self.values = []
+
+    def current(self, index: int | None = None) -> int:
+        if index is not None:
+            self.index = index
+        return self.index
+
+    def __setitem__(self, key: str, value: object) -> None:
+        assert key == "values"
+        self.values = value
 
 
 class ButtonFake:

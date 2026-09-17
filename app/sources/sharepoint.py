@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 import logging
 import re
-import shutil
-import time
 from typing import Any, Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 import zipfile
 
 from app.sources.base import SpreadsheetInfo, VersionInfo
@@ -28,6 +27,7 @@ class BrowserSession(Protocol):
 
     def get(self, url: str) -> None: ...
     def execute_async_script(self, script: str, *args: object) -> object: ...
+    def set_script_timeout(self, time_to_wait: float) -> None: ...
     def quit(self) -> None: ...
     @property
     def current_url(self) -> str: ...
@@ -42,6 +42,46 @@ fetch(url, {method: 'GET', credentials: 'same-origin', headers: {'Accept': 'appl
     return {json: await response.json()};
   }).then(done).catch(error => done({error: String(error)}));
 """
+
+_BEGIN_DOWNLOAD_SCRIPT = r"""
+const done = arguments[arguments.length - 1];
+const url = arguments[0];
+fetch(url, {method: 'GET', credentials: 'same-origin'})
+  .then(async response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  }).then(blob => {
+    window.__auditDownloadBlob = blob;
+    done({ok: true, size: blob.size});
+  }).catch(error => done({error: String(error)}));
+"""
+
+_READ_DOWNLOAD_CHUNK_SCRIPT = r"""
+const done = arguments[arguments.length - 1];
+const offset = arguments[0];
+const length = arguments[1];
+const blob = window.__auditDownloadBlob;
+if (!(blob instanceof Blob)) {
+  done({error: 'download não inicializado'});
+} else {
+  blob.slice(offset, offset + length).arrayBuffer()
+    .then(buffer => {
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let index = 0; index < bytes.length; index += 1) {
+        binary += String.fromCharCode(bytes[index]);
+      }
+      done({ok: true, data: btoa(binary), length: bytes.length});
+    }).catch(error => done({error: String(error)}));
+}
+"""
+
+_CLEAR_DOWNLOAD_SCRIPT = r"""
+const done = arguments[arguments.length - 1];
+window.__auditDownloadBlob = null;
+done({ok: true});
+"""
+_DOWNLOAD_CHUNK_SIZE = 512 * 1024
 
 
 def _odata_value(payload: Mapping[str, Any]) -> object:
@@ -78,6 +118,17 @@ def _escape_odata_path(path: str) -> str:
     return quote(path.replace("'", "''"), safe="/'()$=,:?&")
 
 
+def _normalize_scope_path(scope_path: str, site_path: str) -> str:
+    """Converte um caminho relativo ao site em server-relative URL."""
+    scope = "/" + unquote(scope_path).strip("/")
+    site = "/" + unquote(site_path).strip("/") if site_path.strip("/") else ""
+    if site and scope.casefold() != site.casefold() and not scope.casefold().startswith(
+        site.casefold() + "/"
+    ):
+        return f"{site}/{scope.lstrip('/')}"
+    return scope
+
+
 class BrowserSharePointSource:
     """Descobre, enumera e baixa XLSX por GET read-only no próprio Edge."""
 
@@ -91,30 +142,26 @@ class BrowserSharePointSource:
         *,
         temp_directory: str | Path = "data/temp",
         owns_browser: bool = False,
-        download_timeout: float = 60,
-        poll_interval: float = 0.1,
-        download_directory: str | Path | None = None,
     ) -> None:
         parsed = urlsplit(site_url)
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("A URL do site SharePoint deve usar HTTPS")
+        self.site_url = site_url.rstrip("/")
+        self._origin = f"{parsed.scheme}://{parsed.netloc}"
+        self._site_path = parsed.path
         scopes = tuple(
-            dict.fromkeys(path.rstrip("/") for path in scope_paths if path.rstrip("/"))
+            dict.fromkeys(
+                _normalize_scope_path(path, self._site_path)
+                for path in scope_paths
+                if path.strip("/")
+            )
         )
         if not scopes:
             raise ValueError("Ao menos um escopo SharePoint deve ser configurado")
-        self.site_url = site_url.rstrip("/")
-        self._origin = f"{parsed.scheme}://{parsed.netloc}"
         self.scope_paths = scopes
         self._browser = browser
         self._owns_browser = owns_browser
-        self._download_timeout = download_timeout
-        self._poll_interval = poll_interval
         self._workspace = TemporaryWorkspace(temp_directory)
-        self.download_directory = Path(
-            download_directory or self._workspace.path
-        )
-        self.download_directory.mkdir(parents=True, exist_ok=True)
 
     @classmethod
     def open_edge(
@@ -129,30 +176,14 @@ class BrowserSharePointSource:
 
         root = Path(temp_directory)
         root.mkdir(parents=True, exist_ok=True)
-        download_workspace = TemporaryWorkspace(root)
-        download_directory = download_workspace.path
         options = webdriver.EdgeOptions()
-        options.add_experimental_option(
-            "prefs",
-            {
-                "download.default_directory": str(download_directory),
-                "download.prompt_for_download": False,
-                "download.directory_upgrade": True,
-                "safebrowsing.enabled": True,
-            },
-        )
         logger.info(
             "Abrindo Edge para autenticação manual SharePoint site=%s escopos=%d modo=read-only",
             site_url,
             len(scope_paths),
         )
-        logger.info("Iniciando webdriver.Edge")
-        webdriver_started = time.monotonic()
         browser = webdriver.Edge(options=options)
-        logger.info(
-            "webdriver.Edge concluído; driver criado duração=%.3fs",
-            time.monotonic() - webdriver_started,
-        )
+        browser.set_script_timeout(600)
         try:
             source = cls(
                 site_url,
@@ -160,20 +191,11 @@ class BrowserSharePointSource:
                 browser,
                 temp_directory=root,
                 owns_browser=True,
-                download_directory=download_directory,
             )
-            source._download_workspace = download_workspace
         except Exception:
             browser.quit()
-            download_workspace.close()
             raise
-        logger.info("Iniciando browser.get")
-        navigation_started = time.monotonic()
         browser.get(site_url)
-        logger.info(
-            "browser.get concluído duração=%.3fs",
-            time.monotonic() - navigation_started,
-        )
         logger.info(
             "Edge aberto; aguardando autenticação manual do usuário site=%s",
             site_url,
@@ -211,9 +233,6 @@ class BrowserSharePointSource:
 
     def close(self) -> None:
         self._workspace.close()
-        download_workspace = getattr(self, "_download_workspace", None)
-        if download_workspace is not None:
-            download_workspace.close()
         if self._owns_browser:
             self._browser.quit()
 
@@ -442,20 +461,69 @@ class BrowserSharePointSource:
         if not version.is_current:
             relative += f"/Versions({version.id})"
         url = self._endpoint(relative + "/$value")
-        before = set(self.download_directory.iterdir())
-        self._browser.get(url)
-        downloaded = self._wait_for_download(before)
         destination = self._workspace.filename(
-            spreadsheet.site_id, spreadsheet.drive_id,
-            spreadsheet.drive_item_id, version.id,
+            spreadsheet.site_id,
+            spreadsheet.drive_id,
+            spreadsheet.drive_item_id,
+            version.id,
         )
-        if downloaded.resolve() != destination.resolve():
-            shutil.move(str(downloaded), destination)
+        result = self._browser.execute_async_script(_BEGIN_DOWNLOAD_SCRIPT, url)
+        if (
+            not isinstance(result, Mapping)
+            or result.get("error")
+            or not result.get("ok")
+        ):
+            detail = (
+                result.get("error")
+                if isinstance(result, Mapping)
+                else "resposta inválida"
+            )
+            raise SharePointReadError(f"Falha no download SharePoint REST: {detail}")
+        temporary = destination.with_suffix(destination.suffix + ".part")
         try:
+            size = result.get("size")
+            if not isinstance(size, int) or size <= 0:
+                raise SharePointReadError(
+                    "Download SharePoint vazio ou com tamanho inválido"
+                )
+            with temporary.open("wb") as output:
+                offset = 0
+                while offset < size:
+                    chunk = self._browser.execute_async_script(
+                        _READ_DOWNLOAD_CHUNK_SCRIPT,
+                        offset,
+                        min(_DOWNLOAD_CHUNK_SIZE, size - offset),
+                    )
+                    if (
+                        not isinstance(chunk, Mapping)
+                        or chunk.get("error")
+                        or not isinstance(chunk.get("data"), str)
+                        or not isinstance(chunk.get("length"), int)
+                        or chunk["length"] <= 0
+                    ):
+                        detail = (
+                            chunk.get("error")
+                            if isinstance(chunk, Mapping)
+                            else "resposta inválida"
+                        )
+                        raise SharePointReadError(
+                            f"Falha ao ler download SharePoint: {detail}"
+                        )
+                    decoded = base64.b64decode(chunk["data"], validate=True)
+                    if len(decoded) != chunk["length"]:
+                        raise SharePointReadError(
+                            "Tamanho do bloco baixado diverge do informado"
+                        )
+                    output.write(decoded)
+                    offset += chunk["length"]
+            temporary.replace(destination)
             self._validate_xlsx(destination)
         except Exception:
+            temporary.unlink(missing_ok=True)
             destination.unlink(missing_ok=True)
             raise
+        finally:
+            self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
         logger.debug(
             "Versão adquirida planilha=%s identidade=%s versao=%s atual=%s",
             spreadsheet.name,
@@ -467,23 +535,6 @@ class BrowserSharePointSource:
 
     def release_version(self, path: Path) -> None:
         self._workspace.release(path)
-
-    def _wait_for_download(self, before: set[Path]) -> Path:
-        deadline = time.monotonic() + self._download_timeout
-        while time.monotonic() < deadline:
-            files = {
-                path for path in self.download_directory.iterdir() if path.is_file()
-            }
-            partial = [path for path in files if path.name.endswith(".crdownload")]
-            completed = [
-                path for path in files - before if not path.name.endswith(".crdownload")
-            ]
-            if completed and not partial:
-                return max(completed, key=lambda path: path.stat().st_mtime_ns)
-            time.sleep(self._poll_interval)
-        raise SharePointReadError(
-            "Download não foi concluído; arquivo .crdownload presente ou ausente"
-        )
 
     @staticmethod
     def _validate_xlsx(path: Path) -> None:
