@@ -1,22 +1,20 @@
 # PROJETO: AUDITOR DE PLANILHAS SHAREPOINT
 
 
-# ESTADO OFICIAL APÓS A ACEITAÇÃO DA F5
+# ESTADO OFICIAL APÓS O ENCERRAMENTO DA V1
 
-F5 está concluída após validação real no Windows corporativo com SharePoint Online,
-Selenium + Edge e migração do SQLite existente. Interface, aquisição e processamento de
-versões, persistência, checkpoint e relatório com as três abas foram aceitos. O
-SharePoint permanece read-only; cookies, tokens, senhas, PRT, bypass e transferência de
-sessão continuam proibidos. A F6 foi iniciada com autorização expressa e deve avançar
-uma tarefa por vez, conforme a ordem do plano. Testes unitários, testes de integração
-automatizados, reexecução, auditoria incremental, falha/retomada, geração de relatório
-e múltiplas planilhas controladas, além da medição de performance, da revisão de logs,
-do controle de arquivos temporários, da integridade por SHA-256 e da estratégia mínima
-de backup foram concluídos; a próxima tarefa é empacotamento e aguarda autorização. Os
-três commits ordinários da F6 foram consumidos; commits
-adicionais ocorrem somente quando impostos pelo ambiente de execução.
+As seis fases oficiais estão concluídas. Testes finais, performance, logs, temporários,
+SHA-256, estratégia mínima de backup e empacotamento Windows foram concluídos e
+reconciliados com código, testes, arquitetura, plano e histórico. Não existe tarefa
+oficial de implementação pendente na versão atual.
 
+**ELABORAÇÃO DA VERSÃO ATUAL CONCLUÍDA PARA UTILIZAÇÃO E TESTES REAIS.**
 
+O SharePoint permanece read-only; SQLite permanece canônico; relatório e XLSX
+históricos não substituem o banco. O próximo passo é utilização/homologação real.
+Defeitos ou necessidades posteriores devem ser tratados em nova sessão como correção,
+manutenção, hardening, melhoria ou evolução, sem iniciar automaticamente funcionalidade
+ou fase nova.
 
 ======================================================================
 DIRETRIZ ATUAL DA F4 — SHAREPOINT REST NO EDGE

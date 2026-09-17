@@ -35,6 +35,30 @@ o relatório consolidado. Conclua o login/MFA no Edge e somente então clique em
 **Atualizar lista**; a abertura da janela não dispara consultas enquanto a
 autenticação manual ainda está em andamento. A inicialização é idempotente.
 
+## Distribuição para Windows
+
+A distribuição operacional recomendada é uma pasta autocontida criada com
+PyInstaller; ela não requer Node.js e não incorpora configuração corporativa nem
+credenciais. Em uma máquina Windows com Python 3.10 ou superior, execute uma vez:
+
+```bat
+build_windows.bat
+```
+
+O pacote será criado em `dist\AuditorPlanilhas`. Distribua a pasta inteira. Na
+primeira utilização, copie `configuracao.exemplo.bat` para `configuracao.bat`, informe
+somente `SHAREPOINT_SITE_URL` e `SHAREPOINT_SCOPE_PATHS` e dê duplo clique em
+`executar_auditor.bat`. O arquivo real de configuração é ignorado pelo Git e não deve
+conter senha, token, cookie ou credencial; login e MFA continuam manuais no Edge.
+
+O launcher fixa a pasta distribuída como diretório de trabalho. Assim, por padrão, o
+SQLite canônico, logs, temporários e relatórios ficam respectivamente em
+`data\database`, `logs`, `data\temp` e `data\reports` dentro dessa pasta. O operador
+precisa ter permissão de escrita nela. Mantenha e proteja `data\database\auditoria.db`:
+relatórios e XLSX temporários não substituem o banco. A assinatura do executável, a
+política de distribuição, o diretório corporativo definitivo, backup, retenção e
+permissões continuam decisões do ambiente operacional.
+
 ## Testes
 
 ```bash

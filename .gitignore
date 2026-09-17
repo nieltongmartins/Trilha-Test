@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 .venv/
 .env
+configuracao.bat
+build/
+dist/
 
 # Planilhas criadas programaticamente pelos testes (use `git add -f` se uma
 # fixture binária excepcional precisar ser versionada de forma intencional).

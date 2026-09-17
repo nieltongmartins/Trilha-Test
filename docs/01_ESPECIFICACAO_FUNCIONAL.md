@@ -1,12 +1,28 @@
 # ESPECIFICAÇÃO FUNCIONAL
 ## Auditor de Planilhas Excel — SharePoint Online
 
-**Documento:** 01_ESPECIFICACAO_FUNCIONAL.md  
-**Versão:** 1.0  
-**Status:** Oficial  
-**Data:** 15/09/2026  
+**Documento:** 01_ESPECIFICACAO_FUNCIONAL.md
+**Versão:** 1.1
+**Status:** Oficial
+**Data:** 15/09/2026
 
 ---
+
+# ENCERRAMENTO DA V1 — 16/09/2026
+
+As seis fases oficiais estão concluídas. Os 16 critérios funcionais da seção 34 foram
+reconciliados com a implementação, a aceitação corporativa real da F5 e a validação
+automatizada final da F6. O SQLite permanece como fonte canônica; SharePoint permanece
+estritamente read-only; relatório e XLSX históricos não substituem o banco.
+
+A distribuição Windows passou a possuir definição PyInstaller em formato one-folder,
+launcher e configuração local não versionada. Assinatura, diretório corporativo de
+instalação, permissões, destino/frequência/retenção do backup e execução em ambiente
+SharePoint real permanecem limitações operacionais, não requisitos de implementação da
+V1. O encerramento indica prontidão para utilização e testes reais, não ausência absoluta
+de defeitos.
+
+**Estado:** ELABORAÇÃO DA VERSÃO ATUAL CONCLUÍDA PARA UTILIZAÇÃO E TESTES REAIS.
 
 # ENCERRAMENTO F4 — HISTÓRICO E VERSÃO ATUAL
 

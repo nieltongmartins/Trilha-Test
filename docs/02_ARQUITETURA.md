@@ -5,9 +5,25 @@
 Versão: 1.1
 Status: Oficial
 Data: 15/09/2026
-Última revisão: 15/09/2026
+Última revisão: 16/09/2026
 
 ---
+
+# ENCERRAMENTO ARQUITETURAL DA V1 — 16/09/2026
+
+A arquitetura planejada está concluída. A distribuição Windows usa PyInstaller
+one-folder, mantendo Python/Tkinter, openpyxl, Selenium/Edge e SQLite sem dependência de
+Node.js. `executar_auditor.bat` fixa o diretório operacional, exige
+`configuracao.bat` local ignorado pelo Git e inicia `AuditorPlanilhas.exe`; o pacote não
+incorpora credenciais. A geração deve ocorrer no Windows por
+`build_windows.bat`, pois PyInstaller não produz binário Windows a partir de Linux.
+
+Banco, logs, temporários e relatórios continuam externos ao executável e graváveis. O
+SQLite é o único estado canônico; o relatório é regenerável e temporários são
+descartáveis. Assinatura, canal de distribuição, instalação corporativa, permissões e a
+execução da estratégia documentada de backup pertencem à operação/homologação. Não foi
+introduzida infraestrutura externa nem alteração na arquitetura read-only do
+SharePoint.
 
 # ENCERRAMENTO ARQUITETURAL F4
 
