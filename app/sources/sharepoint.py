@@ -163,6 +163,19 @@ class BrowserSharePointSource:
         self._owns_browser = owns_browser
         self._workspace = TemporaryWorkspace(temp_directory)
 
+    def set_scope_paths(self, scope_paths: Sequence[str]) -> None:
+        """Atualiza raízes de leitura sem recriar a sessão autenticada."""
+        scopes = tuple(
+            dict.fromkeys(
+                _normalize_scope_path(path, self._site_path)
+                for path in scope_paths
+                if path.strip("/")
+            )
+        )
+        if not scopes:
+            raise ValueError("Ao menos um escopo SharePoint deve ser configurado")
+        self.scope_paths = scopes
+
     @classmethod
     def open_edge(
         cls,
@@ -335,6 +348,35 @@ class BrowserSharePointSource:
             len(result),
         )
         return result
+
+    def list_folders(self) -> tuple[tuple[str, str], ...]:
+        """Lista recursivamente as subpastas dos escopos para seleção na interface."""
+        found: dict[str, str] = {}
+        pending = list(self.scope_paths)
+        visited: set[str] = set()
+        while pending:
+            folder = pending.pop(0)
+            if folder in visited:
+                continue
+            visited.add(folder)
+            encoded = _escape_odata_path(folder)
+            payload = self._json(
+                f"web/GetFolderByServerRelativeUrl('{encoded}')/Folders"
+                "?$select=Name,ServerRelativeUrl"
+            )
+            for item in _odata_results(payload):
+                name, path = item.get("Name"), item.get("ServerRelativeUrl")
+                if (
+                    isinstance(name, str)
+                    and isinstance(path, str)
+                    and name != "Forms"
+                ):
+                    found[path] = name
+                    pending.append(path)
+        return tuple(
+            (name, path)
+            for path, name in sorted(found.items(), key=lambda item: item[1].casefold())
+        )
 
     def _file_metadata(self, spreadsheet: SpreadsheetInfo) -> Mapping[str, Any]:
         encoded = _escape_odata_path(spreadsheet.path or "")

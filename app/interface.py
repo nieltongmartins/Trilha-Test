@@ -52,6 +52,10 @@ class AuditApplication(ttk.Frame):
         )
         self.site_url = tk.StringVar(value=site_url)
         self.scope_paths = tk.StringVar(value=";".join(scope_paths))
+        # Preserve the public attribute used by installations upgraded from the
+        # first folder-field implementation. It now backs the read-only selector.
+        self.folder_names = tk.StringVar(value="")
+        self.folder_paths: list[str] = []
         self.status = tk.StringVar(
             value=(
                 "Conectado. Atualize a lista."
@@ -89,7 +93,7 @@ class AuditApplication(ttk.Frame):
             row=2, column=1, sticky="w"
         )
         self.connect_button = ttk.Button(config, text="Conectar", command=self.connect)
-        self.connect_button.grid(row=3, column=1, sticky="e", pady=(8, 0))
+        self.connect_button.grid(row=4, column=1, sticky="e", pady=(8, 0))
 
         self.selector = ttk.Combobox(self, state="readonly", width=70)
         self.selector.grid(row=2, column=0, sticky="ew", pady=8)
@@ -126,6 +130,17 @@ class AuditApplication(ttk.Frame):
                 if part.strip()
             )
         )
+        folders = tuple(
+            dict.fromkeys(
+                part.strip().strip("/")
+                for part in self.folder_names.get().split(";")
+                if part.strip().strip("/")
+            )
+        )
+        if folders:
+            scopes = tuple(
+                f"{scope.rstrip('/')}/{folder}" for scope in scopes for folder in folders
+            )
         return site_url, scopes
 
     def connect(self) -> None:
@@ -158,6 +173,21 @@ class AuditApplication(ttk.Frame):
                 )
         self.status.set("Conectado ao SharePoint. Clique em Atualizar lista.")
         self._set_action_state()
+
+    def copy_folder_to_scope(self) -> None:
+        index = self.folder_selector.current()
+        if index < 0 or index >= len(self.folder_paths):
+            self.status.set("Selecione uma pasta para copiar para o escopo.")
+            return
+        path = self.folder_paths[index]
+        self.scope_paths.set(path)
+        if self.source is not None:
+            set_scope_paths = getattr(self.source, "set_scope_paths", None)
+            if callable(set_scope_paths):
+                set_scope_paths((path,))
+        if self.save_configuration is not None:
+            self.save_configuration(self.site_url.get().strip().rstrip("/"), (path,))
+        self.status.set("Escopo atualizado. Clique em Atualizar lista.")
 
     def refresh(self) -> None:
         if self.source is None:
@@ -347,6 +377,8 @@ class AuditApplication(ttk.Frame):
         for name in ("connect_button",):
             if hasattr(self, name):
                 getattr(self, name).configure(state=state)
+        if hasattr(self, "copy_folder_button"):
+            self.copy_folder_button.configure(state=connected_state)
         for name in ("refresh_button", "audit_button", "report_button"):
             if hasattr(self, name):
                 getattr(self, name).configure(state=connected_state)
