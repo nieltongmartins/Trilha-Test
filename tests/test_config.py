@@ -4,7 +4,11 @@ import json
 
 import pytest
 
-from app.config import DEFAULT_SHAREPOINT_SITE_URL, Settings
+from app.config import (
+    DEFAULT_SHAREPOINT_SCOPE_PATHS,
+    DEFAULT_SHAREPOINT_SITE_URL,
+    Settings,
+)
 
 
 def test_settings_create_required_directories(tmp_path: Path) -> None:
@@ -32,7 +36,10 @@ def test_settings_start_without_sharepoint_environment(
     settings = Settings.from_environment(config_path=tmp_path / "config.json")
 
     assert settings.sharepoint_site_url == DEFAULT_SHAREPOINT_SITE_URL
-    assert settings.sharepoint_scope_paths == ()
+    assert settings.sharepoint_scope_paths == DEFAULT_SHAREPOINT_SCOPE_PATHS
+    assert settings.sharepoint_scope_paths == (
+        "/controle_qualidade/Documentos Compartilhados1",
+    )
 
 
 def test_local_configuration_is_saved_and_loaded_without_credentials(

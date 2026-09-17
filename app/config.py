@@ -11,6 +11,9 @@ from urllib.parse import urlsplit
 
 
 DEFAULT_SHAREPOINT_SITE_URL = "https://hypermarcas.sharepoint.com/controle_qualidade"
+DEFAULT_SHAREPOINT_SCOPE_PATHS = (
+    "/controle_qualidade/Documentos Compartilhados1",
+)
 
 
 def default_local_config_path() -> Path:
@@ -95,7 +98,7 @@ class Settings:
             sharepoint_scope_paths=(
                 _parse_scopes(os.environ["SHAREPOINT_SCOPE_PATHS"])
                 if "SHAREPOINT_SCOPE_PATHS" in os.environ
-                else local_scopes
+                else local_scopes or DEFAULT_SHAREPOINT_SCOPE_PATHS
             ),
             local_config_path=local_path,
         )

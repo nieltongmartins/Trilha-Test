@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from pathlib import Path
 import logging
+import queue
 import subprocess
 import sys
 import threading
@@ -46,6 +47,9 @@ class AuditApplication(ttk.Frame):
         self.spreadsheets: list[SpreadsheetInfo] = []
         self.last_report: Path | None = None
         self._busy = False
+        self._work_results: queue.SimpleQueue[tuple[bool, object]] = (
+            queue.SimpleQueue()
+        )
         self.site_url = tk.StringVar(value=site_url)
         self.scope_paths = tk.StringVar(value=";".join(scope_paths))
         self.status = tk.StringVar(
@@ -300,11 +304,26 @@ class AuditApplication(ttk.Frame):
                     error,
                     exc_info=True,
                 )
-                self.after(0, self._work_failed, error)
+                self._work_results.put((False, error))
             else:
-                self.after(0, self._work_finished, finished, result)
+                self._work_results.put((True, result))
 
+        # Tk, including ``after``, is only accessed by the main thread.  The
+        # worker communicates exclusively through this queue.
+        self.after(50, self._poll_work_result, finished)
         threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_work_result(self, finished: Callable) -> None:
+        try:
+            succeeded, result = self._work_results.get_nowait()
+        except queue.Empty:
+            self.after(50, self._poll_work_result, finished)
+            return
+        if succeeded:
+            self._work_finished(finished, result)
+        else:
+            assert isinstance(result, Exception)
+            self._work_failed(result)
 
     def _work_finished(self, finished: Callable, result: object) -> None:
         self._busy = False

@@ -1,4 +1,6 @@
 from pathlib import Path
+import queue
+import threading
 
 from app.interface import AuditApplication
 from app.sources import SharePointReadError, SpreadsheetInfo
@@ -11,6 +13,9 @@ class VariableFake:
     def set(self, value: str) -> None:
         self.value = value
 
+    def get(self) -> str:
+        return self.value
+
 
 class SelectorFake:
     def current(self) -> int:
@@ -20,6 +25,87 @@ class SelectorFake:
 class ButtonFake:
     def configure(self, **_kwargs: object) -> None:
         pass
+
+
+class SchedulerFake:
+    def __init__(self) -> None:
+        self.callbacks: list[tuple[object, tuple[object, ...]]] = []
+        self.destroyed = False
+        self.after_threads: list[int] = []
+
+    def after(self, _delay: int, callback, *args: object) -> None:
+        self.after_threads.append(threading.get_ident())
+        self.callbacks.append((callback, args))
+
+    def run_next(self) -> None:
+        callback, args = self.callbacks.pop(0)
+        callback(*args)
+
+
+def _application_for_connection(
+    connect_source, save_configuration=lambda *_args: None
+) -> tuple[AuditApplication, SchedulerFake]:
+    application = AuditApplication.__new__(AuditApplication)
+    scheduler = SchedulerFake()
+    application.after = scheduler.after
+    application.connect_source = connect_source
+    application.save_configuration = save_configuration
+    application.site_url = VariableFake()
+    application.site_url.value = "https://tenant.sharepoint.com/site"
+    application.scope_paths = VariableFake()
+    application.scope_paths.value = "/site/Documentos"
+    application.status = VariableFake()
+    application.source = None
+    application._busy = False
+    application._work_results = queue.SimpleQueue()
+    application.connect_button = ButtonFake()
+    application.refresh_button = ButtonFake()
+    application.audit_button = ButtonFake()
+    application.report_button = ButtonFake()
+    return application, scheduler
+
+
+def test_connect_keeps_interface_alive_and_finishes_on_tk_thread() -> None:
+    connected = threading.Event()
+    source = object()
+
+    def connect_source(*_args):
+        connected.set()
+        return source
+
+    application, scheduler = _application_for_connection(connect_source)
+    main_thread = threading.get_ident()
+
+    application.connect()
+    assert connected.wait(timeout=1)
+    outcome = application._work_results.get(timeout=1)
+    application._work_results.put(outcome)
+    scheduler.run_next()
+
+    assert scheduler.destroyed is False
+    assert application.source is source
+    assert application.status.value.startswith("Edge aberto.")
+    assert scheduler.after_threads == [main_thread]
+
+
+def test_connection_failure_keeps_interface_alive_and_reports_error() -> None:
+    attempted = threading.Event()
+
+    def connect_source(*_args):
+        attempted.set()
+        raise RuntimeError("Edge indisponível")
+
+    application, scheduler = _application_for_connection(connect_source)
+
+    application.connect()
+    assert attempted.wait(timeout=1)
+    outcome = application._work_results.get(timeout=1)
+    application._work_results.put(outcome)
+    scheduler.run_next()
+
+    assert scheduler.destroyed is False
+    assert application.source is None
+    assert application.status.value == "Falha na operação: Edge indisponível"
 
 
 class FailingSource:
