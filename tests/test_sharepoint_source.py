@@ -34,6 +34,7 @@ class FakeBrowser:
         self.visited: list[str] = []
         self.quit_called = False
         self.download_directory = download_directory
+        self.current_url = SITE
 
     def _response(self, url: str) -> object:
         matches = [(key, value) for key, value in self.responses.items() if key in url]
@@ -165,6 +166,31 @@ def test_odata_object_accepts_real_nometadata_entity_and_legacy_envelopes() -> N
     assert _odata_object({"d": direct}) is direct
     with pytest.raises(SharePointReadError, match="objeto inválido"):
         _odata_object({"value": [direct]})
+
+
+def test_wait_until_authenticated_validates_site_with_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, browser = make_source(tmp_path, {"web?$select=Id": {"Id": "site-id"}})
+    observed: dict[str, object] = {}
+
+    class WaitFake:
+        def __init__(self, received_browser, timeout, poll_frequency) -> None:
+            observed.update(
+                browser=received_browser,
+                timeout=timeout,
+                poll_frequency=poll_frequency,
+            )
+
+        def until(self, predicate) -> None:
+            assert predicate(browser) is True
+
+    monkeypatch.setattr("selenium.webdriver.support.ui.WebDriverWait", WaitFake)
+
+    source.wait_until_authenticated(timeout=12)
+
+    assert observed == {"browser": browser, "timeout": 12, "poll_frequency": 0.5}
+    assert browser.calls == [f"{SITE}/_api/web?$select=Id"]
 
 
 def test_recursively_discovers_same_name_as_distinct_unique_ids(tmp_path: Path) -> None:

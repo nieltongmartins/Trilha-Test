@@ -805,6 +805,8 @@ expõe URL, escopos e **Conectar**. O clique salva apenas esses dois dados opera
 e inicia Edge/Selenium em uma thread de trabalho; login e MFA permanecem manuais. A
 mesma estratégia de worker com retorno via `after()` passou a cobrir descoberta,
 versões, auditoria e relatório, sem sleeps e sem atualizar widgets fora da thread Tk.
+O fluxo de conexão aguarda e valida a autenticação no próprio worker por uma leitura
+REST somente leitura; os logs registram cada estágio e a thread, sem dados da sessão.
 
 A configuração não secreta fica no perfil (`%APPDATA%\Trilha de
 Auditoria\config.json` no Windows), com gravação atômica. A precedência definida é

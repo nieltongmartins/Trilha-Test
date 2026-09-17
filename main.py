@@ -38,9 +38,15 @@ def main(*, launch_ui: bool | None = None) -> int:
         database.initialize()
 
         def connect_source(site_url: str, scopes: tuple[str, ...]):
-            return BrowserSharePointSource.open_edge(
+            source = BrowserSharePointSource.open_edge(
                 site_url, scopes, temp_directory=settings.temp_directory
             )
+            try:
+                source.wait_until_authenticated()
+            except Exception:
+                source.close()
+                raise
+            return source
 
         application = AuditApplication(
             root,

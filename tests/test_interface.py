@@ -9,9 +9,11 @@ from app.sources import SharePointReadError, SpreadsheetInfo
 class VariableFake:
     def __init__(self) -> None:
         self.value = ""
+        self.set_threads: list[int] = []
 
     def set(self, value: str) -> None:
         self.value = value
+        self.set_threads.append(threading.get_ident())
 
     def get(self) -> str:
         return self.value
@@ -66,26 +68,41 @@ def _application_for_connection(
 
 
 def test_connect_keeps_interface_alive_and_finishes_on_tk_thread() -> None:
-    connected = threading.Event()
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    operation_threads: list[int] = []
     source = object()
 
     def connect_source(*_args):
-        connected.set()
+        operation_threads.append(threading.get_ident())
+        worker_started.set()
+        assert release_worker.wait(timeout=1)
         return source
 
     application, scheduler = _application_for_connection(connect_source)
     main_thread = threading.get_ident()
 
     application.connect()
-    assert connected.wait(timeout=1)
+    assert worker_started.wait(timeout=1)
+    assert operation_threads != [main_thread]
+    # O callback agendado roda enquanto a conexão está deliberadamente parada:
+    # isso representa o mainloop continuando a despachar eventos/redesenhos.
+    scheduler.run_next()
+    assert scheduler.callbacks
+    assert application._busy is True
+    assert scheduler.destroyed is False
+
+    release_worker.set()
     outcome = application._work_results.get(timeout=1)
     application._work_results.put(outcome)
     scheduler.run_next()
 
     assert scheduler.destroyed is False
     assert application.source is source
-    assert application.status.value.startswith("Edge aberto.")
-    assert scheduler.after_threads == [main_thread]
+    assert application.status.value.startswith("Conectado ao SharePoint.")
+    assert scheduler.after_threads == [main_thread, main_thread]
+    assert application.status.set_threads
+    assert set(application.status.set_threads) == {main_thread}
 
 
 def test_connection_failure_keeps_interface_alive_and_reports_error() -> None:
@@ -106,6 +123,7 @@ def test_connection_failure_keeps_interface_alive_and_reports_error() -> None:
     assert scheduler.destroyed is False
     assert application.source is None
     assert application.status.value == "Falha na operação: Edge indisponível"
+    assert set(application.status.set_threads) == {threading.get_ident()}
 
 
 class FailingSource:
