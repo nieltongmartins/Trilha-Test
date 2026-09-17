@@ -9,7 +9,7 @@ import re
 import shutil
 import time
 from typing import Any, Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 import zipfile
 
 from app.sources.base import SpreadsheetInfo, VersionInfo
@@ -41,6 +41,28 @@ fetch(url, {method: 'GET', credentials: 'same-origin', headers: {'Accept': 'appl
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return {json: await response.json()};
   }).then(done).catch(error => done({error: String(error)}));
+"""
+
+_DOWNLOAD_SCRIPT = r"""
+const done = arguments[arguments.length - 1];
+const url = arguments[0];
+const filename = arguments[1];
+fetch(url, {method: 'GET', credentials: 'same-origin'})
+  .then(async response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  }).then(blob => {
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    done({ok: true});
+  }).catch(error => done({error: String(error)}));
 """
 
 
@@ -78,6 +100,17 @@ def _escape_odata_path(path: str) -> str:
     return quote(path.replace("'", "''"), safe="/'()$=,:?&")
 
 
+def _normalize_scope_path(scope_path: str, site_path: str) -> str:
+    """Converte um caminho relativo ao site em server-relative URL."""
+    scope = "/" + unquote(scope_path).strip("/")
+    site = "/" + unquote(site_path).strip("/") if site_path.strip("/") else ""
+    if site and scope.casefold() != site.casefold() and not scope.casefold().startswith(
+        site.casefold() + "/"
+    ):
+        return f"{site}/{scope.lstrip('/')}"
+    return scope
+
+
 class BrowserSharePointSource:
     """Descobre, enumera e baixa XLSX por GET read-only no próprio Edge."""
 
@@ -98,14 +131,10 @@ class BrowserSharePointSource:
         parsed = urlsplit(site_url)
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("A URL do site SharePoint deve usar HTTPS")
-        scopes = tuple(
-            dict.fromkeys(path.rstrip("/") for path in scope_paths if path.rstrip("/"))
-        )
-        if not scopes:
-            raise ValueError("Ao menos um escopo SharePoint deve ser configurado")
         self.site_url = site_url.rstrip("/")
         self._origin = f"{parsed.scheme}://{parsed.netloc}"
-        self.scope_paths = scopes
+        self._site_path = parsed.path
+        self.set_scope_paths(scope_paths)
         self._browser = browser
         self._owns_browser = owns_browser
         self._download_timeout = download_timeout
@@ -115,6 +144,19 @@ class BrowserSharePointSource:
             download_directory or self._workspace.path
         )
         self.download_directory.mkdir(parents=True, exist_ok=True)
+
+    def set_scope_paths(self, scope_paths: Sequence[str]) -> None:
+        """Atualiza raízes de leitura sem recriar a sessão autenticada."""
+        scopes = tuple(
+            dict.fromkeys(
+                _normalize_scope_path(path, self._site_path)
+                for path in scope_paths
+                if path.strip("/")
+            )
+        )
+        if not scopes:
+            raise ValueError("Ao menos um escopo SharePoint deve ser configurado")
+        self.scope_paths = scopes
 
     @classmethod
     def open_edge(
@@ -146,13 +188,7 @@ class BrowserSharePointSource:
             site_url,
             len(scope_paths),
         )
-        logger.info("Iniciando webdriver.Edge")
-        webdriver_started = time.monotonic()
         browser = webdriver.Edge(options=options)
-        logger.info(
-            "webdriver.Edge concluído; driver criado duração=%.3fs",
-            time.monotonic() - webdriver_started,
-        )
         try:
             source = cls(
                 site_url,
@@ -167,13 +203,7 @@ class BrowserSharePointSource:
             browser.quit()
             download_workspace.close()
             raise
-        logger.info("Iniciando browser.get")
-        navigation_started = time.monotonic()
         browser.get(site_url)
-        logger.info(
-            "browser.get concluído duração=%.3fs",
-            time.monotonic() - navigation_started,
-        )
         logger.info(
             "Edge aberto; aguardando autenticação manual do usuário site=%s",
             site_url,
@@ -317,6 +347,35 @@ class BrowserSharePointSource:
         )
         return result
 
+    def list_folders(self) -> tuple[tuple[str, str], ...]:
+        """Lista recursivamente as subpastas dos escopos para seleção na interface."""
+        found: dict[str, str] = {}
+        pending = list(self.scope_paths)
+        visited: set[str] = set()
+        while pending:
+            folder = pending.pop(0)
+            if folder in visited:
+                continue
+            visited.add(folder)
+            encoded = _escape_odata_path(folder)
+            payload = self._json(
+                f"web/GetFolderByServerRelativeUrl('{encoded}')/Folders"
+                "?$select=Name,ServerRelativeUrl"
+            )
+            for item in _odata_results(payload):
+                name, path = item.get("Name"), item.get("ServerRelativeUrl")
+                if (
+                    isinstance(name, str)
+                    and isinstance(path, str)
+                    and name != "Forms"
+                ):
+                    found[path] = name
+                    pending.append(path)
+        return tuple(
+            (name, path)
+            for path, name in sorted(found.items(), key=lambda item: item[1].casefold())
+        )
+
     def _file_metadata(self, spreadsheet: SpreadsheetInfo) -> Mapping[str, Any]:
         encoded = _escape_odata_path(spreadsheet.path or "")
         return _odata_object(
@@ -442,13 +501,28 @@ class BrowserSharePointSource:
         if not version.is_current:
             relative += f"/Versions({version.id})"
         url = self._endpoint(relative + "/$value")
-        before = set(self.download_directory.iterdir())
-        self._browser.get(url)
-        downloaded = self._wait_for_download(before)
         destination = self._workspace.filename(
-            spreadsheet.site_id, spreadsheet.drive_id,
-            spreadsheet.drive_item_id, version.id,
+            spreadsheet.site_id,
+            spreadsheet.drive_id,
+            spreadsheet.drive_item_id,
+            version.id,
         )
+        before = set(self.download_directory.iterdir())
+        result = self._browser.execute_async_script(
+            _DOWNLOAD_SCRIPT, url, destination.name
+        )
+        if (
+            not isinstance(result, Mapping)
+            or result.get("error")
+            or not result.get("ok")
+        ):
+            detail = (
+                result.get("error")
+                if isinstance(result, Mapping)
+                else "resposta inválida"
+            )
+            raise SharePointReadError(f"Falha no download SharePoint REST: {detail}")
+        downloaded = self._wait_for_download(before, destination.name)
         if downloaded.resolve() != destination.resolve():
             shutil.move(str(downloaded), destination)
         try:
@@ -468,18 +542,20 @@ class BrowserSharePointSource:
     def release_version(self, path: Path) -> None:
         self._workspace.release(path)
 
-    def _wait_for_download(self, before: set[Path]) -> Path:
+    def _wait_for_download(self, before: set[Path], expected_name: str) -> Path:
         deadline = time.monotonic() + self._download_timeout
         while time.monotonic() < deadline:
             files = {
                 path for path in self.download_directory.iterdir() if path.is_file()
             }
-            partial = [path for path in files if path.name.endswith(".crdownload")]
-            completed = [
-                path for path in files - before if not path.name.endswith(".crdownload")
+            partial = [
+                path
+                for path in files
+                if path.name == f"{expected_name}.crdownload"
             ]
+            completed = [path for path in files - before if path.name == expected_name]
             if completed and not partial:
-                return max(completed, key=lambda path: path.stat().st_mtime_ns)
+                return completed[0]
             time.sleep(self._poll_interval)
         raise SharePointReadError(
             "Download não foi concluído; arquivo .crdownload presente ou ausente"

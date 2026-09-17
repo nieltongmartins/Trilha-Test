@@ -52,6 +52,10 @@ class AuditApplication(ttk.Frame):
         )
         self.site_url = tk.StringVar(value=site_url)
         self.scope_paths = tk.StringVar(value=";".join(scope_paths))
+        # Preserve the public attribute used by installations upgraded from the
+        # first folder-field implementation. It now backs the read-only selector.
+        self.folder_names = tk.StringVar(value="")
+        self.folder_paths: list[str] = []
         self.status = tk.StringVar(
             value=(
                 "Conectado. Atualize a lista."
@@ -82,11 +86,29 @@ class AuditApplication(ttk.Frame):
         ttk.Entry(config, textvariable=self.scope_paths).grid(
             row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
         )
-        ttk.Label(config, text="Separe vários caminhos por ponto e vírgula.").grid(
-            row=2, column=1, sticky="w"
+        ttk.Label(config, text="Pasta(s):").grid(
+            row=2, column=0, sticky="w", pady=(6, 0)
+        )
+        self.folder_selector = ttk.Combobox(
+            config, textvariable=self.folder_names, state="readonly"
+        )
+        self.folder_selector.grid(
+            row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
+        )
+        self.copy_folder_button = ttk.Button(
+            config, text="Copiar para escopo", command=self.copy_folder_to_scope
+        )
+        self.copy_folder_button.grid(row=2, column=2, padx=(6, 0), pady=(6, 0))
+        ttk.Label(
+            config,
+            text=(
+                "Após conectar, selecione uma pasta e copie seu caminho para o escopo."
+            ),
+        ).grid(
+            row=3, column=1, sticky="w"
         )
         self.connect_button = ttk.Button(config, text="Conectar", command=self.connect)
-        self.connect_button.grid(row=3, column=1, sticky="e", pady=(8, 0))
+        self.connect_button.grid(row=4, column=1, sticky="e", pady=(8, 0))
 
         self.selector = ttk.Combobox(self, state="readonly", width=70)
         self.selector.grid(row=2, column=0, sticky="ew", pady=8)
@@ -126,7 +148,6 @@ class AuditApplication(ttk.Frame):
         return site_url, scopes
 
     def connect(self) -> None:
-        logger.info("Callback Conectar iniciado")
         if self.connect_source is None:
             self.status.set("Conexão SharePoint não está disponível.")
             return
@@ -142,7 +163,6 @@ class AuditApplication(ttk.Frame):
             "Conectando ao SharePoint... Conclua o login/MFA no Edge.",
             lambda: connect_source(site_url, scopes),
             self._connected,
-            context="conexao-sharepoint",
         )
 
     def _connected(self, source: VersionSource) -> None:
@@ -157,24 +177,39 @@ class AuditApplication(ttk.Frame):
                 )
         self.status.set("Conectado ao SharePoint. Clique em Atualizar lista.")
         self._set_action_state()
-        logger.info("Resultado da conexão aplicado à UI")
-        root = self.winfo_toplevel()
-        try:
-            logger.info(
-                "Estado da janela após conexão: exists=%s viewable=%s state=%s "
-                "thread=%s origem=_connected motivo=resultado aplicado",
-                root.winfo_exists(),
-                root.winfo_viewable(),
-                root.state(),
-                threading.current_thread().name,
+        list_folders = getattr(source, "list_folders", None)
+        if callable(list_folders):
+            self._start_work(
+                "Carregando pastas do SharePoint...",
+                lambda: list(list_folders()),
+                self._folders_loaded,
             )
-        except tk.TclError:
-            logger.error(
-                "Estado da janela após conexão indisponível thread=%s "
-                "origem=_connected motivo=erro Tcl",
-                threading.current_thread().name,
-                exc_info=True,
+
+    def _folders_loaded(self, folders: list[tuple[str, str]]) -> None:
+        self.folder_paths = [path for _name, path in folders]
+        self.folder_selector["values"] = [name for name, _path in folders]
+        if folders:
+            self.folder_selector.current(0)
+            self.status.set("Pastas carregadas. Selecione uma ou atualize a lista.")
+        else:
+            self.status.set(
+                "Nenhuma subpasta encontrada; o escopo atual pode ser usado."
             )
+
+    def copy_folder_to_scope(self) -> None:
+        index = self.folder_selector.current()
+        if index < 0 or index >= len(self.folder_paths):
+            self.status.set("Selecione uma pasta para copiar para o escopo.")
+            return
+        path = self.folder_paths[index]
+        self.scope_paths.set(path)
+        if self.source is not None:
+            set_scope_paths = getattr(self.source, "set_scope_paths", None)
+            if callable(set_scope_paths):
+                set_scope_paths((path,))
+        if self.save_configuration is not None:
+            self.save_configuration(self.site_url.get().strip().rstrip("/"), (path,))
+        self.status.set("Escopo atualizado. Clique em Atualizar lista.")
 
     def refresh(self) -> None:
         if self.source is None:
@@ -309,8 +344,6 @@ class AuditApplication(ttk.Frame):
         message: str,
         operation: Callable[[], object],
         finished: Callable,
-        *,
-        context: str = "operacao-ui",
     ) -> None:
         if self._busy:
             self.status.set("Aguarde a operação atual terminar.")
@@ -320,14 +353,6 @@ class AuditApplication(ttk.Frame):
         self._set_action_state()
 
         def worker() -> None:
-            current = threading.current_thread()
-            logger.info(
-                "Worker iniciado contexto=%s nome=%s ident=%s daemon=%s",
-                context,
-                current.name,
-                current.ident,
-                current.daemon,
-            )
             try:
                 result = operation()
             except Exception as error:
@@ -340,32 +365,11 @@ class AuditApplication(ttk.Frame):
                 self._work_results.put((False, error))
             else:
                 self._work_results.put((True, result))
-                logger.info("Resultado enviado à UI contexto=%s", context)
-            finally:
-                logger.info(
-                    "Worker terminou contexto=%s nome=%s ident=%s daemon=%s",
-                    context,
-                    current.name,
-                    current.ident,
-                    current.daemon,
-                )
 
         # Tk, including ``after``, is only accessed by the main thread.  The
         # worker communicates exclusively through this queue.
         self.after(50, self._poll_work_result, finished)
-        worker_thread = threading.Thread(
-            target=worker,
-            name=f"auditoria-{context}",
-            daemon=True,
-        )
-        logger.info(
-            "Worker criada contexto=%s nome=%s ident=%s daemon=%s",
-            context,
-            worker_thread.name,
-            worker_thread.ident,
-            worker_thread.daemon,
-        )
-        worker_thread.start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def _poll_work_result(self, finished: Callable) -> None:
         try:
@@ -395,6 +399,8 @@ class AuditApplication(ttk.Frame):
         for name in ("connect_button",):
             if hasattr(self, name):
                 getattr(self, name).configure(state=state)
+        if hasattr(self, "copy_folder_button"):
+            self.copy_folder_button.configure(state=connected_state)
         for name in ("refresh_button", "audit_button", "report_button"):
             if hasattr(self, name):
                 getattr(self, name).configure(state=connected_state)

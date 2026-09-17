@@ -59,3 +59,21 @@ URL completa do SharePoint no teste E (somente esquema e host).
 * Não foi adicionada `CREATE_NEW_PROCESS_GROUP`: fazê-lo antes de comprovar
   propagação de evento seria uma mudança especulativa no modo suportado pelo
   Selenium de iniciar seu `Service`.
+
+## Teste mínimo do fluxo do projeto
+
+Depois dos controles acima, este teste usa a implementação real de
+`BrowserSharePointSource`, mas deliberadamente não cria banco, `AuditService`,
+relatório, descoberta recursiva nem auditoria. Ele mantém apenas um `Tk`, uma
+worker daemon, a abertura do Edge, a navegação para `site_url` e a validação da
+autenticação:
+
+```powershell
+py -3.14 -m tools.diagnostics.test_sharepoint_source_tk `
+  "https://EMPRESA.sharepoint.com/sites/SITE" `
+  --scope "/sites/SITE/Documentos"
+```
+
+Após concluir o login/MFA, a mensagem `SharePoint autenticado` deve aparecer e
+a janela Tk deve continuar aberta. Este teste não instala handlers de sinais e
+não fecha a janela automaticamente.
