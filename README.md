@@ -103,8 +103,9 @@ validação Open XML. O SharePoint permanece estritamente somente leitura.
    `$env:SHAREPOINT_SCOPE_PATHS`.
 5. Confirme a abertura imediata da janela **Trilha de Auditoria** e que o Edge
    ainda não foi aberto.
-6. Informe/confira o site e o caminho server-relative do escopo; não use uma pasta
-   transitória de testes como configuração definitiva.
+6. Informe/confira o site e o caminho do escopo. Opcionalmente, mantenha a biblioteca
+   no campo **Escopo(s)** e informe uma ou mais subpastas no campo **Pasta(s)**; não
+   use uma pasta transitória de testes como configuração definitiva.
 7. Clique em **Conectar**.
 8. Autentique-se manualmente no Edge e conclua o MFA.
 9. Volte à aplicação, clique em **Atualizar lista** e confirme a atualização do

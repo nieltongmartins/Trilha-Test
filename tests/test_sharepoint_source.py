@@ -59,6 +59,20 @@ class FakeBrowser:
         assert "arrayBuffer" not in script
         self.calls.append(url)
         value = self._response(url)
+        if "response.blob()" in script:
+            assert self.download_directory is not None
+            filename = str(args[1])
+            self.visited.append(url)
+            if isinstance(value, bytes):
+                (self.download_directory / filename).write_bytes(value)
+                return {"ok": True}
+            if value == "partial":
+                (self.download_directory / f"{filename}.crdownload").write_bytes(
+                    b"parcial"
+                )
+                return {"ok": True}
+            if isinstance(value, Exception):
+                return {"error": str(value)}
         if isinstance(value, Exception):
             return {"error": str(value)}
         return {"json": value}
@@ -353,6 +367,26 @@ def test_downloads_historical_and_current_using_distinct_read_only_endpoints(
         "/$value"
     )
     assert all("/_api/" in url for url in browser.visited)
+
+
+def test_download_failure_from_fetch_is_reported_without_waiting(
+    tmp_path: Path,
+) -> None:
+    source, _ = make_source(
+        tmp_path,
+        {"Versions(7)/$value": RuntimeError("HTTP 403")},
+    )
+    spreadsheet = SpreadsheetInfo(
+        SITE,
+        "sharepoint-rest",
+        "UUID-A",
+        "Arquivo.xlsx",
+        f"{ROOT}/Setor A/Arquivo.xlsx",
+    )
+    from app.sources.base import VersionInfo
+
+    with source, pytest.raises(SharePointReadError, match="HTTP 403"):
+        source.get_version(spreadsheet, VersionInfo("7", "0.7"))
 
 
 def test_rejects_invalid_open_xml_and_incomplete_download(tmp_path: Path) -> None:

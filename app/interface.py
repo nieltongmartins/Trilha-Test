@@ -52,6 +52,7 @@ class AuditApplication(ttk.Frame):
         )
         self.site_url = tk.StringVar(value=site_url)
         self.scope_paths = tk.StringVar(value=";".join(scope_paths))
+        self.folder_names = tk.StringVar(value="")
         self.status = tk.StringVar(
             value=(
                 "Conectado. Atualize a lista."
@@ -82,17 +83,23 @@ class AuditApplication(ttk.Frame):
         ttk.Entry(config, textvariable=self.scope_paths).grid(
             row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
         )
+        ttk.Label(config, text="Pasta(s):").grid(
+            row=2, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Entry(config, textvariable=self.folder_names).grid(
+            row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
+        )
         ttk.Label(
             config,
             text=(
-                "Use /Biblioteca/Pasta ou o caminho completo; "
-                "separe vários por ponto e vírgula."
+                "Pastas são adicionadas ao(s) escopo(s); "
+                "separe vários valores por ponto e vírgula."
             ),
         ).grid(
-            row=2, column=1, sticky="w"
+            row=3, column=1, sticky="w"
         )
         self.connect_button = ttk.Button(config, text="Conectar", command=self.connect)
-        self.connect_button.grid(row=3, column=1, sticky="e", pady=(8, 0))
+        self.connect_button.grid(row=4, column=1, sticky="e", pady=(8, 0))
 
         self.selector = ttk.Combobox(self, state="readonly", width=70)
         self.selector.grid(row=2, column=0, sticky="ew", pady=8)
@@ -129,6 +136,17 @@ class AuditApplication(ttk.Frame):
                 if part.strip()
             )
         )
+        folders = tuple(
+            dict.fromkeys(
+                part.strip().strip("/")
+                for part in self.folder_names.get().split(";")
+                if part.strip().strip("/")
+            )
+        )
+        if folders:
+            scopes = tuple(
+                f"{scope.rstrip('/')}/{folder}" for scope in scopes for folder in folders
+            )
         return site_url, scopes
 
     def connect(self) -> None:

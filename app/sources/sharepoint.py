@@ -43,6 +43,28 @@ fetch(url, {method: 'GET', credentials: 'same-origin', headers: {'Accept': 'appl
   }).then(done).catch(error => done({error: String(error)}));
 """
 
+_DOWNLOAD_SCRIPT = r"""
+const done = arguments[arguments.length - 1];
+const url = arguments[0];
+const filename = arguments[1];
+fetch(url, {method: 'GET', credentials: 'same-origin'})
+  .then(async response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  }).then(blob => {
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    done({ok: true});
+  }).catch(error => done({error: String(error)}));
+"""
+
 
 def _odata_value(payload: Mapping[str, Any]) -> object:
     value: object = payload.get("value")
@@ -445,13 +467,24 @@ class BrowserSharePointSource:
         if not version.is_current:
             relative += f"/Versions({version.id})"
         url = self._endpoint(relative + "/$value")
-        before = set(self.download_directory.iterdir())
-        self._browser.get(url)
-        downloaded = self._wait_for_download(before)
         destination = self._workspace.filename(
-            spreadsheet.site_id, spreadsheet.drive_id,
-            spreadsheet.drive_item_id, version.id,
+            spreadsheet.site_id,
+            spreadsheet.drive_id,
+            spreadsheet.drive_item_id,
+            version.id,
         )
+        before = set(self.download_directory.iterdir())
+        result = self._browser.execute_async_script(
+            _DOWNLOAD_SCRIPT, url, destination.name
+        )
+        if not isinstance(result, Mapping) or result.get("error") or not result.get("ok"):
+            detail = (
+                result.get("error")
+                if isinstance(result, Mapping)
+                else "resposta inválida"
+            )
+            raise SharePointReadError(f"Falha no download SharePoint REST: {detail}")
+        downloaded = self._wait_for_download(before, destination.name)
         if downloaded.resolve() != destination.resolve():
             shutil.move(str(downloaded), destination)
         try:
@@ -471,18 +504,20 @@ class BrowserSharePointSource:
     def release_version(self, path: Path) -> None:
         self._workspace.release(path)
 
-    def _wait_for_download(self, before: set[Path]) -> Path:
+    def _wait_for_download(self, before: set[Path], expected_name: str) -> Path:
         deadline = time.monotonic() + self._download_timeout
         while time.monotonic() < deadline:
             files = {
                 path for path in self.download_directory.iterdir() if path.is_file()
             }
-            partial = [path for path in files if path.name.endswith(".crdownload")]
-            completed = [
-                path for path in files - before if not path.name.endswith(".crdownload")
+            partial = [
+                path
+                for path in files
+                if path.name == f"{expected_name}.crdownload"
             ]
+            completed = [path for path in files - before if path.name == expected_name]
             if completed and not partial:
-                return max(completed, key=lambda path: path.stat().st_mtime_ns)
+                return completed[0]
             time.sleep(self._poll_interval)
         raise SharePointReadError(
             "Download não foi concluído; arquivo .crdownload presente ou ausente"
