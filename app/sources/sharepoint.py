@@ -29,6 +29,8 @@ class BrowserSession(Protocol):
     def get(self, url: str) -> None: ...
     def execute_async_script(self, script: str, *args: object) -> object: ...
     def quit(self) -> None: ...
+    @property
+    def current_url(self) -> str: ...
 
 
 _FETCH_JSON_SCRIPT = r"""
@@ -145,6 +147,7 @@ class BrowserSharePointSource:
             len(scope_paths),
         )
         browser = webdriver.Edge(options=options)
+        logger.info("Edge inicializado")
         try:
             source = cls(
                 site_url,
@@ -165,6 +168,35 @@ class BrowserSharePointSource:
             site_url,
         )
         return source
+
+    def wait_until_authenticated(self, timeout: float = 600) -> None:
+        """Espera deterministicamente a sessão alcançar e ler o site configurado."""
+        from selenium.common.exceptions import TimeoutException
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        logger.info("Aguardando autenticação manual SharePoint site=%s", self.site_url)
+
+        def authenticated(_browser: BrowserSession) -> bool:
+            current = urlsplit(_browser.current_url)
+            site = urlsplit(self.site_url)
+            if current.scheme != site.scheme or current.netloc != site.netloc:
+                return False
+            try:
+                payload = self._json("web?$select=Id")
+                entity = _odata_object(payload)
+                return isinstance(entity.get("Id"), str)
+            except SharePointReadError:
+                return False
+
+        try:
+            WebDriverWait(self._browser, timeout, poll_frequency=0.5).until(
+                authenticated
+            )
+        except TimeoutException as error:
+            raise SharePointReadError(
+                "Tempo esgotado aguardando autenticação manual no SharePoint"
+            ) from error
+        logger.info("Autenticação SharePoint detectada e site validado")
 
     def close(self) -> None:
         self._workspace.close()

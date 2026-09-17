@@ -40,10 +40,11 @@ python main.py
 O comando cria os diretórios operacionais e, se necessário, o banco em
 `data/database/auditoria.db`, e abre primeiro a janela **Trilha de Auditoria**.
 Nenhum Edge ou acesso de rede é iniciado nessa etapa. Confira URL/escopo e clique
-em **Conectar**; somente então o Edge visível é aberto para login/MFA manual. Após
-autenticar, clique em **Atualizar lista**. Inicialização Selenium, descoberta,
-consulta de versões, auditoria e geração de relatório são executadas fora da
-thread do Tkinter, mantendo a janela responsiva.
+em **Conectar**; somente então o Edge visível é aberto para login/MFA manual. A
+conexão valida a autenticação por uma leitura REST do site e, quando a tela indicar
+**Conectado ao SharePoint**, permite clicar em **Atualizar lista**. Inicialização
+Selenium, descoberta, consulta de versões, auditoria e geração de relatório são
+executadas fora da thread do Tkinter, mantendo a janela responsiva.
 
 ## Distribuição para Windows
 

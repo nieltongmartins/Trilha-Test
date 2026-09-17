@@ -51,7 +51,7 @@ def configure_logging(
     )
     handler.setFormatter(
         _RedactingFormatter(
-            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            "%(asctime)s %(levelname)s %(name)s [thread=%(threadName)s]: %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%S%z",
         )
     )
