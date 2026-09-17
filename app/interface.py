@@ -86,26 +86,11 @@ class AuditApplication(ttk.Frame):
         ttk.Entry(config, textvariable=self.scope_paths).grid(
             row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
         )
-        ttk.Label(config, text="Pasta(s):").grid(
-            row=2, column=0, sticky="w", pady=(6, 0)
-        )
-        self.folder_selector = ttk.Combobox(
-            config, textvariable=self.folder_names, state="readonly"
-        )
-        self.folder_selector.grid(
-            row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
-        )
-        self.copy_folder_button = ttk.Button(
-            config, text="Copiar para escopo", command=self.copy_folder_to_scope
-        )
-        self.copy_folder_button.grid(row=2, column=2, padx=(6, 0), pady=(6, 0))
         ttk.Label(
             config,
-            text=(
-                "Após conectar, selecione uma pasta e copie seu caminho para o escopo."
-            ),
+            text="Use o caminho completo da biblioteca/pasta; separe vários por ';'.",
         ).grid(
-            row=3, column=1, sticky="w"
+            row=2, column=1, sticky="w"
         )
         self.connect_button = ttk.Button(config, text="Conectar", command=self.connect)
         self.connect_button.grid(row=4, column=1, sticky="e", pady=(8, 0))
@@ -188,24 +173,6 @@ class AuditApplication(ttk.Frame):
                 )
         self.status.set("Conectado ao SharePoint. Clique em Atualizar lista.")
         self._set_action_state()
-        list_folders = getattr(source, "list_folders", None)
-        if callable(list_folders):
-            self._start_work(
-                "Carregando pastas do SharePoint...",
-                lambda: list(list_folders()),
-                self._folders_loaded,
-            )
-
-    def _folders_loaded(self, folders: list[tuple[str, str]]) -> None:
-        self.folder_paths = [path for _name, path in folders]
-        self.folder_selector["values"] = [name for name, _path in folders]
-        if folders:
-            self.folder_selector.current(0)
-            self.status.set("Pastas carregadas. Selecione uma ou atualize a lista.")
-        else:
-            self.status.set(
-                "Nenhuma subpasta encontrada; o escopo atual pode ser usado."
-            )
 
     def copy_folder_to_scope(self) -> None:
         index = self.folder_selector.current()
