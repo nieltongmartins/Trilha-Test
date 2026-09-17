@@ -1,6 +1,7 @@
 """Ponto de entrada da aplicação desktop."""
 
 import os
+import signal
 import sys
 import threading
 import tkinter as tk
@@ -97,6 +98,41 @@ def main(*, launch_ui: bool | None = None) -> int:
     database = Database(settings.database_path)
     application = None
     lifecycle = None
+    previous_threading_excepthook = threading.excepthook
+    previous_sigint_handler = signal.getsignal(signal.SIGINT)
+
+    def diagnostic_sigint_handler(signum, frame) -> None:
+        logger.error(
+            "SIGINT recebido pela MainThread sinal=%s thread=%s frame=%s:%s; "
+            "encaminhando ao handler anterior=%r",
+            signum,
+            threading.current_thread().name,
+            frame.f_code.co_filename if frame is not None else None,
+            frame.f_lineno if frame is not None else None,
+            previous_sigint_handler,
+        )
+        if callable(previous_sigint_handler):
+            previous_sigint_handler(signum, frame)
+        elif previous_sigint_handler == signal.SIG_IGN:
+            return
+        else:
+            signal.default_int_handler(signum, frame)
+
+    def diagnostic_threading_excepthook(args: threading.ExceptHookArgs) -> None:
+        logger.error(
+            "Exceção não capturada em worker nome=%s ident=%s daemon=%s "
+            "tipo_erro=%s erro=%r",
+            args.thread.name if args.thread is not None else "desconhecida",
+            args.thread.ident if args.thread is not None else None,
+            args.thread.daemon if args.thread is not None else None,
+            args.exc_type.__name__,
+            args.exc_value,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+        previous_threading_excepthook(args)
+
+    threading.excepthook = diagnostic_threading_excepthook
+    signal.signal(signal.SIGINT, diagnostic_sigint_handler)
     try:
         if launch_ui is None:
             launch_ui = sys.platform == "win32" or bool(os.environ.get("DISPLAY"))
@@ -138,10 +174,25 @@ def main(*, launch_ui: bool | None = None) -> int:
             save_configuration=settings.save_browser_sharepoint,
         )
         logger.info("Interface pronta; aguardando ação do usuário para conectar")
+        logger.info("Entrando em root.mainloop")
         lifecycle._log(
             "antes de mainloop", origin="main.py", reason="início do loop Tk"
         )
-        root.mainloop()
+        try:
+            root.mainloop()
+            if lifecycle.close_requested:
+                logger.info("root.mainloop retornou após solicitação de fechamento")
+            else:
+                logger.warning(
+                    "root.mainloop RETORNOU NORMALMENTE sem solicitação de fechamento"
+                )
+        except BaseException as error:
+            logger.exception(
+                "root.mainloop terminou por BaseException tipo_erro=%s erro=%r",
+                type(error).__name__,
+                error,
+            )
+            raise
         lifecycle._log(
             "depois de mainloop",
             origin="main.py",
@@ -155,6 +206,8 @@ def main(*, launch_ui: bool | None = None) -> int:
         logger.critical("Erro inesperado encerrou a aplicação", exc_info=True)
         raise
     finally:
+        signal.signal(signal.SIGINT, previous_sigint_handler)
+        threading.excepthook = previous_threading_excepthook
         if lifecycle is not None:
             lifecycle._log(
                 "finally",

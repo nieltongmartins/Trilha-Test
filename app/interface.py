@@ -320,7 +320,14 @@ class AuditApplication(ttk.Frame):
         self._set_action_state()
 
         def worker() -> None:
-            logger.info("Worker iniciado contexto=%s", context)
+            current = threading.current_thread()
+            logger.info(
+                "Worker iniciado contexto=%s nome=%s ident=%s daemon=%s",
+                context,
+                current.name,
+                current.ident,
+                current.daemon,
+            )
             try:
                 result = operation()
             except Exception as error:
@@ -335,16 +342,30 @@ class AuditApplication(ttk.Frame):
                 self._work_results.put((True, result))
                 logger.info("Resultado enviado à UI contexto=%s", context)
             finally:
-                logger.info("Worker finalizado contexto=%s", context)
+                logger.info(
+                    "Worker terminou contexto=%s nome=%s ident=%s daemon=%s",
+                    context,
+                    current.name,
+                    current.ident,
+                    current.daemon,
+                )
 
         # Tk, including ``after``, is only accessed by the main thread.  The
         # worker communicates exclusively through this queue.
         self.after(50, self._poll_work_result, finished)
-        threading.Thread(
+        worker_thread = threading.Thread(
             target=worker,
             name=f"auditoria-{context}",
             daemon=True,
-        ).start()
+        )
+        logger.info(
+            "Worker criada contexto=%s nome=%s ident=%s daemon=%s",
+            context,
+            worker_thread.name,
+            worker_thread.ident,
+            worker_thread.daemon,
+        )
+        worker_thread.start()
 
     def _poll_work_result(self, finished: Callable) -> None:
         try:
