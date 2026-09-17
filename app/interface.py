@@ -82,7 +82,13 @@ class AuditApplication(ttk.Frame):
         ttk.Entry(config, textvariable=self.scope_paths).grid(
             row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
         )
-        ttk.Label(config, text="Separe vários caminhos por ponto e vírgula.").grid(
+        ttk.Label(
+            config,
+            text=(
+                "Use /Biblioteca/Pasta ou o caminho completo; "
+                "separe vários por ponto e vírgula."
+            ),
+        ).grid(
             row=2, column=1, sticky="w"
         )
         self.connect_button = ttk.Button(config, text="Conectar", command=self.connect)
