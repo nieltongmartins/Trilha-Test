@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import main
@@ -18,6 +19,10 @@ def test_ui_is_created_without_opening_sharepoint(tmp_path: Path, monkeypatch) -
     events: list[str] = []
 
     class RootFake:
+        def __init__(self) -> None:
+            self.destroyed = False
+            self.protocols = {}
+
         def title(self, _title: str) -> None:
             events.append("tk")
 
@@ -26,6 +31,24 @@ def test_ui_is_created_without_opening_sharepoint(tmp_path: Path, monkeypatch) -
 
         def mainloop(self) -> None:
             events.append("mainloop")
+
+        def protocol(self, name, callback) -> None:
+            self.protocols[name] = callback
+
+        def bind(self, *_args, **_kwargs) -> None:
+            pass
+
+        def destroy(self) -> None:
+            self.destroyed = True
+
+        def winfo_exists(self) -> int:
+            return int(not self.destroyed)
+
+        def winfo_viewable(self) -> int:
+            return int(not self.destroyed)
+
+        def state(self) -> str:
+            return "normal" if not self.destroyed else "indisponível"
 
     class ApplicationFake:
         def __init__(self, _root, _database, source, _reports, **_kwargs) -> None:
@@ -52,3 +75,57 @@ def test_ui_is_created_without_opening_sharepoint(tmp_path: Path, monkeypatch) -
 
     assert main.main(launch_ui=True) == 0
     assert events == ["tk", "ui", "mainloop"]
+
+
+class LifecycleRootFake:
+    def __init__(self) -> None:
+        self.protocols = {}
+        self.bindings = {}
+        self.destroyed = False
+
+    def protocol(self, name, callback) -> None:
+        self.protocols[name] = callback
+
+    def bind(self, sequence, callback, add=None) -> None:
+        self.bindings[sequence] = (callback, add)
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+    def winfo_exists(self) -> int:
+        return int(not self.destroyed)
+
+    def winfo_viewable(self) -> int:
+        return int(not self.destroyed)
+
+    def state(self) -> str:
+        return "normal" if not self.destroyed else "indisponível"
+
+
+def test_window_lifecycle_only_closes_on_wm_delete(caplog) -> None:
+    caplog.set_level(logging.INFO)
+    root = LifecycleRootFake()
+    lifecycle = main.WindowLifecycle(root, logging.getLogger("test.lifecycle"))
+
+    assert root.destroyed is False
+    assert lifecycle.close_requested is False
+    root.protocols["WM_DELETE_WINDOW"]()
+
+    assert root.destroyed is True
+    assert lifecycle.close_requested is True
+    assert "WM_DELETE_WINDOW solicitado pelo usuário" in caplog.text
+    assert "destroy solicitado" in caplog.text
+
+
+def test_window_lifecycle_records_callback_exception(caplog) -> None:
+    root = LifecycleRootFake()
+    lifecycle = main.WindowLifecycle(root, logging.getLogger("test.lifecycle"))
+
+    try:
+        raise ValueError("callback inválido")
+    except ValueError as error:
+        lifecycle.report_callback_exception(type(error), error, error.__traceback__)
+
+    assert root.destroyed is False
+    assert "Exceção em callback Tkinter" in caplog.text
+    assert "ValueError: callback inválido" in caplog.text

@@ -35,6 +35,15 @@ class SchedulerFake:
         self.destroyed = False
         self.after_threads: list[int] = []
 
+    def winfo_exists(self) -> int:
+        return 0 if self.destroyed else 1
+
+    def winfo_viewable(self) -> int:
+        return 0 if self.destroyed else 1
+
+    def state(self) -> str:
+        return "normal"
+
     def after(self, _delay: int, callback, *args: object) -> None:
         self.after_threads.append(threading.get_ident())
         self.callbacks.append((callback, args))
@@ -50,6 +59,7 @@ def _application_for_connection(
     application = AuditApplication.__new__(AuditApplication)
     scheduler = SchedulerFake()
     application.after = scheduler.after
+    application.winfo_toplevel = lambda: scheduler
     application.connect_source = connect_source
     application.save_configuration = save_configuration
     application.site_url = VariableFake()
@@ -98,6 +108,9 @@ def test_connect_keeps_interface_alive_and_finishes_on_tk_thread() -> None:
     scheduler.run_next()
 
     assert scheduler.destroyed is False
+    assert scheduler.winfo_exists() == 1
+    assert scheduler.winfo_viewable() == 1
+    assert scheduler.state() == "normal"
     assert application.source is source
     assert application.status.value.startswith("Conectado ao SharePoint.")
     assert scheduler.after_threads == [main_thread, main_thread]
@@ -121,6 +134,7 @@ def test_connection_failure_keeps_interface_alive_and_reports_error() -> None:
     scheduler.run_next()
 
     assert scheduler.destroyed is False
+    assert scheduler.winfo_exists() == 1
     assert application.source is None
     assert application.status.value == "Falha na operação: Edge indisponível"
     assert set(application.status.set_threads) == {threading.get_ident()}
