@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
+import signal
 import threading
 import time
 import tkinter as tk
@@ -28,6 +30,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="executa a worker como não-daemon para comparação controlada",
     )
+    parser.add_argument(
+        "--driver-path",
+        type=Path,
+        help="usa msedgedriver.exe explícito e não executa o Selenium Manager",
+    )
     return parser.parse_args()
 
 
@@ -40,6 +47,24 @@ def main() -> int:
     stop = threading.Event()
     driver_holder: list[object] = []
     close_requested = False
+
+    previous_sigint_handler = signal.getsignal(signal.SIGINT)
+
+    def sigint_handler(signum, frame) -> None:
+        LOGGER.error(
+            "SIGINT recebido sinal=%s thread=%s frame=%s:%s handler_anterior=%r",
+            signum,
+            threading.current_thread().name,
+            frame.f_code.co_filename if frame is not None else None,
+            frame.f_lineno if frame is not None else None,
+            previous_sigint_handler,
+        )
+        if callable(previous_sigint_handler):
+            previous_sigint_handler(signum, frame)
+        elif previous_sigint_handler == signal.SIG_IGN:
+            return
+        else:
+            signal.default_int_handler(signum, frame)
 
     def thread_exception(hook_args: threading.ExceptHookArgs) -> None:
         LOGGER.error(
@@ -56,6 +81,7 @@ def main() -> int:
         )
 
     threading.excepthook = thread_exception
+    signal.signal(signal.SIGINT, sigint_handler)
     root = tk.Tk()
     root.title(f"Tk Edge probe: {args.mode}")
     tk.Label(root, text="Feche esta janela para encerrar o diagnóstico.").pack(
@@ -77,10 +103,22 @@ def main() -> int:
                 return
 
             from selenium import webdriver
+            from selenium.webdriver.edge.service import Service
 
             started = time.monotonic()
             LOGGER.info("webdriver.Edge iniciado")
-            driver = webdriver.Edge()
+            service = (
+                Service(executable_path=str(args.driver_path))
+                if args.driver_path is not None
+                else None
+            )
+            LOGGER.info(
+                "resolução do driver=%s",
+                "caminho explícito (sem Selenium Manager)"
+                if service is not None
+                else "Selenium Manager",
+            )
+            driver = webdriver.Edge(service=service) if service else webdriver.Edge()
             driver_holder.append(driver)
             LOGGER.info(
                 "webdriver.Edge concluído duração=%.3fs", time.monotonic() - started
@@ -139,6 +177,7 @@ def main() -> int:
         raise
     finally:
         stop.set()
+        signal.signal(signal.SIGINT, previous_sigint_handler)
         LOGGER.info(
             "finally mainloop worker_alive=%s root_exists=%s",
             worker_thread.is_alive(),
