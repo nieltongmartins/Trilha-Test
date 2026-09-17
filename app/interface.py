@@ -158,6 +158,23 @@ class AuditApplication(ttk.Frame):
         self.status.set("Conectado ao SharePoint. Clique em Atualizar lista.")
         self._set_action_state()
         logger.info("Resultado da conexão aplicado à UI")
+        root = self.winfo_toplevel()
+        try:
+            logger.info(
+                "Estado da janela após conexão: exists=%s viewable=%s state=%s "
+                "thread=%s origem=_connected motivo=resultado aplicado",
+                root.winfo_exists(),
+                root.winfo_viewable(),
+                root.state(),
+                threading.current_thread().name,
+            )
+        except tk.TclError:
+            logger.error(
+                "Estado da janela após conexão indisponível thread=%s "
+                "origem=_connected motivo=erro Tcl",
+                threading.current_thread().name,
+                exc_info=True,
+            )
 
     def refresh(self) -> None:
         if self.source is None:
