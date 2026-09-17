@@ -12,3 +12,43 @@ def test_application_starts_and_creates_database(tmp_path: Path, monkeypatch) ->
     assert main.main(launch_ui=False) == 0
     assert database_path.is_file()
     assert log_path.is_file()
+
+
+def test_ui_is_created_without_opening_sharepoint(tmp_path: Path, monkeypatch) -> None:
+    events: list[str] = []
+
+    class RootFake:
+        def title(self, _title: str) -> None:
+            events.append("tk")
+
+        def minsize(self, *_size: int) -> None:
+            pass
+
+        def mainloop(self) -> None:
+            events.append("mainloop")
+
+    class ApplicationFake:
+        def __init__(self, _root, _database, source, _reports, **_kwargs) -> None:
+            assert source is None
+            events.append("ui")
+
+        def close_source(self) -> None:
+            pass
+
+    monkeypatch.setenv("AUDIT_DATABASE_PATH", str(tmp_path / "audit.db"))
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.log"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("SHAREPOINT_SITE_URL", raising=False)
+    monkeypatch.delenv("SHAREPOINT_SCOPE_PATHS", raising=False)
+    monkeypatch.setattr(main.tk, "Tk", RootFake)
+    monkeypatch.setattr(main, "AuditApplication", ApplicationFake)
+    monkeypatch.setattr(
+        main.BrowserSharePointSource,
+        "open_edge",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Edge não deve abrir durante a inicialização")
+        ),
+    )
+
+    assert main.main(launch_ui=True) == 0
+    assert events == ["tk", "ui", "mainloop"]

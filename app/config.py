@@ -1,10 +1,48 @@
-"""Configuração da aplicação baseada em variáveis de ambiente."""
+"""Configuração operacional por ambiente e arquivo local não secreto."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
+from typing import Mapping
+from urllib.parse import urlsplit
+
+
+DEFAULT_SHAREPOINT_SITE_URL = "https://hypermarcas.sharepoint.com/controle_qualidade"
+
+
+def default_local_config_path() -> Path:
+    """Retorna um local persistente por usuário, sem depender do diretório atual."""
+    if os.name == "nt" and os.getenv("APPDATA"):
+        return Path(os.environ["APPDATA"]) / "Trilha de Auditoria" / "config.json"
+    config_home = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_home / "trilha-de-auditoria" / "config.json"
+
+
+def _read_local_config(path: Path) -> Mapping[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"Configuração local inválida em {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"Configuração local inválida em {path}: objeto JSON esperado")
+    return payload
+
+
+def _parse_scopes(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        values = value.split(";")
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        values = value
+    elif value is None:
+        values = []
+    else:
+        raise ValueError("Configuração local inválida: sharepoint_scope_paths")
+    return tuple(path.strip() for path in values if path.strip())
 
 
 @dataclass(frozen=True)
@@ -23,10 +61,17 @@ class Settings:
     sharepoint_drive_id: str | None = None
     sharepoint_site_url: str | None = None
     sharepoint_scope_paths: tuple[str, ...] = ()
+    local_config_path: Path | None = None
 
     @classmethod
-    def from_environment(cls) -> "Settings":
-        """Carrega apenas opções locais necessárias nesta fase."""
+    def from_environment(cls, *, config_path: str | Path | None = None) -> "Settings":
+        """Carrega ambiente > arquivo local > padrão, sem persistir segredos."""
+        local_path = Path(config_path) if config_path else default_local_config_path()
+        local = _read_local_config(local_path)
+        local_site = local.get("sharepoint_site_url")
+        if local_site is not None and not isinstance(local_site, str):
+            raise ValueError("Configuração local inválida: sharepoint_site_url")
+        local_scopes = _parse_scopes(local.get("sharepoint_scope_paths"))
         return cls(
             database_path=Path(
                 os.getenv("AUDIT_DATABASE_PATH", "data/database/auditoria.db")
@@ -42,13 +87,48 @@ class Settings:
             sharepoint_client_secret=os.getenv("SHAREPOINT_CLIENT_SECRET") or None,
             sharepoint_site_id=os.getenv("SHAREPOINT_SITE_ID") or None,
             sharepoint_drive_id=os.getenv("SHAREPOINT_DRIVE_ID") or None,
-            sharepoint_site_url=os.getenv("SHAREPOINT_SITE_URL") or None,
-            sharepoint_scope_paths=tuple(
-                path.strip()
-                for path in os.getenv("SHAREPOINT_SCOPE_PATHS", "").split(";")
-                if path.strip()
+            sharepoint_site_url=(
+                os.getenv("SHAREPOINT_SITE_URL")
+                or local_site
+                or DEFAULT_SHAREPOINT_SITE_URL
             ),
+            sharepoint_scope_paths=(
+                _parse_scopes(os.environ["SHAREPOINT_SCOPE_PATHS"])
+                if "SHAREPOINT_SCOPE_PATHS" in os.environ
+                else local_scopes
+            ),
+            local_config_path=local_path,
         )
+
+    def save_browser_sharepoint(
+        self, site_url: str, scope_paths: tuple[str, ...]
+    ) -> None:
+        """Persiste somente localização operacional SharePoint, de forma atômica."""
+        self.validate_browser_sharepoint(site_url, scope_paths)
+        path = self.local_config_path or default_local_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        payload = {
+            "sharepoint_site_url": site_url.strip().rstrip("/"),
+            "sharepoint_scope_paths": list(scope_paths),
+        }
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        temporary.replace(path)
+
+    @staticmethod
+    def validate_browser_sharepoint(
+        site_url: str, scope_paths: tuple[str, ...]
+    ) -> None:
+        """Valida os dois campos não secretos antes de salvar ou conectar."""
+        parsed = urlsplit(site_url.strip())
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("Informe uma URL SharePoint HTTPS válida.")
+        if not scope_paths:
+            raise ValueError("Informe ao menos um caminho/escopo SharePoint.")
+        if any(not path.startswith("/") for path in scope_paths):
+            raise ValueError("Cada caminho/escopo SharePoint deve começar com '/'.")
 
     def require_sharepoint(self) -> tuple[str, str, str, str, str]:
         """Retorna a configuração Graph completa sem expor o segredo em erros."""

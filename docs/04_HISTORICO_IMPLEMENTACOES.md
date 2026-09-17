@@ -722,6 +722,28 @@ a proibição de extrair sessão, o `UniqueId` e o SQLite canônico.
 **Status após a correção:** 🟡 F5 EM VALIDAÇÃO. A fase não está concluída e
 deve ser novamente testada no mesmo Windows corporativo antes de qualquer F6.
 
+## Correção de inicialização identificada no uso real — 17/09/2026
+
+O teste real revelou que `main.py` validava a configuração e chamava
+`BrowserSharePointSource.open_edge()` antes de criar `tk.Tk()` e iniciar
+`mainloop()`. A construção do WebDriver e `browser.get()` eram bloqueantes; por isso
+o Edge aparecia, mas a janela principal ainda nem existia. Além disso, descoberta e
+consulta de versões eram chamadas na thread Tk pelos botões/seleção.
+
+A correção pontual inverte esse fluxo: a configuração local é carregada, a janela é
+criada sem fonte conectada e o `mainloop()` começa sem Selenium ou rede. A tela agora
+expõe URL, escopos e **Conectar**. O clique salva apenas esses dois dados operacionais
+e inicia Edge/Selenium em uma thread de trabalho; login e MFA permanecem manuais. A
+mesma estratégia de worker com retorno via `after()` passou a cobrir descoberta,
+versões, auditoria e relatório, sem sleeps e sem atualizar widgets fora da thread Tk.
+
+A configuração não secreta fica no perfil (`%APPDATA%\Trilha de
+Auditoria\config.json` no Windows), com gravação atômica. A precedência definida é
+ambiente > arquivo local > site inicial conhecido; nenhum escopo transitório foi
+fixado. O arquivo não admite nem grava senha, token, cookie ou credencial. Esta é uma
+correção de defeito da utilização real e não reabre fases concluídas, não altera o
+schema, regras de auditoria ou a política SharePoint read-only.
+
 Foi implementada a interface desktop Python com Tkinter/ttk, integrada ao provider
 Edge/REST e ao `AuditService`. A tela lista e seleciona planilhas, permite atualizar a
 lista depois da autenticação manual no Edge, mostra checkpoint, versão disponível e
