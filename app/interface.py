@@ -9,11 +9,13 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from tkinter import messagebox, ttk
 import tkinter as tk
 
 from app.audit_service import AuditResult, AuditService
 from app.database import Database
+from app.models import AuditExecutionStatus
 from app.report_service import ReportService
 from app.sources.base import SpreadsheetInfo, VersionSource
 
@@ -50,6 +52,10 @@ class AuditApplication(ttk.Frame):
         self._work_results: queue.SimpleQueue[tuple[bool, object]] = (
             queue.SimpleQueue()
         )
+        self._progress_updates: queue.SimpleQueue[tuple[int, int]] = queue.SimpleQueue()
+        self._audit_started_at: float | None = None
+        self._progress_completed = 0
+        self._progress_total = 0
         self.site_url = tk.StringVar(value=site_url)
         self.scope_paths = tk.StringVar(value=";".join(scope_paths))
         self.status = tk.StringVar(
@@ -63,6 +69,8 @@ class AuditApplication(ttk.Frame):
         self._build()
 
     def _build(self) -> None:
+        self.master.columnconfigure(0, weight=1)
+        self.master.rowconfigure(0, weight=1)
         self.grid(sticky="nsew")
         self.columnconfigure(0, weight=1)
         ttk.Label(
@@ -82,7 +90,10 @@ class AuditApplication(ttk.Frame):
         ttk.Entry(config, textvariable=self.scope_paths).grid(
             row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
         )
-        ttk.Label(config, text="Separe vários caminhos por ponto e vírgula.").grid(
+        ttk.Label(
+            config,
+            text="Use o caminho completo da biblioteca/pasta; separe vários por ';'.",
+        ).grid(
             row=2, column=1, sticky="w"
         )
         self.connect_button = ttk.Button(config, text="Conectar", command=self.connect)
@@ -112,6 +123,17 @@ class AuditApplication(ttk.Frame):
         ttk.Label(self, textvariable=self.status, wraplength=720).grid(
             row=5, column=0, sticky="w"
         )
+        self.progress_value = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(
+            self, variable=self.progress_value, maximum=100, mode="determinate"
+        )
+        self.progress_bar.grid(row=6, column=0, sticky="ew", pady=(10, 2))
+        self.progress_text = tk.StringVar(
+            value="Progresso da auditoria: aguardando | Tempo total: 00:00"
+        )
+        ttk.Label(self, textvariable=self.progress_text).grid(
+            row=7, column=0, sticky="w"
+        )
         self._set_action_state()
 
     def _configured_values(self) -> tuple[str, tuple[str, ...]]:
@@ -126,7 +148,6 @@ class AuditApplication(ttk.Frame):
         return site_url, scopes
 
     def connect(self) -> None:
-        logger.info("Callback Conectar iniciado")
         if self.connect_source is None:
             self.status.set("Conexão SharePoint não está disponível.")
             return
@@ -142,7 +163,6 @@ class AuditApplication(ttk.Frame):
             "Conectando ao SharePoint... Conclua o login/MFA no Edge.",
             lambda: connect_source(site_url, scopes),
             self._connected,
-            context="conexao-sharepoint",
         )
 
     def _connected(self, source: VersionSource) -> None:
@@ -157,24 +177,6 @@ class AuditApplication(ttk.Frame):
                 )
         self.status.set("Conectado ao SharePoint. Clique em Atualizar lista.")
         self._set_action_state()
-        logger.info("Resultado da conexão aplicado à UI")
-        root = self.winfo_toplevel()
-        try:
-            logger.info(
-                "Estado da janela após conexão: exists=%s viewable=%s state=%s "
-                "thread=%s origem=_connected motivo=resultado aplicado",
-                root.winfo_exists(),
-                root.winfo_viewable(),
-                root.state(),
-                threading.current_thread().name,
-            )
-        except tk.TclError:
-            logger.error(
-                "Estado da janela após conexão indisponível thread=%s "
-                "origem=_connected motivo=erro Tcl",
-                threading.current_thread().name,
-                exc_info=True,
-            )
 
     def refresh(self) -> None:
         if self.source is None:
@@ -267,13 +269,31 @@ class AuditApplication(ttk.Frame):
             self.status.set("Conecte ao SharePoint antes de auditar.")
             return
         source = self.source
+        self._audit_started_at = time.monotonic()
+        self._progress_completed = 0
+        self._progress_total = 0
+        self.progress_value.set(0)
+        self.progress_text.set(
+            "Progresso da auditoria: preparando | Estimativa: calculando | "
+            "Tempo total: 00:00"
+        )
+
+        def report_progress(completed: int, total: int) -> None:
+            self._progress_updates.put((completed, total))
+
         self._start_work(
             "Auditoria em andamento...",
-            lambda: AuditService(self.database, source).audit(spreadsheet),
+            lambda: AuditService(
+                self.database, source, progress_callback=report_progress
+            ).audit(spreadsheet),
             self._audit_finished,
         )
 
     def _audit_finished(self, result: AuditResult) -> None:
+        if result.status is AuditExecutionStatus.FAILED:
+            self._finish_progress(failed=True)
+        else:
+            self._finish_progress()
         self.status.set(
             f"{result.status.value}: {result.processed_versions} versões, "
             f"{result.changes} alterações."
@@ -309,8 +329,6 @@ class AuditApplication(ttk.Frame):
         message: str,
         operation: Callable[[], object],
         finished: Callable,
-        *,
-        context: str = "operacao-ui",
     ) -> None:
         if self._busy:
             self.status.set("Aguarde a operação atual terminar.")
@@ -320,14 +338,6 @@ class AuditApplication(ttk.Frame):
         self._set_action_state()
 
         def worker() -> None:
-            current = threading.current_thread()
-            logger.info(
-                "Worker iniciado contexto=%s nome=%s ident=%s daemon=%s",
-                context,
-                current.name,
-                current.ident,
-                current.daemon,
-            )
             try:
                 result = operation()
             except Exception as error:
@@ -340,34 +350,14 @@ class AuditApplication(ttk.Frame):
                 self._work_results.put((False, error))
             else:
                 self._work_results.put((True, result))
-                logger.info("Resultado enviado à UI contexto=%s", context)
-            finally:
-                logger.info(
-                    "Worker terminou contexto=%s nome=%s ident=%s daemon=%s",
-                    context,
-                    current.name,
-                    current.ident,
-                    current.daemon,
-                )
 
         # Tk, including ``after``, is only accessed by the main thread.  The
         # worker communicates exclusively through this queue.
         self.after(50, self._poll_work_result, finished)
-        worker_thread = threading.Thread(
-            target=worker,
-            name=f"auditoria-{context}",
-            daemon=True,
-        )
-        logger.info(
-            "Worker criada contexto=%s nome=%s ident=%s daemon=%s",
-            context,
-            worker_thread.name,
-            worker_thread.ident,
-            worker_thread.daemon,
-        )
-        worker_thread.start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def _poll_work_result(self, finished: Callable) -> None:
+        self._poll_progress_updates()
         try:
             succeeded, result = self._work_results.get_nowait()
         except queue.Empty:
@@ -387,7 +377,71 @@ class AuditApplication(ttk.Frame):
     def _work_failed(self, error: Exception) -> None:
         self._busy = False
         self._set_action_state()
+        if getattr(self, "_audit_started_at", None) is not None:
+            elapsed = time.monotonic() - self._audit_started_at
+            self.progress_text.set(
+                f"Auditoria interrompida | Tempo total: {self._format_duration(elapsed)}"
+            )
+            self._audit_started_at = None
         self.status.set(f"Falha na operação: {error}")
+
+    def _poll_progress_updates(self) -> None:
+        if not hasattr(self, "_progress_updates"):
+            return
+        while True:
+            try:
+                completed, total = self._progress_updates.get_nowait()
+            except queue.Empty:
+                break
+            self._update_progress(completed, total)
+        if getattr(self, "_audit_started_at", None) is not None:
+            self._update_progress(self._progress_completed, self._progress_total)
+
+    def _update_progress(self, completed: int, total: int) -> None:
+        if self._audit_started_at is None:
+            return
+        self._progress_completed = completed
+        self._progress_total = total
+        elapsed = time.monotonic() - self._audit_started_at
+        percent = 0 if total <= 0 else completed / total * 100
+        self.progress_value.set(percent)
+        if completed > 0 and completed < total:
+            remaining = elapsed / completed * (total - completed)
+            estimate = self._format_duration(remaining)
+        elif total > 0 and completed >= total:
+            estimate = "00:00"
+        else:
+            estimate = "calculando"
+        self.progress_text.set(
+            f"Progresso da auditoria: {completed}/{total} ({percent:.0f}%) | "
+            f"Estimativa: {estimate} | Tempo total: {self._format_duration(elapsed)}"
+        )
+
+    def _finish_progress(self, *, failed: bool = False) -> None:
+        if self._audit_started_at is None:
+            return
+        elapsed = time.monotonic() - self._audit_started_at
+        if failed:
+            self.progress_text.set(
+                "Auditoria interrompida | "
+                f"Tempo total: {self._format_duration(elapsed)}"
+            )
+        else:
+            self.progress_value.set(100)
+            self.progress_text.set(
+                f"Progresso da auditoria: concluída (100%) | "
+                f"Tempo total: {self._format_duration(elapsed)}"
+            )
+        self._audit_started_at = None
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        total_seconds = max(0, round(seconds))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
 
     def _set_action_state(self) -> None:
         state = "disabled" if self._busy else "normal"

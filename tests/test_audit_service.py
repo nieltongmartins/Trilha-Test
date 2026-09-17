@@ -91,10 +91,16 @@ def test_local_source_lists_identity_versions_and_historical_file(
 def test_complete_audit_records_changes_empty_version_checkpoint_and_execution(
     database: Database, local_history: list[tuple[VersionInfo, Path]],
 ) -> None:
-    result = AuditService(database, source(local_history)).audit(SPREADSHEET)
+    progress: list[tuple[int, int]] = []
+    result = AuditService(
+        database,
+        source(local_history),
+        progress_callback=lambda completed, total: progress.append((completed, total)),
+    ).audit(SPREADSHEET)
     connection = database.connection
 
     assert result.status is AuditExecutionStatus.COMPLETED
+    assert progress == [(0, 3), (1, 3), (2, 3), (3, 3)]
     assert (result.processed_versions, result.changes, result.final_version) == (3, 4, "0.99")
     checkpoint = connection.execute("SELECT * FROM checkpoint").fetchone()
     assert (checkpoint["versao_id"], checkpoint["versao_numero"]) == (
