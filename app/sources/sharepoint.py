@@ -146,13 +146,7 @@ class BrowserSharePointSource:
             site_url,
             len(scope_paths),
         )
-        logger.info("Iniciando webdriver.Edge")
-        webdriver_started = time.monotonic()
         browser = webdriver.Edge(options=options)
-        logger.info(
-            "webdriver.Edge concluído; driver criado duração=%.3fs",
-            time.monotonic() - webdriver_started,
-        )
         try:
             source = cls(
                 site_url,
@@ -167,13 +161,7 @@ class BrowserSharePointSource:
             browser.quit()
             download_workspace.close()
             raise
-        logger.info("Iniciando browser.get")
-        navigation_started = time.monotonic()
         browser.get(site_url)
-        logger.info(
-            "browser.get concluído duração=%.3fs",
-            time.monotonic() - navigation_started,
-        )
         logger.info(
             "Edge aberto; aguardando autenticação manual do usuário site=%s",
             site_url,

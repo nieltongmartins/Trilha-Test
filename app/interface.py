@@ -126,7 +126,6 @@ class AuditApplication(ttk.Frame):
         return site_url, scopes
 
     def connect(self) -> None:
-        logger.info("Callback Conectar iniciado")
         if self.connect_source is None:
             self.status.set("Conexão SharePoint não está disponível.")
             return
@@ -142,7 +141,6 @@ class AuditApplication(ttk.Frame):
             "Conectando ao SharePoint... Conclua o login/MFA no Edge.",
             lambda: connect_source(site_url, scopes),
             self._connected,
-            context="conexao-sharepoint",
         )
 
     def _connected(self, source: VersionSource) -> None:
@@ -157,24 +155,6 @@ class AuditApplication(ttk.Frame):
                 )
         self.status.set("Conectado ao SharePoint. Clique em Atualizar lista.")
         self._set_action_state()
-        logger.info("Resultado da conexão aplicado à UI")
-        root = self.winfo_toplevel()
-        try:
-            logger.info(
-                "Estado da janela após conexão: exists=%s viewable=%s state=%s "
-                "thread=%s origem=_connected motivo=resultado aplicado",
-                root.winfo_exists(),
-                root.winfo_viewable(),
-                root.state(),
-                threading.current_thread().name,
-            )
-        except tk.TclError:
-            logger.error(
-                "Estado da janela após conexão indisponível thread=%s "
-                "origem=_connected motivo=erro Tcl",
-                threading.current_thread().name,
-                exc_info=True,
-            )
 
     def refresh(self) -> None:
         if self.source is None:
@@ -309,8 +289,6 @@ class AuditApplication(ttk.Frame):
         message: str,
         operation: Callable[[], object],
         finished: Callable,
-        *,
-        context: str = "operacao-ui",
     ) -> None:
         if self._busy:
             self.status.set("Aguarde a operação atual terminar.")
@@ -320,14 +298,6 @@ class AuditApplication(ttk.Frame):
         self._set_action_state()
 
         def worker() -> None:
-            current = threading.current_thread()
-            logger.info(
-                "Worker iniciado contexto=%s nome=%s ident=%s daemon=%s",
-                context,
-                current.name,
-                current.ident,
-                current.daemon,
-            )
             try:
                 result = operation()
             except Exception as error:
@@ -340,32 +310,11 @@ class AuditApplication(ttk.Frame):
                 self._work_results.put((False, error))
             else:
                 self._work_results.put((True, result))
-                logger.info("Resultado enviado à UI contexto=%s", context)
-            finally:
-                logger.info(
-                    "Worker terminou contexto=%s nome=%s ident=%s daemon=%s",
-                    context,
-                    current.name,
-                    current.ident,
-                    current.daemon,
-                )
 
         # Tk, including ``after``, is only accessed by the main thread.  The
         # worker communicates exclusively through this queue.
         self.after(50, self._poll_work_result, finished)
-        worker_thread = threading.Thread(
-            target=worker,
-            name=f"auditoria-{context}",
-            daemon=True,
-        )
-        logger.info(
-            "Worker criada contexto=%s nome=%s ident=%s daemon=%s",
-            context,
-            worker_thread.name,
-            worker_thread.ident,
-            worker_thread.daemon,
-        )
-        worker_thread.start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def _poll_work_result(self, finished: Callable) -> None:
         try:
