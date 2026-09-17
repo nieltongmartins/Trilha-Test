@@ -9,7 +9,7 @@ import re
 import shutil
 import time
 from typing import Any, Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 import zipfile
 
 from app.sources.base import SpreadsheetInfo, VersionInfo
@@ -78,6 +78,17 @@ def _escape_odata_path(path: str) -> str:
     return quote(path.replace("'", "''"), safe="/'()$=,:?&")
 
 
+def _normalize_scope_path(scope_path: str, site_path: str) -> str:
+    """Converte um caminho relativo ao site em server-relative URL."""
+    scope = "/" + unquote(scope_path).strip("/")
+    site = "/" + unquote(site_path).strip("/") if site_path.strip("/") else ""
+    if site and scope.casefold() != site.casefold() and not scope.casefold().startswith(
+        site.casefold() + "/"
+    ):
+        return f"{site}/{scope.lstrip('/')}"
+    return scope
+
+
 class BrowserSharePointSource:
     """Descobre, enumera e baixa XLSX por GET read-only no próprio Edge."""
 
@@ -99,7 +110,11 @@ class BrowserSharePointSource:
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("A URL do site SharePoint deve usar HTTPS")
         scopes = tuple(
-            dict.fromkeys(path.rstrip("/") for path in scope_paths if path.rstrip("/"))
+            dict.fromkeys(
+                _normalize_scope_path(path, parsed.path)
+                for path in scope_paths
+                if path.strip("/")
+            )
         )
         if not scopes:
             raise ValueError("Ao menos um escopo SharePoint deve ser configurado")
@@ -146,13 +161,7 @@ class BrowserSharePointSource:
             site_url,
             len(scope_paths),
         )
-        logger.info("Iniciando webdriver.Edge")
-        webdriver_started = time.monotonic()
         browser = webdriver.Edge(options=options)
-        logger.info(
-            "webdriver.Edge concluído; driver criado duração=%.3fs",
-            time.monotonic() - webdriver_started,
-        )
         try:
             source = cls(
                 site_url,
@@ -167,13 +176,7 @@ class BrowserSharePointSource:
             browser.quit()
             download_workspace.close()
             raise
-        logger.info("Iniciando browser.get")
-        navigation_started = time.monotonic()
         browser.get(site_url)
-        logger.info(
-            "browser.get concluído duração=%.3fs",
-            time.monotonic() - navigation_started,
-        )
         logger.info(
             "Edge aberto; aguardando autenticação manual do usuário site=%s",
             site_url,
