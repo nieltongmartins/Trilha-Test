@@ -145,6 +145,17 @@ class AuditApplication(ttk.Frame):
                 if part.strip()
             )
         )
+        folders = tuple(
+            dict.fromkeys(
+                part.strip().strip("/")
+                for part in self.folder_names.get().split(";")
+                if part.strip().strip("/")
+            )
+        )
+        if folders:
+            scopes = tuple(
+                f"{scope.rstrip('/')}/{folder}" for scope in scopes for folder in folders
+            )
         return site_url, scopes
 
     def connect(self) -> None:
