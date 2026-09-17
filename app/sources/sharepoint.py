@@ -163,19 +163,6 @@ class BrowserSharePointSource:
         self._owns_browser = owns_browser
         self._workspace = TemporaryWorkspace(temp_directory)
 
-    def set_scope_paths(self, scope_paths: Sequence[str]) -> None:
-        """Atualiza raízes de leitura sem recriar a sessão autenticada."""
-        scopes = tuple(
-            dict.fromkeys(
-                _normalize_scope_path(path, self._site_path)
-                for path in scope_paths
-                if path.strip("/")
-            )
-        )
-        if not scopes:
-            raise ValueError("Ao menos um escopo SharePoint deve ser configurado")
-        self.scope_paths = scopes
-
     @classmethod
     def open_edge(
         cls,

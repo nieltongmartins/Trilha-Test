@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import sqlite3
+from collections.abc import Callable
 from uuid import uuid4
 
 from app.database import Database
@@ -32,9 +33,15 @@ class AuditResult:
 class AuditService:
     """Executa comparações consecutivas e confirma cada uma atomicamente."""
 
-    def __init__(self, database: Database, source: VersionSource) -> None:
+    def __init__(
+        self,
+        database: Database,
+        source: VersionSource,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
         self.database = database
         self.source = source
+        self.progress_callback = progress_callback
 
     def audit(self, spreadsheet: SpreadsheetInfo) -> AuditResult:
         connection = self.database.connection
@@ -80,6 +87,7 @@ class AuditService:
                 len(versions),
                 len(pairs),
             )
+            self._report_progress(0, len(pairs))
         except Exception as error:
             return self._record_failure(
                 connection, execution_id, spreadsheet_id, execution_code,
@@ -140,6 +148,7 @@ class AuditService:
                     initial_checkpoint, processed, total_changes, previous, current, error,
                 )
             processed += 1
+            self._report_progress(processed, len(pairs))
             total_changes += len(changes)
             final = current.number
             previous_snapshot = current_snapshot
@@ -160,6 +169,13 @@ class AuditService:
             execution_code, AuditExecutionStatus.COMPLETED, processed,
             total_changes, initial_checkpoint, final,
         )
+
+    def _report_progress(self, completed: int, total: int) -> None:
+        if self.progress_callback is not None:
+            try:
+                self.progress_callback(completed, total)
+            except Exception:
+                logger.warning("Falha ao publicar progresso da auditoria", exc_info=True)
 
     def _read_temporary_version(
         self, spreadsheet: SpreadsheetInfo, version: VersionInfo

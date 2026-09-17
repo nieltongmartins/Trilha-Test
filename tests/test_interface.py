@@ -238,6 +238,29 @@ def test_versions_read_error_is_presented_without_closing_interface() -> None:
     assert application.status.value == "Falha na operação: resposta REST incompatível"
 
 
+def test_audit_progress_displays_percentage_estimate_and_elapsed(monkeypatch) -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application._audit_started_at = 90.0
+    application._progress_completed = 0
+    application._progress_total = 0
+    application.progress_value = VariableFake()
+    application.progress_text = VariableFake()
+    monkeypatch.setattr("app.interface.time.monotonic", lambda: 100.0)
+
+    application._update_progress(1, 4)
+
+    assert application.progress_value.value == 25
+    assert application.progress_text.value == (
+        "Progresso da auditoria: 1/4 (25%) | Estimativa: 00:30 | "
+        "Tempo total: 00:10"
+    )
+
+
+def test_duration_uses_hours_only_when_needed() -> None:
+    assert AuditApplication._format_duration(65) == "01:05"
+    assert AuditApplication._format_duration(3661) == "01:01:01"
+
+
 def test_constructor_waits_for_manual_authentication_before_sharepoint_calls(
     monkeypatch,
 ) -> None:
