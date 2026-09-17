@@ -10,7 +10,7 @@ from app.config import Settings
 from app.database import Database
 from app.models import AuditExecutionStatus
 from app.sources import BrowserSharePointSource, SharePointReadError, SpreadsheetInfo
-from app.sources.sharepoint import _odata_object
+from app.sources.sharepoint import _normalize_scope_path, _odata_object
 
 SITE = "https://tenant.sharepoint.com/sites/qualidade"
 ROOT = "/sites/qualidade/Documentos Compartilhados"
@@ -59,6 +59,20 @@ class FakeBrowser:
         assert "arrayBuffer" not in script
         self.calls.append(url)
         value = self._response(url)
+        if "response.blob()" in script:
+            assert self.download_directory is not None
+            filename = str(args[1])
+            self.visited.append(url)
+            if isinstance(value, bytes):
+                (self.download_directory / filename).write_bytes(value)
+                return {"ok": True}
+            if value == "partial":
+                (self.download_directory / f"{filename}.crdownload").write_bytes(
+                    b"parcial"
+                )
+                return {"ok": True}
+            if isinstance(value, Exception):
+                return {"error": str(value)}
         if isinstance(value, Exception):
             return {"error": str(value)}
         return {"json": value}
@@ -166,6 +180,39 @@ def test_odata_object_accepts_real_nometadata_entity_and_legacy_envelopes() -> N
     assert _odata_object({"d": direct}) is direct
     with pytest.raises(SharePointReadError, match="objeto inválido"):
         _odata_object({"value": [direct]})
+
+
+def test_scope_relative_to_site_is_converted_to_server_relative_path() -> None:
+    assert (
+        _normalize_scope_path("/Documentos Compartilhados1", "/controle_qualidade")
+        == "/controle_qualidade/Documentos Compartilhados1"
+    )
+    assert (
+        _normalize_scope_path(
+            "/controle_qualidade/Documentos Compartilhados1",
+            "/controle_qualidade",
+        )
+        == "/controle_qualidade/Documentos Compartilhados1"
+    )
+
+
+def test_source_uses_normalized_scope_in_sharepoint_request(tmp_path: Path) -> None:
+    browser = FakeBrowser(discovery_responses())
+    source = BrowserSharePointSource(
+        SITE,
+        ["/Documentos Compartilhados"],
+        browser,
+        temp_directory=tmp_path,
+    )
+
+    with source:
+        source.list_spreadsheets()
+
+    assert source.scope_paths == (ROOT,)
+    assert any(
+        "/sites/qualidade/Documentos%20Compartilhados')" in url
+        for url in browser.calls
+    )
 
 
 def test_wait_until_authenticated_validates_site_with_rest(
@@ -320,6 +367,26 @@ def test_downloads_historical_and_current_using_distinct_read_only_endpoints(
         "/$value"
     )
     assert all("/_api/" in url for url in browser.visited)
+
+
+def test_download_failure_from_fetch_is_reported_without_waiting(
+    tmp_path: Path,
+) -> None:
+    source, _ = make_source(
+        tmp_path,
+        {"Versions(7)/$value": RuntimeError("HTTP 403")},
+    )
+    spreadsheet = SpreadsheetInfo(
+        SITE,
+        "sharepoint-rest",
+        "UUID-A",
+        "Arquivo.xlsx",
+        f"{ROOT}/Setor A/Arquivo.xlsx",
+    )
+    from app.sources.base import VersionInfo
+
+    with source, pytest.raises(SharePointReadError, match="HTTP 403"):
+        source.get_version(spreadsheet, VersionInfo("7", "0.7"))
 
 
 def test_rejects_invalid_open_xml_and_incomplete_download(tmp_path: Path) -> None:

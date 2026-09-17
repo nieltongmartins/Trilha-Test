@@ -66,6 +66,7 @@ def _application_for_connection(
     application.site_url.value = "https://tenant.sharepoint.com/site"
     application.scope_paths = VariableFake()
     application.scope_paths.value = "/site/Documentos"
+    application.folder_names = VariableFake()
     application.status = VariableFake()
     application.source = None
     application._busy = False
@@ -75,6 +76,19 @@ def _application_for_connection(
     application.audit_button = ButtonFake()
     application.report_button = ButtonFake()
     return application, scheduler
+
+
+def test_folder_names_are_appended_to_each_scope() -> None:
+    application, _ = _application_for_connection(lambda *_args: None)
+    application.folder_names.value = "Financeiro; Qualidade/Testes"
+
+    assert application._configured_values() == (
+        "https://tenant.sharepoint.com/site",
+        (
+            "/site/Documentos/Financeiro",
+            "/site/Documentos/Qualidade/Testes",
+        ),
+    )
 
 
 def test_connect_keeps_interface_alive_and_finishes_on_tk_thread() -> None:
