@@ -20,8 +20,18 @@ class VariableFake:
 
 
 class SelectorFake:
-    def current(self) -> int:
-        return 0
+    def __init__(self) -> None:
+        self.index = 0
+        self.values = []
+
+    def current(self, index: int | None = None) -> int:
+        if index is not None:
+            self.index = index
+        return self.index
+
+    def __setitem__(self, key: str, value: object) -> None:
+        assert key == "values"
+        self.values = value
 
 
 class ButtonFake:
@@ -66,6 +76,9 @@ def _application_for_connection(
     application.site_url.value = "https://tenant.sharepoint.com/site"
     application.scope_paths = VariableFake()
     application.scope_paths.value = "/site/Documentos"
+    application.selected_folder = VariableFake()
+    application.folder_paths = []
+    application.folder_selector = SelectorFake()
     application.status = VariableFake()
     application.source = None
     application._busy = False
@@ -75,6 +88,41 @@ def _application_for_connection(
     application.audit_button = ButtonFake()
     application.report_button = ButtonFake()
     return application, scheduler
+
+
+def test_selected_folder_is_copied_to_scope_and_active_source() -> None:
+    configured: list[tuple[str, ...]] = []
+
+    class Source:
+        def set_scope_paths(self, scopes: tuple[str, ...]) -> None:
+            configured.append(scopes)
+
+    application, _ = _application_for_connection(lambda *_args: None)
+    application.source = Source()
+    application.folder_paths = ["/site/Documentos/Qualidade"]
+
+    application.copy_folder_to_scope()
+
+    assert application.scope_paths.value == "/site/Documentos/Qualidade"
+    assert configured == [("/site/Documentos/Qualidade",)]
+    assert application.status.value == "Escopo atualizado. Clique em Atualizar lista."
+
+
+def test_loaded_folders_populate_readonly_selection() -> None:
+    application, _ = _application_for_connection(lambda *_args: None)
+
+    application._folders_loaded(
+        [
+            ("Financeiro", "/site/Documentos/Financeiro"),
+            ("Qualidade", "/site/Documentos/Qualidade"),
+        ]
+    )
+
+    assert application.folder_selector.values == ["Financeiro", "Qualidade"]
+    assert application.folder_paths == [
+        "/site/Documentos/Financeiro",
+        "/site/Documentos/Qualidade",
+    ]
 
 
 def test_connect_keeps_interface_alive_and_finishes_on_tk_thread() -> None:
