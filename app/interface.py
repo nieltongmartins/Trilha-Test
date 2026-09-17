@@ -52,7 +52,9 @@ class AuditApplication(ttk.Frame):
         )
         self.site_url = tk.StringVar(value=site_url)
         self.scope_paths = tk.StringVar(value=";".join(scope_paths))
-        self.selected_folder = tk.StringVar(value="")
+        # Preserve the public attribute used by installations upgraded from the
+        # first folder-field implementation. It now backs the read-only selector.
+        self.folder_names = tk.StringVar(value="")
         self.folder_paths: list[str] = []
         self.status = tk.StringVar(
             value=(
@@ -88,7 +90,7 @@ class AuditApplication(ttk.Frame):
             row=2, column=0, sticky="w", pady=(6, 0)
         )
         self.folder_selector = ttk.Combobox(
-            config, textvariable=self.selected_folder, state="readonly"
+            config, textvariable=self.folder_names, state="readonly"
         )
         self.folder_selector.grid(
             row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)

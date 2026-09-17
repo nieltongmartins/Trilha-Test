@@ -76,7 +76,7 @@ def _application_for_connection(
     application.site_url.value = "https://tenant.sharepoint.com/site"
     application.scope_paths = VariableFake()
     application.scope_paths.value = "/site/Documentos"
-    application.selected_folder = VariableFake()
+    application.folder_names = VariableFake()
     application.folder_paths = []
     application.folder_selector = SelectorFake()
     application.status = VariableFake()
@@ -106,6 +106,16 @@ def test_selected_folder_is_copied_to_scope_and_active_source() -> None:
     assert application.scope_paths.value == "/site/Documentos/Qualidade"
     assert configured == [("/site/Documentos/Qualidade",)]
     assert application.status.value == "Escopo atualizado. Clique em Atualizar lista."
+
+
+def test_folder_selection_does_not_change_scope_before_copy() -> None:
+    application, _ = _application_for_connection(lambda *_args: None)
+    application.folder_names.value = "Qualidade"
+
+    assert application._configured_values() == (
+        "https://tenant.sharepoint.com/site",
+        ("/site/Documentos",),
+    )
 
 
 def test_loaded_folders_populate_readonly_selection() -> None:
@@ -252,3 +262,4 @@ def test_constructor_waits_for_manual_authentication_before_sharepoint_calls(
 
     assert calls == []
     assert application.source is None
+    assert hasattr(application, "folder_names")
