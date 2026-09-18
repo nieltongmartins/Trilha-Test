@@ -18,7 +18,9 @@ from app.audit_storage import AuditStorageManager, RestoreConflictError
 from app.database import Database
 from app.models import AuditExecutionStatus
 from app.report_service import ReportService
+from app.report_artifacts import ReportArtifactManager
 from app.sources.base import SpreadsheetInfo, VersionSource
+from app.spreadsheet_comparator import ComparatorFrame
 
 
 logger = logging.getLogger("auditoria_excel.interface")
@@ -49,6 +51,9 @@ class AuditApplication(ttk.Frame):
         self.save_configuration = save_configuration
         self.reports_directory = Path(reports_directory)
         self.storage = AuditStorageManager(database, backups_directory)
+        self.report_artifacts = ReportArtifactManager(
+            getattr(database, "connection", database), self.reports_directory
+        )
         self.spreadsheets: list[SpreadsheetInfo] = []
         self.last_report: Path | None = None
         self._busy = False
@@ -59,6 +64,7 @@ class AuditApplication(ttk.Frame):
         self._audit_started_at: float | None = None
         self._progress_completed = 0
         self._progress_total = 0
+        self._hidden_clicks: list[float] = []
         self.site_url = tk.StringVar(value=site_url)
         self.scope_paths = tk.StringVar(value=";".join(scope_paths))
         # Preserve the public attribute used by installations upgraded from the
@@ -87,10 +93,15 @@ class AuditApplication(ttk.Frame):
         stored_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(audit_tab, text="Auditoria")
         self.notebook.add(stored_tab, text="Auditorias armazenadas")
+        self._audit_tab = audit_tab
+        self._comparator_tab = None
         audit_tab.columnconfigure(0, weight=1)
-        ttk.Label(
+        title_label = ttk.Label(
             audit_tab, text="Auditor de Planilhas", font=("TkDefaultFont", 14, "bold")
-        ).grid(sticky="w")
+        )
+        title_label.grid(sticky="w")
+        # Gesto deliberado e invisível: cinco cliques no título existente.
+        title_label.bind("<Button-1>", self._hidden_comparator_gesture)
 
         config = ttk.LabelFrame(audit_tab, text="Conexão SharePoint", padding=8)
         config.grid(row=1, column=0, sticky="ew", pady=(8, 4))
@@ -168,12 +179,14 @@ class AuditApplication(ttk.Frame):
         scroll = ttk.Scrollbar(tab, orient="vertical", command=self.stored_tree.yview)
         scroll.grid(row=1, column=1, sticky="ns", pady=8)
         self.stored_tree.configure(yscrollcommand=scroll.set)
+        self.stored_tree.bind("<<TreeviewSelect>>", self._stored_selection_changed)
         actions = ttk.Frame(tab)
         actions.grid(row=2, column=0, columnspan=2, sticky="ew")
         definitions = (
             ("Atualizar", self.refresh_stored),
             ("Backup selecionado", self.backup_selected),
             ("Restaurar selecionado", self.restore_individual),
+            ("Abrir relatório", self.open_stored_report),
             ("Excluir auditoria selecionada", self.delete_selected),
             ("Backup completo", self.backup_complete),
             ("Restaurar backup completo", self.restore_complete),
@@ -184,6 +197,38 @@ class AuditApplication(ttk.Frame):
             button = ttk.Button(actions, text=text, command=command)
             button.grid(row=index // 4, column=index % 4, sticky="ew", padx=(0, 5), pady=3)
             self.storage_buttons.append(button)
+            if text == "Abrir relatório":
+                self.open_stored_report_button = button
+        self._stored_selection_changed()
+
+    def _stored_selection_changed(self, _event: object = None) -> None:
+        if hasattr(self, "open_stored_report_button"):
+            state = "normal" if self.stored_tree.selection() and not self._busy else "disabled"
+            self.open_stored_report_button.configure(state=state)
+
+    def _hidden_comparator_gesture(self, _event: object = None) -> None:
+        now = time.monotonic()
+        self._hidden_clicks = [click for click in self._hidden_clicks if now - click <= 2.0]
+        self._hidden_clicks.append(now)
+        if len(self._hidden_clicks) >= 5:
+            self._hidden_clicks.clear()
+            self._show_comparator()
+
+    def _show_comparator(self) -> None:
+        if self._comparator_tab is None:
+            self._comparator_tab = ComparatorFrame(
+                self.notebook, on_close=self._hide_comparator
+            )
+            self.notebook.add(self._comparator_tab, text="Comparador de Planilhas")
+        self.notebook.select(self._comparator_tab)
+
+    def _hide_comparator(self) -> None:
+        if self._comparator_tab is None:
+            return
+        self.notebook.select(self._audit_tab)
+        self.notebook.forget(self._comparator_tab)
+        self._comparator_tab.destroy()
+        self._comparator_tab = None
 
     def refresh_stored(self) -> None:
         if not hasattr(self, "stored_tree"):
@@ -249,7 +294,32 @@ class AuditApplication(ttk.Frame):
             return
         if not messagebox.askyesno("Excluir auditoria local", f"Excluir permanentemente a auditoria local de '{name}'?\n\nO arquivo no SharePoint não será alterado."):
             return
-        self._start_work("Excluindo auditoria local...", lambda: self.storage.delete_individual(spreadsheet_id), self._storage_finished)
+        def operation() -> None:
+            report = self.report_artifacts.locate(spreadsheet_id)
+            self.report_artifacts.delete_with_database(
+                [report] if report else [],
+                lambda: self.storage.delete_individual(spreadsheet_id),
+            )
+        self._start_work("Excluindo auditoria local...", operation, self._storage_finished)
+
+    def open_stored_report(self) -> None:
+        try:
+            spreadsheet_id, _ = self._selected_stored()
+            report = self.report_artifacts.locate(spreadsheet_id)
+        except ValueError as error:
+            messagebox.showinfo("Auditorias armazenadas", str(error))
+            return
+        if report is None:
+            messagebox.showinfo(
+                "Auditorias armazenadas",
+                "Não existe relatório gerado para esta auditoria.",
+            )
+            return
+        try:
+            self._open_file(report)
+        except OSError as error:
+            logger.exception("Falha ao abrir relatório armazenado arquivo=%s", report)
+            messagebox.showerror("Auditorias armazenadas", f"Não foi possível abrir o relatório: {error}")
 
     def restore_complete(self) -> None:
         path = filedialog.askopenfilename(title="Selecionar backup completo", filetypes=(("Backup SQLite", "*.sqlite3"),))
@@ -260,10 +330,13 @@ class AuditApplication(ttk.Frame):
     def delete_all_audits(self) -> None:
         if not messagebox.askyesno("Excluir todas as auditorias", "Esta operação excluirá permanentemente todas as auditorias armazenadas localmente. Os arquivos do SharePoint não serão alterados.\n\nDeseja continuar?"):
             return
-        if messagebox.askyesno("Backup de proteção", "Fazer backup completo antes de excluir?"):
-            operation = lambda: (self.storage.backup_full(), self.storage.delete_all())
-        else:
-            operation = self.storage.delete_all
+        identities = [self.report_artifacts.identity(audit.id) for audit in self.storage.list_audits()]
+        reports = self.report_artifacts.controlled_paths(identities)
+        backup = messagebox.askyesno("Backup de proteção", "Fazer backup completo antes de excluir?")
+        def operation() -> object:
+            backup_path = self.storage.backup_full() if backup else None
+            self.report_artifacts.delete_with_database(reports, self.storage.delete_all)
+            return backup_path
         self._start_work("Excluindo todas as auditorias locais...", operation, self._storage_finished)
 
     def _storage_finished(self, result: object) -> None:
@@ -609,6 +682,7 @@ class AuditApplication(ttk.Frame):
                 getattr(self, name).configure(state=connected_state)
         for button in getattr(self, "storage_buttons", ()):
             button.configure(state=state)
+        self._stored_selection_changed()
 
     def close_source(self) -> None:
         if self.source is not None:
@@ -621,11 +695,15 @@ class AuditApplication(ttk.Frame):
         if self.last_report is None or not self.last_report.exists():
             messagebox.showinfo("Relatório", "Gere o relatório primeiro.")
             return
+        self._open_file(self.last_report)
+
+    @staticmethod
+    def _open_file(path: Path) -> None:
         if sys.platform == "win32":
             import os
 
-            os.startfile(self.last_report)  # type: ignore[attr-defined]
+            os.startfile(path)  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
-            subprocess.Popen(("open", str(self.last_report)))
+            subprocess.Popen(("open", str(path)))
         else:
-            subprocess.Popen(("xdg-open", str(self.last_report)))
+            subprocess.Popen(("xdg-open", str(path)))

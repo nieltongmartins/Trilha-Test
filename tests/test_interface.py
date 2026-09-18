@@ -35,8 +35,12 @@ class SelectorFake:
 
 
 class ButtonFake:
-    def configure(self, **_kwargs: object) -> None:
-        pass
+    def __init__(self) -> None:
+        self.state = "normal"
+
+    def configure(self, **kwargs: object) -> None:
+        if "state" in kwargs:
+            self.state = kwargs["state"]
 
 
 class SchedulerFake:
@@ -310,3 +314,70 @@ def test_constructor_waits_for_manual_authentication_before_sharepoint_calls(
     assert calls == []
     assert application.source is None
     assert hasattr(application, "folder_names")
+
+
+def test_stored_report_button_follows_selection() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application._busy = False
+    application.open_stored_report_button = ButtonFake()
+    application.stored_tree = type(
+        "Tree", (), {"selection": lambda self: ()}
+    )()
+    application._stored_selection_changed()
+    assert application.open_stored_report_button.state == "disabled"
+
+    application.stored_tree = type(
+        "Tree", (), {"selection": lambda self: ("1",)}
+    )()
+    application._stored_selection_changed()
+    assert application.open_stored_report_button.state == "normal"
+
+
+def test_hidden_gesture_requires_five_clicks_and_does_not_duplicate(monkeypatch) -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application._hidden_clicks = []
+    calls = []
+    application._show_comparator = lambda: calls.append("show")
+    ticks = iter((1.0, 1.1, 1.2, 1.3, 1.4, 1.5))
+    monkeypatch.setattr("app.interface.time.monotonic", lambda: next(ticks))
+
+    for _ in range(4):
+        application._hidden_comparator_gesture()
+    assert calls == []
+    application._hidden_comparator_gesture()
+    assert calls == ["show"]
+    application._hidden_comparator_gesture()
+    assert calls == ["show"]
+
+
+def test_open_stored_report_opens_exact_existing_artifact(monkeypatch, tmp_path: Path) -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    report = tmp_path / "exact.xlsx"
+    report.write_bytes(b"xlsx")
+    application._selected_stored = lambda: (7, "Audit")
+    application.report_artifacts = type(
+        "Artifacts", (), {"locate": lambda self, identifier: report if identifier == 7 else None}
+    )()
+    opened = []
+    application._open_file = lambda path: opened.append(path)
+    infos = []
+    monkeypatch.setattr("app.interface.messagebox.showinfo", lambda *args: infos.append(args))
+
+    application.open_stored_report()
+
+    assert opened == [report]
+    assert infos == []
+
+
+def test_open_stored_report_does_not_generate_when_missing(monkeypatch) -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application._selected_stored = lambda: (7, "Audit")
+    application.report_artifacts = type(
+        "Artifacts", (), {"locate": lambda self, identifier: None}
+    )()
+    messages = []
+    monkeypatch.setattr("app.interface.messagebox.showinfo", lambda *args: messages.append(args))
+
+    application.open_stored_report()
+
+    assert "Não existe relatório gerado" in messages[0][1]
