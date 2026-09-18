@@ -53,6 +53,7 @@ def main(*, launch_ui: bool | None = None) -> int:
             database,
             None,
             settings.reports_directory,
+            backups_directory=settings.backups_directory,
             site_url=settings.sharepoint_site_url or "",
             scope_paths=settings.sharepoint_scope_paths,
             connect_source=connect_source,

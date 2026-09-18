@@ -112,3 +112,33 @@ validação Open XML. O SharePoint permanece estritamente somente leitura.
 10. Feche a aplicação e o Edge.
 11. Abra novamente com `python main.py`.
 12. Confirme que site e escopo foram recuperados sem comandos `$env:`.
+
+## Auditorias armazenadas e backups locais
+
+A guia **Auditorias armazenadas** consulta exclusivamente o SQLite local e não
+abre nem utiliza uma conexão SharePoint. Ela lista a identidade conhecida, o
+caminho, a versão/checkpoint, as contagens e a última execução de cada planilha.
+As ações da guia afetam somente a trilha local; arquivos no SharePoint nunca são
+alterados ou excluídos.
+
+Os backups são gravados em `data/backups/` (ou em
+`AUDIT_BACKUPS_DIRECTORY`) sem sobrescrever arquivos anteriores:
+
+- o backup individual é um SQLite dedicado, versionado, com a planilha e todos
+  os seus checkpoints, execuções, versões, alterações, erros e hashes. Na
+  restauração, uma identidade já existente exige confirmação e é substituída
+  integralmente, sem merge; uma identidade ausente é recriada;
+- o backup completo é uma imagem consistente produzida pela API oficial de
+  backup do SQLite. A restauração valida metadados, versão do schema,
+  `integrity_check`, Foreign Keys e SHA-256, e cria automaticamente um backup de
+  segurança do estado corrente antes da substituição atômica;
+- cada `.sqlite3` possui um arquivo `.sha256`; backups completos também possuem
+  `.meta.json`. A divergência, a ausência desses dados ou um formato/schema
+  incompatível impede a restauração.
+
+Excluir uma auditoria remove atomicamente somente seus registros dependentes.
+Excluir todas limpa os dados na ordem das Foreign Keys, mas mantém tabelas,
+índices e versão do schema; a interface oferece backup antes da confirmação
+final. A restauração repõe exatamente o checkpoint armazenado: versões posteriores
+do SharePoint não são marcadas como processadas e a próxima auditoria incremental
+continua pelas regras existentes.

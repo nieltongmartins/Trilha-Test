@@ -261,6 +261,30 @@ def test_duration_uses_hours_only_when_needed() -> None:
     assert AuditApplication._format_duration(3661) == "01:01:01"
 
 
+def test_complete_deletion_cancellation_does_not_touch_local_database(monkeypatch) -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    calls = []
+    application.storage = type("Storage", (), {"delete_all": lambda self: calls.append("delete")})()
+    application._start_work = lambda *_args: calls.append("work")
+    monkeypatch.setattr("app.interface.messagebox.askyesno", lambda *_args, **_kwargs: False)
+
+    application.delete_all_audits()
+
+    assert calls == []
+
+
+def test_local_management_does_not_use_sharepoint_source() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    calls = []
+    application.source = type("ForbiddenSource", (), {"list_spreadsheets": lambda self: calls.append("sharepoint")})()
+    application.storage = type("Storage", (), {"list_audits": lambda self: []})()
+    application.stored_tree = type("Tree", (), {"get_children": lambda self: (), "delete": lambda *_: None, "insert": lambda *_a, **_k: None})()
+
+    application.refresh_stored()
+
+    assert calls == []
+
+
 def test_constructor_waits_for_manual_authentication_before_sharepoint_calls(
     monkeypatch,
 ) -> None:

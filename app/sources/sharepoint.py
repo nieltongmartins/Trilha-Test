@@ -365,6 +365,19 @@ class BrowserSharePointSource:
             for path, name in sorted(found.items(), key=lambda item: item[1].casefold())
         )
 
+    def set_scope_paths(self, scope_paths: Sequence[str]) -> None:
+        """Atualiza os escopos de leitura sem recriar a sessão autenticada."""
+        scopes = tuple(
+            dict.fromkeys(
+                _normalize_scope_path(path, self._site_path)
+                for path in scope_paths
+                if path.strip("/")
+            )
+        )
+        if not scopes:
+            raise ValueError("Ao menos um escopo SharePoint deve ser configurado")
+        self.scope_paths = scopes
+
     def _file_metadata(self, spreadsheet: SpreadsheetInfo) -> Mapping[str, Any]:
         encoded = _escape_odata_path(spreadsheet.path or "")
         return _odata_object(

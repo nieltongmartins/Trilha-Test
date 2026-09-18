@@ -57,6 +57,7 @@ class Settings:
     log_level: str = "INFO"
     temp_directory: Path = Path("data/temp")
     reports_directory: Path = Path("data/reports")
+    backups_directory: Path = Path("data/backups")
     sharepoint_tenant_id: str | None = None
     sharepoint_client_id: str | None = None
     sharepoint_client_secret: str | None = None
@@ -84,6 +85,9 @@ class Settings:
             temp_directory=Path(os.getenv("AUDIT_TEMP_DIRECTORY", "data/temp")),
             reports_directory=Path(
                 os.getenv("AUDIT_REPORTS_DIRECTORY", "data/reports")
+            ),
+            backups_directory=Path(
+                os.getenv("AUDIT_BACKUPS_DIRECTORY", "data/backups")
             ),
             sharepoint_tenant_id=os.getenv("SHAREPOINT_TENANT_ID") or None,
             sharepoint_client_id=os.getenv("SHAREPOINT_CLIENT_ID") or None,
@@ -170,5 +174,6 @@ class Settings:
             self.log_path.parent,
             self.temp_directory,
             self.reports_directory,
+            self.backups_directory,
         ):
             directory.mkdir(parents=True, exist_ok=True)

@@ -2237,4 +2237,16 @@ Após executar a fase:
 
 ---
 
+# Evolução pós-V1 — gerenciamento local de auditorias (18/09/2026)
+
+Evolução aditiva solicitada pelo proprietário, sem reabertura das fases já
+encerradas: a interface passou a organizar a tela operacional original na guia
+**Auditoria** e adicionou **Auditorias armazenadas**. O novo componente local
+oferece listagem, backup/restauração individual e completa e exclusão individual
+e completa. Os formatos são SQLite versionados, protegidos por SHA-256; cópias
+completas usam a API de backup do SQLite e restauração com cópia de segurança.
+Nenhuma regra do motor incremental nem operação SharePoint foi modificada.
+
+---
+
 FIM DO DOCUMENTO
