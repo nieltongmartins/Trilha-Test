@@ -1835,4 +1835,27 @@ auditoria.
 
 ---
 
+# EVOLUÇÃO ADITIVA — GERENCIAMENTO LOCAL DE AUDITORIAS (18/09/2026)
+
+O componente isolado `AuditStorageManager` opera somente sobre o SQLite local e
+é apresentado em uma segunda guia `ttk.Notebook`; a tela operacional anterior
+permanece na primeira guia. A serialização já existente da interface (`_busy`) é
+compartilhada pelas novas operações, que executam em worker e só atualizam Tk na
+MainThread.
+
+O backup individual é outro banco SQLite contendo um recorte relacional completo
+da identidade selecionada, com metadados internos de formato/schema. Chaves
+técnicas internas podem ser remapeadas na restauração, preservando todas as
+relações, enquanto a identidade SharePoint e o checkpoint são mantidos. O backup
+completo usa `sqlite3.Connection.backup`, não cópia direta do arquivo aberto. Na
+restauração completa, uma imagem validada é materializada no mesmo volume e
+substitui atomicamente o arquivo fechado, após backup automático de segurança.
+Arquivos auxiliares SHA-256 detectam alteração acidental; não constituem assinatura.
+
+Exclusões seguem a ordem das Foreign Keys em transação e jamais removem o schema.
+Este componente não importa nem chama fontes SharePoint e não altera o motor de
+auditoria, seus checkpoints ou sua política read-only.
+
+---
+
 FIM DO DOCUMENTO

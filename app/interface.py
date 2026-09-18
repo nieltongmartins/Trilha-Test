@@ -10,10 +10,11 @@ import subprocess
 import sys
 import threading
 import time
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
 from app.audit_service import AuditResult, AuditService
+from app.audit_storage import AuditStorageManager, RestoreConflictError
 from app.database import Database
 from app.models import AuditExecutionStatus
 from app.report_service import ReportService
@@ -34,6 +35,7 @@ class AuditApplication(ttk.Frame):
         database: Database,
         source: VersionSource | None,
         reports_directory: str | Path,
+        backups_directory: str | Path = "data/backups",
         *,
         site_url: str = "",
         scope_paths: Sequence[str] = (),
@@ -46,6 +48,7 @@ class AuditApplication(ttk.Frame):
         self.connect_source = connect_source
         self.save_configuration = save_configuration
         self.reports_directory = Path(reports_directory)
+        self.storage = AuditStorageManager(database, backups_directory)
         self.spreadsheets: list[SpreadsheetInfo] = []
         self.last_report: Path | None = None
         self._busy = False
@@ -77,11 +80,19 @@ class AuditApplication(ttk.Frame):
         self.master.rowconfigure(0, weight=1)
         self.grid(sticky="nsew")
         self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        self.notebook = ttk.Notebook(self)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
+        audit_tab = ttk.Frame(self.notebook, padding=4)
+        stored_tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(audit_tab, text="Auditoria")
+        self.notebook.add(stored_tab, text="Auditorias armazenadas")
+        audit_tab.columnconfigure(0, weight=1)
         ttk.Label(
-            self, text="Auditor de Planilhas", font=("TkDefaultFont", 14, "bold")
+            audit_tab, text="Auditor de Planilhas", font=("TkDefaultFont", 14, "bold")
         ).grid(sticky="w")
 
-        config = ttk.LabelFrame(self, text="Conexão SharePoint", padding=8)
+        config = ttk.LabelFrame(audit_tab, text="Conexão SharePoint", padding=8)
         config.grid(row=1, column=0, sticky="ew", pady=(8, 4))
         config.columnconfigure(1, weight=1)
         ttk.Label(config, text="URL do site:").grid(row=0, column=0, sticky="w")
@@ -103,11 +114,11 @@ class AuditApplication(ttk.Frame):
         self.connect_button = ttk.Button(config, text="Conectar", command=self.connect)
         self.connect_button.grid(row=4, column=1, sticky="e", pady=(8, 0))
 
-        self.selector = ttk.Combobox(self, state="readonly", width=70)
+        self.selector = ttk.Combobox(audit_tab, state="readonly", width=70)
         self.selector.grid(row=2, column=0, sticky="ew", pady=8)
         self.selector.bind("<<ComboboxSelected>>", lambda _event: self.show_status())
-        ttk.Label(self, textvariable=self.details).grid(row=3, column=0, sticky="w")
-        buttons = ttk.Frame(self)
+        ttk.Label(audit_tab, textvariable=self.details).grid(row=3, column=0, sticky="w")
+        buttons = ttk.Frame(audit_tab)
         buttons.grid(row=4, column=0, sticky="w", pady=10)
         self.refresh_button = ttk.Button(
             buttons, text="Atualizar lista", command=self.refresh
@@ -124,21 +135,140 @@ class AuditApplication(ttk.Frame):
         ttk.Button(buttons, text="Abrir relatório", command=self.open_report).pack(
             side="left", padx=6
         )
-        ttk.Label(self, textvariable=self.status, wraplength=720).grid(
+        ttk.Label(audit_tab, textvariable=self.status, wraplength=720).grid(
             row=5, column=0, sticky="w"
         )
         self.progress_value = tk.DoubleVar(value=0)
         self.progress_bar = ttk.Progressbar(
-            self, variable=self.progress_value, maximum=100, mode="determinate"
+            audit_tab, variable=self.progress_value, maximum=100, mode="determinate"
         )
         self.progress_bar.grid(row=6, column=0, sticky="ew", pady=(10, 2))
         self.progress_text = tk.StringVar(
             value="Progresso da auditoria: aguardando | Tempo total: 00:00"
         )
-        ttk.Label(self, textvariable=self.progress_text).grid(
+        ttk.Label(audit_tab, textvariable=self.progress_text).grid(
             row=7, column=0, sticky="w"
         )
+        self._build_stored_tab(stored_tab)
         self._set_action_state()
+        self.refresh_stored()
+
+    def _build_stored_tab(self, tab: ttk.Frame) -> None:
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        ttk.Label(tab, text="Auditorias armazenadas", font=("TkDefaultFont", 14, "bold")).grid(row=0, column=0, sticky="w")
+        columns = ("nome", "caminho", "unique_id", "versao", "processadas", "alteracoes", "ultima", "checkpoint")
+        self.stored_tree = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse")
+        labels = ("Planilha", "Caminho", "UniqueId", "Última versão", "Versões", "Alterações", "Última auditoria", "Checkpoint")
+        widths = (150, 210, 140, 95, 65, 70, 130, 95)
+        for column, label, width in zip(columns, labels, widths):
+            self.stored_tree.heading(column, text=label)
+            self.stored_tree.column(column, width=width, minwidth=55)
+        self.stored_tree.grid(row=1, column=0, sticky="nsew", pady=8)
+        scroll = ttk.Scrollbar(tab, orient="vertical", command=self.stored_tree.yview)
+        scroll.grid(row=1, column=1, sticky="ns", pady=8)
+        self.stored_tree.configure(yscrollcommand=scroll.set)
+        actions = ttk.Frame(tab)
+        actions.grid(row=2, column=0, columnspan=2, sticky="ew")
+        definitions = (
+            ("Atualizar", self.refresh_stored),
+            ("Backup selecionado", self.backup_selected),
+            ("Restaurar selecionado", self.restore_individual),
+            ("Excluir auditoria selecionada", self.delete_selected),
+            ("Backup completo", self.backup_complete),
+            ("Restaurar backup completo", self.restore_complete),
+            ("Excluir todas as auditorias", self.delete_all_audits),
+        )
+        self.storage_buttons = []
+        for index, (text, command) in enumerate(definitions):
+            button = ttk.Button(actions, text=text, command=command)
+            button.grid(row=index // 4, column=index % 4, sticky="ew", padx=(0, 5), pady=3)
+            self.storage_buttons.append(button)
+
+    def refresh_stored(self) -> None:
+        if not hasattr(self, "stored_tree"):
+            return
+        for item in self.stored_tree.get_children():
+            self.stored_tree.delete(item)
+        for audit in self.storage.list_audits():
+            self.stored_tree.insert("", "end", iid=str(audit.id), values=(
+                audit.name, audit.path or "—", audit.unique_id,
+                audit.last_version or "—", audit.processed_versions, audit.changes,
+                audit.last_audit or "—", audit.checkpoint or "—"))
+
+    def _selected_stored(self) -> tuple[int, str]:
+        selection = self.stored_tree.selection()
+        if not selection:
+            raise ValueError("Selecione uma auditoria armazenada.")
+        item = selection[0]
+        return int(item), str(self.stored_tree.item(item, "values")[0])
+
+    def backup_selected(self) -> None:
+        try:
+            spreadsheet_id, _ = self._selected_stored()
+        except ValueError as error:
+            messagebox.showinfo("Auditorias armazenadas", str(error))
+            return
+        self._start_work("Criando backup individual...", lambda: self.storage.backup_individual(spreadsheet_id), self._storage_finished)
+
+    def backup_complete(self) -> None:
+        self._start_work("Criando backup completo...", self.storage.backup_full, self._storage_finished)
+
+    def restore_individual(self) -> None:
+        path = filedialog.askopenfilename(title="Selecionar backup individual", filetypes=(("Backup SQLite", "*.sqlite3"),))
+        if not path:
+            return
+        self._start_work(
+            "Validando e restaurando backup individual...",
+            lambda: self._try_restore_individual(path),
+            self._individual_restore_finished,
+        )
+
+    def _try_restore_individual(self, path: str) -> tuple[str, str]:
+        try:
+            self.storage.restore_individual(path)
+        except RestoreConflictError:
+            return "conflict", path
+        return "restored", path
+
+    def _individual_restore_finished(self, result: tuple[str, str]) -> None:
+        state, path = result
+        if state == "conflict":
+            if not messagebox.askyesno("Conflito de restauração", "Já existe auditoria para esta planilha. Substituir integralmente pelos dados do backup? Nenhum merge será realizado."):
+                self.status.set("Restauração cancelada; dados locais preservados.")
+                return
+            self._start_work("Restaurando backup individual...", lambda: self.storage.restore_individual(path, replace=True), self._storage_finished)
+            return
+        self._storage_finished(Path(path))
+
+    def delete_selected(self) -> None:
+        try:
+            spreadsheet_id, name = self._selected_stored()
+        except ValueError as error:
+            messagebox.showinfo("Auditorias armazenadas", str(error))
+            return
+        if not messagebox.askyesno("Excluir auditoria local", f"Excluir permanentemente a auditoria local de '{name}'?\n\nO arquivo no SharePoint não será alterado."):
+            return
+        self._start_work("Excluindo auditoria local...", lambda: self.storage.delete_individual(spreadsheet_id), self._storage_finished)
+
+    def restore_complete(self) -> None:
+        path = filedialog.askopenfilename(title="Selecionar backup completo", filetypes=(("Backup SQLite", "*.sqlite3"),))
+        if not path or not messagebox.askyesno("Restaurar banco completo", "Validar e substituir TODO o estado local pelo backup selecionado? Um backup de segurança será criado antes da substituição."):
+            return
+        self._start_work("Restaurando backup completo...", lambda: self.storage.restore_full(path), self._storage_finished)
+
+    def delete_all_audits(self) -> None:
+        if not messagebox.askyesno("Excluir todas as auditorias", "Esta operação excluirá permanentemente todas as auditorias armazenadas localmente. Os arquivos do SharePoint não serão alterados.\n\nDeseja continuar?"):
+            return
+        if messagebox.askyesno("Backup de proteção", "Fazer backup completo antes de excluir?"):
+            operation = lambda: (self.storage.backup_full(), self.storage.delete_all())
+        else:
+            operation = self.storage.delete_all
+        self._start_work("Excluindo todas as auditorias locais...", operation, self._storage_finished)
+
+    def _storage_finished(self, result: object) -> None:
+        self.refresh_stored()
+        self.status.set(f"Operação local concluída{f': {result}' if isinstance(result, Path) else '.'}")
 
     def _configured_values(self) -> tuple[str, tuple[str, ...]]:
         site_url = self.site_url.get().strip().rstrip("/")
@@ -149,18 +279,26 @@ class AuditApplication(ttk.Frame):
                 if part.strip()
             )
         )
-        folders = tuple(
-            dict.fromkeys(
-                part.strip().strip("/")
-                for part in self.folder_names.get().split(";")
-                if part.strip().strip("/")
-            )
-        )
-        if folders:
-            scopes = tuple(
-                f"{scope.rstrip('/')}/{folder}" for scope in scopes for folder in folders
-            )
         return site_url, scopes
+
+    def _folders_loaded(self, folders: list[tuple[str, str]]) -> None:
+        self.folder_paths = [path for _name, path in folders]
+        self.folder_selector["values"] = [name for name, _path in folders]
+        if folders:
+            self.folder_selector.current(0)
+
+    def copy_folder_to_scope(self) -> None:
+        index = self.folder_selector.current()
+        if index < 0 or index >= len(self.folder_paths):
+            self.status.set("Selecione uma pasta.")
+            return
+        scope = self.folder_paths[index]
+        self.scope_paths.set(scope)
+        if self.source is not None:
+            setter = getattr(self.source, "set_scope_paths", None)
+            if setter is not None:
+                setter((scope,))
+        self.status.set("Escopo atualizado. Clique em Atualizar lista.")
 
     def connect(self) -> None:
         if self.connect_source is None:
@@ -469,6 +607,8 @@ class AuditApplication(ttk.Frame):
         for name in ("refresh_button", "audit_button", "report_button"):
             if hasattr(self, name):
                 getattr(self, name).configure(state=connected_state)
+        for button in getattr(self, "storage_buttons", ()):
+            button.configure(state=state)
 
     def close_source(self) -> None:
         if self.source is not None:
