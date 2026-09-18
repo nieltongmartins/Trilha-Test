@@ -56,7 +56,8 @@ def test_report_contains_official_sheets_filters_and_database_data(
     )
     workbook = load_workbook(report)
 
-    assert report.name == "CQL028_Trilha_Auditoria.xlsx"
+    assert report.name.startswith("CQL028__")
+    assert report.name.endswith("_Trilha_Auditoria.xlsx")
     assert workbook.sheetnames == ["RESUMO", "VERSOES", "TRILHA"]
     assert workbook["RESUMO"]["B2"].value == "CQL028.xlsx"
     assert workbook["RESUMO"]["B9"].value == 2

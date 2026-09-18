@@ -2249,4 +2249,24 @@ Nenhuma regra do motor incremental nem operação SharePoint foi modificada.
 
 ---
 
+# Evolução pós-V1 — relatórios e comparador integrado (18/09/2026)
+
+Evolução aditiva expressamente autorizada pelo proprietário. A guia
+**Auditorias armazenadas** passou a abrir o relatório local associado e suas
+exclusões individual/completa passaram a remover apenas relatórios reconhecidos
+pela regra central baseada na identidade técnica. O formato legado continua
+aceito somente quando a associação por nome seguro é inequívoca; arquivos
+estranhos e associações ambíguas permanecem intactos.
+
+O comparador funcional de `reference/comparador_planilhas.py` foi preservado
+intacto como baseline. A cópia operacional foi adaptada a um `ttk.Frame` criado
+sob demanda no notebook principal, sem segundo `Tk`, `mainloop`, subprocesso de
+GUI, acesso SharePoint ou persistência no banco de auditoria. O processamento
+permanece em worker e somente a fila/`after` atualiza widgets.
+
+A implementação não alterou autenticação, aquisição read-only, auditoria
+inicial/incremental, checkpoint, backup/restauração ou regras ADD/MOD/DEL.
+
+---
+
 FIM DO DOCUMENTO

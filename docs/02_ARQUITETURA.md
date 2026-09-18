@@ -1858,4 +1858,24 @@ auditoria, seus checkpoints ou sua política read-only.
 
 ---
 
+## Evolução pós-V1 — artefatos de relatório e comparador integrado (18/09/2026)
+
+`ReportArtifactManager` concentra a regra determinística entre a auditoria
+canônica e seu relatório derivado. Relatórios novos combinam o nome seguro para
+leitura humana com um token SHA-256 da identidade `site_id`, `drive_id` e
+`drive_item_id`; relatórios do formato anterior
+só são aceitos quando o nome seguro corresponde de maneira inequívoca a uma
+única auditoria local. A exclusão prepara o arquivo no filesystem antes de
+alterar o SQLite, restaura-o se a operação local falhar e nunca enumera/apaga
+indiscriminadamente o diretório `data/reports`.
+
+O comparador de planilhas foi transportado da baseline funcional
+`reference/comparador_planilhas.py` para `app/spreadsheet_comparator.py`. Seu
+motor, opções, validações, relatório e worker permanecem independentes do
+`AuditService`, do SQLite canônico e da fonte SharePoint. A interface operacional
+é um `ttk.Frame` anexado sob demanda ao `ttk.Notebook` existente; ela usa o
+mesmo `Tk` e o mesmo `mainloop` da aplicação principal.
+
+---
+
 FIM DO DOCUMENTO

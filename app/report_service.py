@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import logging
-import re
 import sqlite3
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
+
+from app.report_artifacts import ReportArtifactManager
 
 
 logger = logging.getLogger("auditoria_excel.report")
@@ -149,13 +150,9 @@ class ReportService:
                 width = min(max(len(str(cell.value or "")) for cell in column) + 2, 50)
                 sheet.column_dimensions[column[0].column_letter].width = width
 
-        safe_name = re.sub(
-            r"[^\w.-]+", "_", Path(spreadsheet["nome_atual"]).stem
-        ).strip("_")
         self.output_directory.mkdir(parents=True, exist_ok=True)
-        output = (
-            self.output_directory / f"{safe_name or 'Planilha'}_Trilha_Auditoria.xlsx"
-        )
+        artifacts = ReportArtifactManager(self.connection, self.output_directory)
+        output = artifacts.canonical_path(artifacts.identity(spreadsheet_id))
         workbook.save(output)
         logger.info(
             "Relatório gerado planilha_id=%d planilha=%s versoes=%d alteracoes=%d arquivo=%s",
