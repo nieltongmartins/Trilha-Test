@@ -297,8 +297,7 @@ def test_audit_progress_displays_percentage_estimate_and_elapsed(monkeypatch) ->
 
     assert application.progress_value.value == 25
     assert application.progress_text.value == (
-        "Progresso da auditoria: 1/4 (25%) | Estimativa: 00:30 | "
-        "Tempo total: 00:10"
+        "1 / 4 (25%) | Estimativa: 00:30 | Tempo total: 00:10"
     )
 
 
@@ -463,3 +462,89 @@ def test_open_stored_report_does_not_generate_when_missing(monkeypatch) -> None:
     application.open_stored_report()
 
     assert "Não existe relatório gerado" in messages[0][1]
+
+
+def _application_for_version_progress() -> AuditApplication:
+    from collections import deque
+
+    application = AuditApplication.__new__(AuditApplication)
+    application._version_progress_updates = queue.SimpleQueue()
+    application.version_progress_value = VariableFake()
+    application.version_stage_text = VariableFake()
+    application.version_timing_text = VariableFake()
+    application.current_version_frame = ButtonFake()
+    application._current_version_started_at = None
+    application._current_version = "—"
+    application._recent_version_durations = deque(maxlen=20)
+    application._version_last_clock_update = 0.0
+    application._progress_completed = 0
+    application._progress_total = 30
+    return application
+
+
+def test_version_bar_starts_at_zero_advances_and_resets(monkeypatch) -> None:
+    from app.audit_service import VersionProgress
+
+    application = _application_for_version_progress()
+    ticks = iter((10.0, 11.0, 12.0, 13.0, 14.0))
+    monkeypatch.setattr("app.interface.time.monotonic", lambda: next(ticks))
+    application._version_progress_updates.put(VersionProgress("2.18", 0, "Obtendo versão 2.18..."))
+    application._version_progress_updates.put(VersionProgress("2.18", 55, "Validando arquivo..."))
+    application._poll_version_progress_updates()
+    assert application.version_progress_value.value == 55
+    assert application._current_version == "2.18"
+
+    application._version_progress_updates.put(VersionProgress("2.19", 0, "Obtendo versão 2.19..."))
+    application._poll_version_progress_updates()
+    assert application.version_progress_value.value == 0
+    assert application._current_version == "2.19"
+
+
+def test_recent_average_keeps_only_twenty_and_eta_uses_it(monkeypatch) -> None:
+    application = _application_for_version_progress()
+    application._recent_version_durations.extend(range(1, 22))
+    application._progress_completed = 25
+    application._progress_total = 30
+    monkeypatch.setattr("app.interface.time.monotonic", lambda: 100.0)
+
+    application._update_version_timing()
+
+    assert list(application._recent_version_durations) == list(range(2, 22))
+    assert "Média recente: 00:12" in application.version_timing_text.value
+    assert "Estimativa restante: 00:58" in application.version_timing_text.value
+
+
+def test_version_progress_from_worker_only_touches_tk_during_main_poll(monkeypatch) -> None:
+    from app.audit_service import VersionProgress
+
+    application = _application_for_version_progress()
+    monkeypatch.setattr("app.interface.time.monotonic", lambda: 10.0)
+    main_thread = threading.get_ident()
+    thread = threading.Thread(
+        target=lambda: application._version_progress_updates.put(
+            VersionProgress("2.18", 5, "Baixando dados...")
+        )
+    )
+    thread.start()
+    thread.join()
+    assert application.version_stage_text.set_threads == []
+
+    application._poll_version_progress_updates()
+
+    assert application.version_stage_text.value == "Baixando dados..."
+    assert set(application.version_stage_text.set_threads) == {main_thread}
+
+
+def test_timeout_and_retry_message_keep_current_version(monkeypatch) -> None:
+    application = _application_for_version_progress()
+    application._current_version = "2.18"
+    application._current_version_started_at = 1.0
+    application._report_updates = queue.SimpleQueue()
+    application.status = VariableFake()
+    application._report_updates.put("SharePoint demorando para responder...")
+    application._report_updates.put("Retry 1/1...")
+
+    application._poll_report_updates()
+
+    assert application._current_version == "2.18"
+    assert application.version_stage_text.value == "Retry 1/1..."

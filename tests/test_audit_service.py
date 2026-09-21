@@ -479,3 +479,44 @@ def test_failure_rolls_back_pair_keeps_last_checkpoint_and_can_resume(
     assert scalar(connection, "SELECT COUNT(*) FROM erro_processamento") == 1
     assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_version_progress_follows_pipeline_and_resets_for_each_version(
+    database: Database, local_history: list[tuple[VersionInfo, Path]],
+) -> None:
+    events = []
+
+    result = AuditService(
+        database,
+        source(local_history),
+        version_progress_callback=events.append,
+    ).audit(SPREADSHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    for number in ("0.85", "0.86", "0.99"):
+        version_events = [event for event in events if event.version == number]
+        assert [event.percent for event in version_events] == [0, 5, 55, 70, 90, 97, 97, 100]
+        assert version_events[0].stage == f"Obtendo versão {number}..."
+        assert version_events[-1].stage == "Checkpoint confirmado."
+
+
+def test_failed_version_never_reports_one_hundred_percent(
+    database: Database, local_history: list[tuple[VersionInfo, Path]], monkeypatch,
+) -> None:
+    events = []
+    service = AuditService(
+        database,
+        source(local_history),
+        version_progress_callback=events.append,
+    )
+    monkeypatch.setattr(
+        service,
+        "_persist_comparison",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("falha")),
+    )
+
+    result = service.audit(SPREADSHEET)
+
+    assert result.status is AuditExecutionStatus.FAILED
+    assert events
+    assert all(event.percent < 100 for event in events)
