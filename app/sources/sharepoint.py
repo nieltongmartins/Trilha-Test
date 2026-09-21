@@ -33,9 +33,14 @@ class BrowserSession(Protocol):
     def get(self, url: str) -> None: ...
     def execute_async_script(self, script: str, *args: object) -> object: ...
     def set_script_timeout(self, time_to_wait: float) -> None: ...
+    def set_page_load_timeout(self, time_to_wait: float) -> None: ...
+    def refresh(self) -> None: ...
+    def execute_script(self, script: str, *args: object) -> object: ...
     def quit(self) -> None: ...
     @property
     def current_url(self) -> str: ...
+    @property
+    def current_window_handle(self) -> str: ...
 
 
 _FETCH_JSON_SCRIPT = r"""
@@ -206,6 +211,7 @@ _VERSION_PAGE_RETRIES = 3
 FETCH_OPERATION_TIMEOUT_SECONDS = 60
 PREFETCH_RETRIES = 1
 NORMAL_DOWNLOAD_RETRIES = 1
+EDGE_RECOVERY_TIMEOUT_SECONDS = 60
 
 
 def _odata_value(payload: Mapping[str, Any]) -> object:
@@ -320,6 +326,9 @@ class BrowserSharePointSource:
         # A enumeração de dezenas de milhares de versões pode ultrapassar os
         # 120 s padrão do segundo limite, mesmo com script_timeout=600.
         browser.set_script_timeout(600)
+        # Um reload de recuperação também precisa ser limitado. Ele ocorre na
+        # mesma thread e no mesmo WebDriver, sem criar acesso concorrente.
+        browser.set_page_load_timeout(EDGE_RECOVERY_TIMEOUT_SECONDS)
         command_executor = getattr(browser, "command_executor", None)
         if command_executor is not None:
             set_timeout = getattr(command_executor, "set_timeout", None)
@@ -1018,6 +1027,104 @@ class BrowserSharePointSource:
             spreadsheet.name, version.number, str(cleanup_ok).lower(),
         )
 
+    def _recover_edge_session(
+        self, spreadsheet: SpreadsheetInfo, version: VersionInfo, *, reason: str
+    ) -> None:
+        """Recarrega e valida a sessão existente, sem substituir o WebDriver.
+
+        A limpeza anterior ao refresh é deliberadamente best-effort: um contexto
+        JavaScript travado pode não responder, mas o reload ainda deve ter a
+        oportunidade de descartá-lo. A validação REST posterior comprova tanto a
+        autenticação quanto o acesso ao site esperado.
+        """
+        recovery_started = time.perf_counter()
+        logger.warning(
+            "PERF edge_recovery_inicio planilha=%s versao=%s motivo=%s",
+            spreadsheet.name,
+            version.number,
+            reason,
+        )
+        self._notify_status("Edge não respondeu. Recuperando sessão...")
+        try:
+            self.cancel_prefetch()
+            # Também elimina um possível slot do download normal. Falhar aqui
+            # não impede o refresh, que destrói todo o contexto JavaScript.
+            try:
+                self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
+            except Exception:
+                logger.debug("Contexto JS não respondeu antes do refresh", exc_info=True)
+
+            handle = self._browser.current_window_handle
+            if not isinstance(handle, str) or not handle:
+                raise SharePointReadError("window handle do Edge inválido")
+
+            self._notify_status("Atualizando página do SharePoint...")
+            refresh_started = time.perf_counter()
+            logger.warning("PERF edge_refresh_inicio versao=%s", version.number)
+            self._browser.refresh()
+            logger.warning(
+                "PERF edge_refresh_concluido versao=%s duracao=%.3fs",
+                version.number,
+                time.perf_counter() - refresh_started,
+            )
+
+            deadline = time.monotonic() + EDGE_RECOVERY_TIMEOUT_SECONDS
+            while True:
+                ready_state = self._browser.execute_script("return document.readyState")
+                if ready_state in {"interactive", "complete"}:
+                    break
+                if time.monotonic() >= deadline:
+                    raise SharePointReadError("timeout aguardando reload do SharePoint")
+                time.sleep(0.1)
+
+            refreshed_handle = self._browser.current_window_handle
+            if not isinstance(refreshed_handle, str) or not refreshed_handle:
+                raise SharePointReadError("window handle do Edge inválido após reload")
+            current_url = self._browser.current_url
+            current = urlsplit(current_url)
+            expected = urlsplit(self.site_url)
+            expected_path = expected.path.rstrip("/")
+            if (
+                f"{current.scheme}://{current.netloc}" != self._origin
+                or (
+                    expected_path
+                    and current.path.rstrip("/") != expected_path
+                    and not current.path.startswith(expected_path + "/")
+                )
+            ):
+                raise SharePointReadError(
+                    f"Edge saiu do site SharePoint esperado: {current_url}"
+                )
+            entity = _odata_object(self._json("web?$select=Id"))
+            if not isinstance(entity.get("Id"), str) or not entity["Id"]:
+                raise SharePointReadError("sessão SharePoint não autenticada após reload")
+            logger.warning(
+                "PERF edge_session_validada versao=%s url=%s",
+                version.number,
+                current_url,
+            )
+            logger.warning(
+                "PERF edge_recovery_concluida versao=%s duracao=%.3fs",
+                version.number,
+                time.perf_counter() - recovery_started,
+            )
+            self._notify_status(
+                f"Sessão recuperada. Tentando novamente a versão {version.number}..."
+            )
+        except Exception as error:
+            self.cancel_prefetch()
+            logger.error(
+                "PERF edge_recovery_falhou versao=%s erro=%s",
+                version.number,
+                error,
+            )
+            message = (
+                "Não foi possível recuperar a sessão do Edge. Auditoria interrompida "
+                "com checkpoint preservado. Reconecte/autentique novamente."
+            )
+            self._notify_status(message)
+            raise SharePointReadError(f"{message} Motivo: {error}") from error
+
     def _download_to_destination(
         self,
         spreadsheet: SpreadsheetInfo,
@@ -1291,6 +1398,26 @@ class BrowserSharePointSource:
                         if not self.prefetch_version(spreadsheet, version):
                             break
             assert last_prefetch_error is not None
+            recovery_reason = (
+                "timeout" if "timeout" in str(last_prefetch_error).lower() else "webdriver_error"
+            )
+            self._recover_edge_session(
+                spreadsheet, version, reason=recovery_reason
+            )
+            # O refresh destruiu o contexto anterior. Um prefetch inteiramente
+            # novo mantém URL/VersionInfo, mas recebe token e blob novos.
+            if self.prefetch_version(spreadsheet, version):
+                try:
+                    return self._download_to_destination(
+                        spreadsheet,
+                        version,
+                        url,
+                        destination,
+                        use_prefetch=True,
+                        attempt=1,
+                    )
+                except SharePointReadError as error:
+                    last_prefetch_error = error
             logger.warning(
                     "PERF fetch_fallback planilha=%s versao=%s origem=prefetch "
                     "destino=normal motivo=%s",

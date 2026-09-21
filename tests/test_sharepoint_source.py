@@ -39,6 +39,8 @@ class FakeBrowser:
         self.visited: list[str] = []
         self.quit_called = False
         self.current_url = SITE
+        self.current_window_handle = "window-1"
+        self.refresh_count = 0
         self.download_blob: bytes | None = None
         self.prefetch_blob: bytes | None = None
         self.prefetch_url: str | None = None
@@ -53,6 +55,13 @@ class FakeBrowser:
 
     def get(self, url: str) -> None:
         self.visited.append(url)
+
+    def refresh(self) -> None:
+        self.refresh_count += 1
+
+    def execute_script(self, script: str, *args: object) -> object:
+        assert script == "return document.readyState"
+        return "complete"
 
     def execute_async_script(self, script: str, *args: object) -> object:
         if "window.__auditPrefetch = null" in script:
@@ -112,6 +121,8 @@ class FakeBrowser:
         assert "method: 'GET'" in script
         assert "document.cookie" not in script and "localStorage" not in script
         self.calls.append(url)
+        if url.endswith("/_api/web?$select=Id"):
+            return {"json": {"Id": "site-id"}}
         value = self._response(url)
         if "response.blob()" in script:
             self.visited.append(url)
@@ -132,6 +143,9 @@ class FakeBrowser:
 
     def set_script_timeout(self, time_to_wait: float) -> None:
         self.script_timeout = time_to_wait
+
+    def set_page_load_timeout(self, time_to_wait: float) -> None:
+        pass
 
 
 def discovery_responses() -> dict[str, object]:
@@ -831,8 +845,114 @@ def test_prefetch_exhaustion_falls_back_and_normal_timeout_retries(
     path = source.get_version(spreadsheet, version)
     assert path.read_bytes() == content
     assert browser.normal_attempts == 2
+    assert browser.refresh_count == 1
     assert any("Fallback" in status for status in statuses)
     assert any("Tentando novamente" in status for status in statuses)
+
+
+def test_stuck_prefetch_refreshes_and_resumes_same_version_with_fresh_token(
+    tmp_path: Path,
+) -> None:
+    content = workbook_bytes("recovered")
+
+    class RecoversOnRefresh(FakeBrowser):
+        def __init__(self) -> None:
+            super().__init__({"Versions(7)/$value": content})
+            self.tokens: list[str] = []
+            self.urls: list[str] = []
+            self.cleared_blobs: list[bytes | None] = []
+
+        def execute_async_script(self, script: str, *args: object) -> object:
+            if "window.__auditPrefetch = null" in script:
+                self.cleared_blobs.append(self.prefetch_blob)
+            if "const current = window.__auditPrefetch" in script:
+                self.urls.append(str(args[0]))
+                self.tokens.append(str(args[2]))
+            if "function poll()" in script and self.refresh_count == 0:
+                return {"error": "AbortError", "timeout": True}
+            return super().execute_async_script(script, *args)
+
+    browser = RecoversOnRefresh()
+    statuses: list[str] = []
+    source = BrowserSharePointSource(
+        SITE, [ROOT], browser, temp_directory=tmp_path, status_callback=statuses.append
+    )
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Setor A/Arquivo.xlsx"
+    )
+    from app.sources.base import VersionInfo
+
+    version = VersionInfo("7", "2.007", size=len(content))
+    source.prefetch_version(spreadsheet, version)
+    path = source.get_version(spreadsheet, version)
+
+    assert path.read_bytes() == content
+    assert browser.refresh_count == 1
+    assert len(browser.tokens) == 3
+    assert len(set(browser.tokens)) == 3
+    assert len(set(browser.urls)) == 1
+    assert browser.cleared_blobs
+    assert browser.prefetch_blob is None
+    assert any("Sessão recuperada" in status for status in statuses)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        ("invalid_handle", "window handle"),
+        ("refresh", "refresh quebrado"),
+        ("no_such_window", "janela desapareceu"),
+        ("authentication", "não autenticada"),
+        ("wrong_origin", "saiu do site"),
+    ],
+)
+def test_edge_recovery_failure_stops_without_normal_download(
+    tmp_path: Path, failure: str, expected: str
+) -> None:
+    content = workbook_bytes("must-not-be-used")
+
+    class RecoveryFails(FakeBrowser):
+        def __init__(self) -> None:
+            super().__init__({"Versions(7)/$value": content})
+            if failure == "invalid_handle":
+                self.current_window_handle = ""
+
+        def refresh(self) -> None:
+            super().refresh()
+            if failure == "refresh":
+                raise RuntimeError("refresh quebrado")
+            if failure == "no_such_window":
+                raise RuntimeError("janela desapareceu (NoSuchWindowException)")
+            if failure == "wrong_origin":
+                self.current_url = "https://login.microsoftonline.com/"
+
+        def execute_async_script(self, script: str, *args: object) -> object:
+            if "function poll()" in script:
+                return {"error": "AbortError", "timeout": True}
+            if failure == "authentication" and str(args[0] if args else "").endswith(
+                "/_api/web?$select=Id"
+            ):
+                return {"json": {}}
+            return super().execute_async_script(script, *args)
+
+    browser = RecoveryFails()
+    statuses: list[str] = []
+    source = BrowserSharePointSource(
+        SITE, [ROOT], browser, temp_directory=tmp_path, status_callback=statuses.append
+    )
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Setor A/Arquivo.xlsx"
+    )
+    from app.sources.base import VersionInfo
+
+    source.prefetch_version(spreadsheet, VersionInfo("7", "2.007"))
+    with pytest.raises(SharePointReadError, match=expected):
+        source.get_version(spreadsheet, VersionInfo("7", "2.007"))
+
+    # Only prefetch starts are allowed; recovery failure cannot fall through to
+    # a normal download and therefore cannot process or skip this version.
+    assert browser.visited == []
+    assert any("checkpoint preservado" in status for status in statuses)
 
 
 def test_final_normal_failure_has_bounded_attempts_and_no_partial_file(
@@ -955,6 +1075,61 @@ def test_gap_download_failure_rolls_back_and_keeps_checkpoint(tmp_path: Path) ->
             == 0
         )
         assert list(source._workspace.path.glob("*.xlsx")) == []
+
+
+def test_stuck_prefetch_regression_refreshes_before_checkpoint_commit(
+    tmp_path: Path,
+) -> None:
+    responses = discovery_responses()
+    responses["/Versions?"] = {
+        "value": [
+            {"ID": 97, "VersionLabel": "0.97"},
+            {"ID": 98, "VersionLabel": "0.98"},
+        ]
+    }
+    current_content = workbook_bytes("99")
+    current_metadata = file_metadata()
+    current_metadata["Length"] = str(len(current_content))
+    responses[")?$select=Name"] = current_metadata
+    responses["Versions(97)/$value"] = workbook_bytes("97")
+    responses["Versions(98)/$value"] = workbook_bytes("98")
+    responses["')/$value"] = current_content
+
+    class StuckUntilRefresh(FakeBrowser):
+        checkpoint_during_refresh: object = "not-checked"
+        database: Database | None = None
+
+        def execute_async_script(self, script: str, *args: object) -> object:
+            if (
+                "function poll()" in script
+                and "Versions(98)" in str(args[0])
+                and self.refresh_count == 0
+            ):
+                return {"error": "AbortError", "timeout": True}
+            return super().execute_async_script(script, *args)
+
+        def refresh(self) -> None:
+            assert self.database is not None
+            self.checkpoint_during_refresh = self.database.connection.execute(
+                "SELECT versao_numero FROM checkpoint"
+            ).fetchone()
+            super().refresh()
+
+    browser = StuckUntilRefresh(responses)
+    source = BrowserSharePointSource(SITE, [ROOT], browser, temp_directory=tmp_path)
+    with Database(tmp_path / "audit.db") as database, source:
+        database.initialize()
+        browser.database = database
+        spreadsheet = source.list_spreadsheets()[0]
+        result = AuditService(database, source).audit(spreadsheet)
+
+        assert result.status is AuditExecutionStatus.COMPLETED
+        assert browser.refresh_count == 1
+        assert browser.checkpoint_during_refresh is None
+        checkpoint = database.connection.execute(
+            "SELECT versao_id, versao_numero FROM checkpoint"
+        ).fetchone()
+        assert tuple(checkpoint) == ("99", "0.99")
 
 
 def test_only_get_same_origin_api_is_embedded() -> None:
