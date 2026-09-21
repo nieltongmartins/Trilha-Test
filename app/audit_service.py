@@ -31,6 +31,15 @@ class AuditResult:
     final_version: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class VersionProgress:
+    """Evento imutável de uma etapa real do processamento de uma versão."""
+
+    version: str
+    percent: int
+    stage: str
+
+
 class AuditService:
     """Executa comparações consecutivas e confirma cada uma atomicamente."""
 
@@ -40,11 +49,13 @@ class AuditService:
         source: VersionSource,
         progress_callback: Callable[[int, int], None] | None = None,
         checkpoint_callback: Callable[[str, int, int], None] | None = None,
+        version_progress_callback: Callable[[VersionProgress], None] | None = None,
     ) -> None:
         self.database = database
         self.source = source
         self.progress_callback = progress_callback
         self.checkpoint_callback = checkpoint_callback
+        self.version_progress_callback = version_progress_callback
 
     def audit(
         self,
@@ -144,6 +155,10 @@ class AuditService:
                 else None
             )
             try:
+                self._report_version_progress(
+                    current.number, 0, f"Obtendo versão {current.number}..."
+                )
+                self._report_version_progress(current.number, 5, "Baixando dados...")
                 logger.debug(
                     "Comparação iniciada execucao=%s planilha=%s versao_anterior=%s versao_atual=%s",
                     execution_code,
@@ -161,15 +176,18 @@ class AuditService:
 
                 current_started = time.perf_counter()
                 current_snapshot, current_hash = self._read_temporary_version(
-                    spreadsheet, current, prefetch_next=next_version
+                    spreadsheet, current, prefetch_next=next_version,
+                    report_stages=True,
                 )
                 current_read_seconds = time.perf_counter() - current_started
 
                 compare_started = time.perf_counter()
                 changes = compare_snapshots(previous_snapshot, current_snapshot)
+                self._report_version_progress(current.number, 97, "Comparação concluída.")
                 compare_seconds = time.perf_counter() - compare_started
 
                 persist_started = time.perf_counter()
+                self._report_version_progress(current.number, 97, "Salvando alterações...")
                 self._persist_comparison(
                     connection, spreadsheet_id, execution_id, previous, current,
                     current_hash, changes,
@@ -205,6 +223,7 @@ class AuditService:
                     connection, execution_id, spreadsheet_id, execution_code,
                     initial_checkpoint, processed, total_changes, previous, current, error,
                 )
+            self._report_version_progress(current.number, 100, "Checkpoint confirmado.")
             processed += 1
             self._report_progress(processed, len(pairs))
             self._report_checkpoint(current.number, processed, len(pairs) - processed)
@@ -237,6 +256,15 @@ class AuditService:
             execution_code, AuditExecutionStatus.COMPLETED, processed,
             total_changes, initial_checkpoint, final,
         )
+
+    def _report_version_progress(
+        self, version: str, percent: int, stage: str
+    ) -> None:
+        if self.version_progress_callback is not None:
+            try:
+                self.version_progress_callback(VersionProgress(version, percent, stage))
+            except Exception:
+                logger.warning("Falha ao publicar progresso da versão", exc_info=True)
 
     def _report_progress(self, completed: int, total: int) -> None:
         if self.progress_callback is not None:
@@ -290,11 +318,14 @@ class AuditService:
         version: VersionInfo,
         *,
         prefetch_next: VersionInfo | None = None,
+        report_stages: bool = False,
     ) -> tuple[Snapshot, str]:
         total_started = time.perf_counter()
         download_started = time.perf_counter()
         path = self.source.get_version(spreadsheet, version)
         download_seconds = time.perf_counter() - download_started
+        if report_stages:
+            self._report_version_progress(version.number, 55, "Validando arquivo...")
 
         # Assim que o binário atual chegou ao disco, o Edge começa a buscar a
         # próxima versão em background. Enquanto isso, o Python calcula SHA,
@@ -311,10 +342,14 @@ class AuditService:
             if callable(verify_digest):
                 verify_digest(path, digest)
             hash_seconds = time.perf_counter() - hash_started
+            if report_stages:
+                self._report_version_progress(version.number, 70, "Lendo XLSX...")
 
             read_started = time.perf_counter()
             snapshot = read_workbook(path)
             read_seconds = time.perf_counter() - read_started
+            if report_stages:
+                self._report_version_progress(version.number, 90, "Comparando...")
             total_seconds = time.perf_counter() - total_started
             try:
                 file_size = path.stat().st_size

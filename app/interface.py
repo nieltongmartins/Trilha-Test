@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
 import logging
@@ -77,6 +78,7 @@ class AuditApplication(ttk.Frame):
         self._checkpoint_updates: queue.SimpleQueue[tuple[str, int, int]] = (
             queue.SimpleQueue()
         )
+        self._version_progress_updates: queue.SimpleQueue[object] = queue.SimpleQueue()
         self._report_updates: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._version_scan_updates: queue.SimpleQueue[int] = queue.SimpleQueue()
         self._version_scan_started_at: float | None = None
@@ -85,6 +87,10 @@ class AuditApplication(ttk.Frame):
         self._progress_completed = 0
         self._progress_total = 0
         self._latest_available = "—"
+        self._current_version_started_at: float | None = None
+        self._current_version = "—"
+        self._recent_version_durations: deque[float] = deque(maxlen=20)
+        self._version_last_clock_update = 0.0
         self._hidden_clicks: list[float] = []
         # AuditService, ReportService, leitor XLSX/openpyxl, fontes SharePoint e
         # Graph permanecem fora deste caminho e são importados somente nas ações.
@@ -188,17 +194,31 @@ class AuditApplication(ttk.Frame):
         ttk.Label(audit_tab, textvariable=self.status, wraplength=720).grid(
             row=5, column=0, sticky="w"
         )
+        progress = ttk.LabelFrame(audit_tab, text="Progresso geral", padding=8)
+        progress.grid(row=6, column=0, sticky="ew", pady=(10, 2))
+        progress.columnconfigure(0, weight=1)
         self.progress_value = tk.DoubleVar(value=0)
         self.progress_bar = ttk.Progressbar(
-            audit_tab, variable=self.progress_value, maximum=100, mode="determinate"
+            progress, variable=self.progress_value, maximum=100, mode="determinate"
         )
-        self.progress_bar.grid(row=6, column=0, sticky="ew", pady=(10, 2))
-        self.progress_text = tk.StringVar(
-            value="Progresso da auditoria: aguardando | Tempo total: 00:00"
+        self.progress_bar.grid(row=0, column=0, sticky="ew")
+        self.progress_text = tk.StringVar(value="0 / 0 (0%) | Tempo total: 00:00")
+        ttk.Label(progress, textvariable=self.progress_text).grid(row=1, column=0, sticky="w")
+
+        current = ttk.LabelFrame(audit_tab, text="Versão atual: —", padding=8)
+        current.grid(row=7, column=0, sticky="ew", pady=(4, 0))
+        current.columnconfigure(0, weight=1)
+        self.current_version_frame = current
+        self.version_progress_value = tk.DoubleVar(value=0)
+        ttk.Progressbar(
+            current, variable=self.version_progress_value, maximum=100, mode="determinate"
+        ).grid(row=0, column=0, sticky="ew")
+        self.version_stage_text = tk.StringVar(value="Aguardando.")
+        ttk.Label(current, textvariable=self.version_stage_text).grid(row=1, column=0, sticky="w")
+        self.version_timing_text = tk.StringVar(
+            value="Tempo da versão: 00:00 | Média recente: calculando | Estimativa restante: calculando"
         )
-        ttk.Label(audit_tab, textvariable=self.progress_text).grid(
-            row=7, column=0, sticky="w"
-        )
+        ttk.Label(current, textvariable=self.version_timing_text).grid(row=2, column=0, sticky="w")
         self._startup_log("widgets_auditoria")
         self._build_stored_tab(stored_tab)
         self._startup_log("widgets_auditorias_armazenadas")
@@ -620,16 +640,22 @@ class AuditApplication(ttk.Frame):
         self._progress_completed = 0
         self._progress_total = 0
         self.progress_value.set(0)
-        self.progress_text.set(
-            "Progresso da auditoria: preparando | Estimativa: calculando | "
-            "Tempo total: 00:00"
-        )
+        self.progress_text.set("0 / 0 (0%) | Tempo total: 00:00")
+        self._current_version_started_at = None
+        self._current_version = "—"
+        self._recent_version_durations.clear()
+        self.version_progress_value.set(0)
+        self.version_stage_text.set("Preparando auditoria...")
+        self._update_version_timing()
 
         def report_progress(completed: int, total: int) -> None:
             self._progress_updates.put((completed, total))
 
         def report_checkpoint(version: str, completed: int, pending: int) -> None:
             self._checkpoint_updates.put((version, completed, pending))
+
+        def report_version_progress(event: object) -> None:
+            self._version_progress_updates.put(event)
 
         self._start_work(
             "Auditoria em andamento...",
@@ -638,6 +664,7 @@ class AuditApplication(ttk.Frame):
                 source,
                 progress_callback=report_progress,
                 checkpoint_callback=report_checkpoint,
+                version_progress_callback=report_version_progress,
             ).audit(spreadsheet, versions=cached_versions),
             self._audit_finished,
         )
@@ -715,6 +742,7 @@ class AuditApplication(ttk.Frame):
     def _poll_work_result(self, finished: Callable) -> None:
         self._poll_progress_updates()
         self._poll_checkpoint_updates()
+        self._poll_version_progress_updates()
         self._poll_version_scan_updates()
         self._poll_report_updates()
         try:
@@ -829,6 +857,51 @@ class AuditApplication(ttk.Frame):
         if getattr(self, "_audit_started_at", None) is not None:
             self._update_progress(self._progress_completed, self._progress_total)
 
+    def _poll_version_progress_updates(self) -> None:
+        """Aplica eventos da worker exclusivamente pela thread principal do Tk."""
+        if not hasattr(self, "_version_progress_updates"):
+            return
+        while True:
+            try:
+                event = self._version_progress_updates.get_nowait()
+            except queue.Empty:
+                break
+            now = time.monotonic()
+            if event.percent == 0:
+                self._current_version = event.version
+                self._current_version_started_at = now
+                self.version_progress_value.set(0)
+                self.current_version_frame.configure(text=f"Versão atual: {event.version}")
+            self.version_progress_value.set(event.percent)
+            self.version_stage_text.set(event.stage)
+            if event.percent == 100 and self._current_version_started_at is not None:
+                self._recent_version_durations.append(now - self._current_version_started_at)
+                self._current_version_started_at = None
+            self._update_version_timing(now)
+        now = time.monotonic()
+        if self._current_version_started_at is not None and now - self._version_last_clock_update >= 0.5:
+            self._update_version_timing(now)
+
+    def _update_version_timing(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        self._version_last_clock_update = now
+        elapsed = (
+            now - self._current_version_started_at
+            if self._current_version_started_at is not None
+            else 0.0
+        )
+        if self._recent_version_durations:
+            average = sum(self._recent_version_durations) / len(self._recent_version_durations)
+            remaining = average * max(self._progress_total - self._progress_completed, 0)
+            average_text = self._format_duration(average)
+            eta_text = self._format_duration(remaining)
+        else:
+            average_text = eta_text = "calculando"
+        self.version_timing_text.set(
+            f"Tempo da versão: {self._format_duration(elapsed)} | "
+            f"Média recente: {average_text} | Estimativa restante: {eta_text}"
+        )
+
     def _poll_checkpoint_updates(self) -> None:
         """Transfere checkpoints confirmados da worker para as variáveis Tk."""
         if not hasattr(self, "_checkpoint_updates"):
@@ -858,6 +931,8 @@ class AuditApplication(ttk.Frame):
                 break
         if latest is not None:
             self.status.set(latest)
+            if getattr(self, "_current_version_started_at", None) is not None:
+                self.version_stage_text.set(latest)
 
     def _update_progress(self, completed: int, total: int) -> None:
         if self._audit_started_at is None:
@@ -875,9 +950,11 @@ class AuditApplication(ttk.Frame):
         else:
             estimate = "calculando"
         self.progress_text.set(
-            f"Progresso da auditoria: {completed}/{total} ({percent:.0f}%) | "
+            f"{completed} / {total} ({percent:.0f}%) | "
             f"Estimativa: {estimate} | Tempo total: {self._format_duration(elapsed)}"
         )
+        if hasattr(self, "version_timing_text"):
+            self._update_version_timing()
 
     def _finish_progress(self, *, failed: bool = False) -> None:
         if self._audit_started_at is None:
