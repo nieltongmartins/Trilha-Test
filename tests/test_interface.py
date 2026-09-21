@@ -302,6 +302,46 @@ def test_audit_progress_displays_percentage_estimate_and_elapsed(monkeypatch) ->
     )
 
 
+def test_confirmed_checkpoints_update_details_only_when_polled_on_main_thread() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application.details = VariableFake()
+    application._latest_available = "40.467"
+    application._checkpoint_updates = queue.SimpleQueue()
+    main_thread = threading.get_ident()
+
+    def worker() -> None:
+        application._checkpoint_updates.put(("2.18", 1, 19346))
+        application._checkpoint_updates.put(("2.19", 2, 19345))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    # A worker apenas enfileira: nenhuma variável Tk é tocada antes do polling.
+    assert application.details.set_threads == []
+    application._poll_checkpoint_updates()
+
+    assert application.details.value == (
+        "Última auditada: 2.19 | Última disponível: 40.467 | Pendentes: 19345"
+    )
+    assert application.details.set_threads == [main_thread, main_thread]
+
+
+def test_checkpoint_update_keeps_latest_available_from_explicit_refresh() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application.details = VariableFake()
+    application.audit_button = ButtonFake()
+    application.status = VariableFake()
+    application._version_scan_active = False
+
+    application._show_status_finished(("2.17", "40.467", 19347, 19349))
+    application._set_audit_details("2.18", 19346)
+
+    assert application.details.value == (
+        "Última auditada: 2.18 | Última disponível: 40.467 | Pendentes: 19346"
+    )
+
+
 def test_duration_uses_hours_only_when_needed() -> None:
     assert AuditApplication._format_duration(65) == "01:05"
     assert AuditApplication._format_duration(3661) == "01:01:01"

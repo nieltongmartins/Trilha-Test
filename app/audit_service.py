@@ -39,10 +39,12 @@ class AuditService:
         database: Database,
         source: VersionSource,
         progress_callback: Callable[[int, int], None] | None = None,
+        checkpoint_callback: Callable[[str, int, int], None] | None = None,
     ) -> None:
         self.database = database
         self.source = source
         self.progress_callback = progress_callback
+        self.checkpoint_callback = checkpoint_callback
 
     def audit(
         self,
@@ -205,6 +207,7 @@ class AuditService:
                 )
             processed += 1
             self._report_progress(processed, len(pairs))
+            self._report_checkpoint(current.number, processed, len(pairs) - processed)
             total_changes += len(changes)
             final = current.number
             previous_snapshot = current_snapshot
@@ -241,6 +244,19 @@ class AuditService:
                 self.progress_callback(completed, total)
             except Exception:
                 logger.warning("Falha ao publicar progresso da auditoria", exc_info=True)
+
+    def _report_checkpoint(
+        self, version: str, processed: int, pending: int
+    ) -> None:
+        """Publica somente checkpoints cujo bloco transacional já foi confirmado."""
+        if self.checkpoint_callback is not None:
+            try:
+                self.checkpoint_callback(version, processed, pending)
+            except Exception:
+                logger.warning(
+                    "Falha ao publicar checkpoint confirmado da auditoria",
+                    exc_info=True,
+                )
 
     def _start_prefetch(
         self, spreadsheet: SpreadsheetInfo, version: VersionInfo

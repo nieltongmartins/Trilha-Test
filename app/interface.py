@@ -74,6 +74,9 @@ class AuditApplication(ttk.Frame):
             queue.SimpleQueue()
         )
         self._progress_updates: queue.SimpleQueue[tuple[int, int]] = queue.SimpleQueue()
+        self._checkpoint_updates: queue.SimpleQueue[tuple[str, int, int]] = (
+            queue.SimpleQueue()
+        )
         self._report_updates: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._version_scan_updates: queue.SimpleQueue[int] = queue.SimpleQueue()
         self._version_scan_started_at: float | None = None
@@ -81,6 +84,7 @@ class AuditApplication(ttk.Frame):
         self._audit_started_at: float | None = None
         self._progress_completed = 0
         self._progress_total = 0
+        self._latest_available = "—"
         self._hidden_clicks: list[float] = []
         # AuditService, ReportService, leitor XLSX/openpyxl, fontes SharePoint e
         # Graph permanecem fora deste caminho e são importados somente nas ações.
@@ -587,10 +591,8 @@ class AuditApplication(ttk.Frame):
     ) -> None:
         checkpoint, latest, pending, total_versions = result
         self._end_version_scan(total_versions=total_versions)
-        self.details.set(
-            f"Última auditada: {checkpoint or '—'} | "
-            f"Última disponível: {latest} | Pendentes: {pending}"
-        )
+        self._latest_available = latest
+        self._set_audit_details(checkpoint, pending)
         self.audit_button.configure(
             text="Continuar auditoria" if checkpoint else "Auditar histórico"
         )
@@ -626,10 +628,16 @@ class AuditApplication(ttk.Frame):
         def report_progress(completed: int, total: int) -> None:
             self._progress_updates.put((completed, total))
 
+        def report_checkpoint(version: str, completed: int, pending: int) -> None:
+            self._checkpoint_updates.put((version, completed, pending))
+
         self._start_work(
             "Auditoria em andamento...",
             lambda: AuditService(
-                self.database, source, progress_callback=report_progress
+                self.database,
+                source,
+                progress_callback=report_progress,
+                checkpoint_callback=report_checkpoint,
             ).audit(spreadsheet, versions=cached_versions),
             self._audit_finished,
         )
@@ -706,6 +714,7 @@ class AuditApplication(ttk.Frame):
 
     def _poll_work_result(self, finished: Callable) -> None:
         self._poll_progress_updates()
+        self._poll_checkpoint_updates()
         self._poll_version_scan_updates()
         self._poll_report_updates()
         try:
@@ -819,6 +828,23 @@ class AuditApplication(ttk.Frame):
             self._update_progress(completed, total)
         if getattr(self, "_audit_started_at", None) is not None:
             self._update_progress(self._progress_completed, self._progress_total)
+
+    def _poll_checkpoint_updates(self) -> None:
+        """Transfere checkpoints confirmados da worker para as variáveis Tk."""
+        if not hasattr(self, "_checkpoint_updates"):
+            return
+        while True:
+            try:
+                version, _completed, pending = self._checkpoint_updates.get_nowait()
+            except queue.Empty:
+                break
+            self._set_audit_details(version, pending)
+
+    def _set_audit_details(self, checkpoint: str | None, pending: int) -> None:
+        self.details.set(
+            f"Última auditada: {checkpoint or '—'} | "
+            f"Última disponível: {self._latest_available} | Pendentes: {pending}"
+        )
 
     def _poll_report_updates(self) -> None:
         """Transfere para o Tk, na main thread, somente a mensagem mais recente."""
