@@ -578,6 +578,14 @@ class BrowserSharePointSource:
         entregar uma lista incompleta à auditoria.
         """
         self._validate_spreadsheet(spreadsheet)
+        # Um watermark antes/depois impede aceitar silenciosamente uma lista
+        # montada enquanto uma nova versão era publicada no SharePoint.
+        initial_metadata = self._file_metadata(spreadsheet)
+        initial_watermark = (
+            initial_metadata.get("UniqueId"),
+            initial_metadata.get("UIVersion"),
+            initial_metadata.get("UIVersionLabel"),
+        )
         encoded = _escape_odata_path(spreadsheet.path or "")
         base_relative = (
             f"web/GetFileByServerRelativeUrl('{encoded}')/Versions"
@@ -590,15 +598,29 @@ class BrowserSharePointSource:
         )
         historical: list[VersionInfo] = []
         seen_ids: set[str] = set()
+        labels_to_ids: dict[str, str] = {}
+        visited_page_urls: set[str] = set()
+        ordering_direction = 0
+        last_version_id: int | None = None
         page = 0
         skip = 0
         started = time.perf_counter()
 
         while next_url:
+            if next_url in visited_page_urls:
+                raise SharePointReadError(
+                    "SharePoint repetiu o nextLink; a enumeração pode estar incompleta."
+                )
+            visited_page_urls.add(next_url)
             page += 1
             payload = self._json_url_with_retry(next_url, page=page)
             items = _odata_results(payload)
-            new_in_page = 0
+
+            if not items and self._next_page_url(payload) is not None:
+                raise SharePointReadError(
+                    "SharePoint retornou página vazia com continuação; "
+                    "a enumeração pode estar incompleta."
+                )
 
             for item in items:
                 version_id, label = item.get("ID"), item.get("VersionLabel")
@@ -608,16 +630,29 @@ class BrowserSharePointSource:
                     )
                 version_key = str(version_id)
                 if version_key in seen_ids:
-                    continue
-                seen_ids.add(version_key)
-                historical.append(self._historical_version(item, version_id, label))
-                new_in_page += 1
+                    raise SharePointReadError(
+                        f"Versão duplicada na paginação: ID {version_key}."
+                    )
+                known_id = labels_to_ids.get(label)
+                if known_id is not None and known_id != version_key:
+                    raise SharePointReadError(
+                        "VersionLabel associado a IDs diferentes na paginação: "
+                        f"{label}."
+                    )
 
-            if items and new_in_page == 0:
-                raise SharePointReadError(
-                    "SharePoint repetiu a mesma página de versões; "
-                    "a enumeração foi interrompida para evitar histórico incompleto."
-                )
+                if last_version_id is not None:
+                    step = 1 if version_id > last_version_id else -1
+                    if ordering_direction == 0:
+                        ordering_direction = step
+                    elif step != ordering_direction:
+                        raise SharePointReadError(
+                            "Página de versões fora de ordem monotônica; "
+                            "a enumeração foi rejeitada."
+                        )
+                last_version_id = version_id
+                seen_ids.add(version_key)
+                labels_to_ids[label] = version_key
+                historical.append(self._historical_version(item, version_id, label))
 
             if progress_callback is not None:
                 try:
@@ -632,7 +667,7 @@ class BrowserSharePointSource:
                 "Enumeração de versões pagina=%d lote=%d novas=%d acumulado=%d skip=%d planilha=%s",
                 page,
                 len(items),
-                new_in_page,
+                len(items),
                 len(historical),
                 skip,
                 spreadsheet.name,
@@ -665,6 +700,16 @@ class BrowserSharePointSource:
         )
 
         metadata = self._file_metadata(spreadsheet)
+        final_watermark = (
+            metadata.get("UniqueId"),
+            metadata.get("UIVersion"),
+            metadata.get("UIVersionLabel"),
+        )
+        if initial_watermark != final_watermark:
+            raise SharePointReadError(
+                "A versão atual mudou durante a paginação; a enumeração "
+                "foi rejeitada como potencialmente incompleta."
+            )
         unique_id = metadata.get("UniqueId")
         if (
             not isinstance(unique_id, str)
@@ -702,11 +747,29 @@ class BrowserSharePointSource:
             source_url=spreadsheet.path,
             is_current=True,
         )
-        # O endpoint histórico pode eventualmente repetir a atual. A identidade/label
-        # retornados, nunca uma derivação entre ambos, controlam a deduplicação.
-        combined = [
-            v for v in historical if v.id != current.id and v.number != current.number
-        ]
+        current_by_id = next((v for v in historical if v.id == current.id), None)
+        current_by_label = next(
+            (v for v in historical if v.number == current.number), None
+        )
+        if (current_by_id is None) != (current_by_label is None):
+            raise SharePointReadError(
+                "Versão atual inconsistente entre ID e VersionLabel."
+            )
+        if current_by_id is not None and current_by_id is not current_by_label:
+            raise SharePointReadError(
+                "Versão atual possui correspondência conflitante de ID/VersionLabel."
+            )
+        marked_current = [version for version in historical if version.is_current]
+        if any(version is not current_by_id for version in marked_current):
+            raise SharePointReadError(
+                "Histórico marcou como atual uma versão diferente dos metadados do arquivo."
+            )
+        if len(marked_current) > 1:
+            raise SharePointReadError("Histórico retornou mais de uma versão atual.")
+
+        # Quando o endpoint histórico inclui a atual, substituímos somente a
+        # duplicata exata pelos metadados atuais mais completos.
+        combined = [version for version in historical if version is not current_by_id]
         combined.append(current)
         logger.info(
             "Versões enumeradas planilha=%s identidade=%s total=%d modo=read-only",

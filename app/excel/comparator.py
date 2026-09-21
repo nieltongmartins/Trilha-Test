@@ -65,30 +65,37 @@ def compare_snapshots(previous: Snapshot, current: Snapshot) -> list[CellChange]
     for sheet in sorted(set(previous) | set(current)):
         previous_cells = previous.get(sheet, {})
         current_cells = current.get(sheet, {})
-        addresses = previous_cells.keys() | current_cells.keys()
+        sheet_changes: list[CellChange] = []
 
-        for address in sorted(addresses, key=_address_key):
-            existed = _has_content(previous_cells, address)
+        # Detecte primeiro em O(n), sem ordenar centenas de milhares de
+        # endereços que permaneceram iguais. Somente o conjunto normalmente
+        # pequeno de diferenças precisa da ordenação determinística final.
+        for address, previous_value in previous_cells.items():
+            existed = previous_value is not None
             exists = _has_content(current_cells, address)
-            previous_value = previous_cells.get(address)
-            new_value = current_cells.get(address)
-
-            if not existed and exists:
-                change_type = ChangeType.ADD
-            elif existed and not exists:
-                change_type = ChangeType.DEL
-            elif existed and exists and not _values_equal(previous_value, new_value):
-                change_type = ChangeType.MOD
-            else:
-                continue
-
-            changes.append(
-                CellChange(
-                    sheet=sheet,
-                    address=address,
-                    change_type=change_type,
-                    previous_value=previous_value,
-                    new_value=new_value,
+            if existed and not exists:
+                sheet_changes.append(
+                    CellChange(
+                        sheet, address, ChangeType.DEL, previous_value, None
+                    )
                 )
-            )
+                continue
+            if not existed or not exists:
+                continue
+            new_value = current_cells[address]
+            if not _values_equal(previous_value, new_value):
+                sheet_changes.append(
+                    CellChange(
+                        sheet, address, ChangeType.MOD, previous_value, new_value
+                    )
+                )
+
+        for address, new_value in current_cells.items():
+            if new_value is not None and not _has_content(previous_cells, address):
+                sheet_changes.append(
+                    CellChange(sheet, address, ChangeType.ADD, None, new_value)
+                )
+
+        sheet_changes.sort(key=lambda change: _address_key(change.address))
+        changes.extend(sheet_changes)
     return changes
