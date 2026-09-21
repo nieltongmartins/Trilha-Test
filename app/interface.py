@@ -66,6 +66,7 @@ class AuditApplication(ttk.Frame):
             queue.SimpleQueue()
         )
         self._progress_updates: queue.SimpleQueue[tuple[int, int]] = queue.SimpleQueue()
+        self._report_updates: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._version_scan_updates: queue.SimpleQueue[int] = queue.SimpleQueue()
         self._version_scan_started_at: float | None = None
         self._version_scan_active = False
@@ -607,7 +608,8 @@ class AuditApplication(ttk.Frame):
         self._start_work(
             "Gerando relatório...",
             lambda: ReportService(
-                self.database.connection, self.reports_directory
+                self.database.connection, self.reports_directory,
+                progress_callback=self._report_updates.put,
             ).generate(row["id"]),
             self._report_finished,
         )
@@ -651,6 +653,7 @@ class AuditApplication(ttk.Frame):
     def _poll_work_result(self, finished: Callable) -> None:
         self._poll_progress_updates()
         self._poll_version_scan_updates()
+        self._poll_report_updates()
         try:
             succeeded, result = self._work_results.get_nowait()
         except queue.Empty:
@@ -762,6 +765,19 @@ class AuditApplication(ttk.Frame):
             self._update_progress(completed, total)
         if getattr(self, "_audit_started_at", None) is not None:
             self._update_progress(self._progress_completed, self._progress_total)
+
+    def _poll_report_updates(self) -> None:
+        """Transfere para o Tk, na main thread, somente a mensagem mais recente."""
+        if not hasattr(self, "_report_updates"):
+            return
+        latest: str | None = None
+        while True:
+            try:
+                latest = self._report_updates.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None:
+            self.status.set(latest)
 
     def _update_progress(self, completed: int, total: int) -> None:
         if self._audit_started_at is None:
