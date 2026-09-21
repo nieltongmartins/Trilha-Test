@@ -59,17 +59,29 @@ class AuditStorageManager:
     def list_audits(self) -> list[StoredAudit]:
         rows = self.database.connection.execute(
             """
+            WITH versoes AS (
+                SELECT planilha_id, COUNT(*) AS total
+                  FROM versao_processada
+                 GROUP BY planilha_id
+            ), alteracoes AS (
+                SELECT planilha_id, COUNT(*) AS total
+                  FROM alteracao
+                 GROUP BY planilha_id
+            ), execucoes AS (
+                SELECT planilha_id, MAX(fim) AS ultima
+                  FROM execucao_auditoria
+                 GROUP BY planilha_id
+            )
             SELECT p.id, p.nome_atual, p.caminho_sharepoint, p.drive_item_id,
                    c.versao_numero,
-                   COUNT(DISTINCT v.id) AS versoes,
-                   COUNT(DISTINCT a.id) AS alteracoes,
-                   MAX(e.fim) AS ultima_auditoria
+                   COALESCE(v.total, 0) AS versoes,
+                   COALESCE(a.total, 0) AS alteracoes,
+                   e.ultima AS ultima_auditoria
               FROM planilha p
               LEFT JOIN checkpoint c ON c.planilha_id=p.id
-              LEFT JOIN versao_processada v ON v.planilha_id=p.id
-              LEFT JOIN alteracao a ON a.planilha_id=p.id
-              LEFT JOIN execucao_auditoria e ON e.planilha_id=p.id
-             GROUP BY p.id
+              LEFT JOIN versoes v ON v.planilha_id=p.id
+              LEFT JOIN alteracoes a ON a.planilha_id=p.id
+              LEFT JOIN execucoes e ON e.planilha_id=p.id
              ORDER BY p.nome_atual COLLATE NOCASE, p.id
             """
         ).fetchall()

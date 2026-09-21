@@ -37,6 +37,19 @@ def test_list_stored_audits_uses_database(populated):
     assert (audit.id, audit.name, audit.last_version, audit.processed_versions, audit.changes) == (spreadsheet_id, "CQL001.xlsx", "1.1", 1, 1)
 
 
+def test_list_stored_audits_aggregates_each_large_table_before_join(populated):
+    database, manager, _ = populated
+    statements: list[str] = []
+    database.connection.set_trace_callback(statements.append)
+
+    manager.list_audits()
+
+    database.connection.set_trace_callback(None)
+    query = next(sql for sql in statements if "WITH versoes AS" in sql)
+    assert "COUNT(DISTINCT" not in query
+    assert query.index("GROUP BY planilha_id") < query.index("FROM planilha p")
+
+
 def test_individual_backup_restore_preserves_checkpoint_hashes_and_foreign_keys(populated):
     database, manager, spreadsheet_id = populated
     backup = manager.backup_individual(spreadsheet_id)
