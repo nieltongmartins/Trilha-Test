@@ -51,14 +51,22 @@ fetch(url, {method: 'GET', credentials: 'same-origin', headers: {'Accept': 'appl
 _BEGIN_DOWNLOAD_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 const url = arguments[0];
-fetch(url, {method: 'GET', credentials: 'same-origin'})
+const timeoutMs = arguments[1];
+const controller = new AbortController();
+const timer = setTimeout(() => controller.abort(), timeoutMs);
+window.__auditDownloadController = controller;
+fetch(url, {method: 'GET', credentials: 'same-origin', signal: controller.signal})
   .then(async response => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.blob();
   }).then(blob => {
     window.__auditDownloadBlob = blob;
     done({ok: true, size: blob.size});
-  }).catch(error => done({error: String(error)}));
+  }).catch(error => done({error: String(error), timeout: error && error.name === 'AbortError'}))
+  .finally(() => {
+    clearTimeout(timer);
+    if (window.__auditDownloadController === controller) window.__auditDownloadController = null;
+  });
 """
 
 _READ_DOWNLOAD_CHUNK_SCRIPT = r"""
@@ -87,19 +95,27 @@ if (!(blob instanceof Blob)) {
 _CLEAR_DOWNLOAD_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 window.__auditDownloadBlob = null;
+if (window.__auditDownloadController) window.__auditDownloadController.abort();
+window.__auditDownloadController = null;
 done({ok: true});
 """
 
 _START_PREFETCH_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 const url = arguments[0];
+const timeoutMs = arguments[1];
+const token = arguments[2];
 const current = window.__auditPrefetch;
-if (current && current.url === url && (current.state === 'loading' || current.state === 'ready')) {
+if (current && current.url === url && current.token === token && (current.state === 'loading' || current.state === 'ready')) {
   done({ok: true, state: current.state});
 } else {
-  const slot = {url, state: 'loading', blob: null, size: 0, error: null};
+  if (current && current.controller) current.controller.abort();
+  const controller = new AbortController();
+  const slot = {url, token, state: 'loading', blob: null, buffer: null, size: 0,
+                error: null, timedOut: false, controller};
   window.__auditPrefetch = slot;
-  fetch(url, {method: 'GET', credentials: 'same-origin'})
+  const timer = setTimeout(() => { slot.timedOut = true; controller.abort(); }, timeoutMs);
+  fetch(url, {method: 'GET', credentials: 'same-origin', signal: controller.signal})
     .then(async response => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.blob();
@@ -116,7 +132,7 @@ if (current && current.url === url && (current.state === 'loading' || current.st
         slot.error = String(error);
         slot.state = 'error';
       }
-    });
+    }).finally(() => clearTimeout(timer));
   done({ok: true, state: 'started'});
 }
 """
@@ -124,12 +140,13 @@ if (current && current.url === url && (current.state === 'loading' || current.st
 _WAIT_PREFETCH_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 const url = arguments[0];
+const token = arguments[1];
 const waitStarted = performance.now();
 const initial = window.__auditPrefetch;
 const wasReady = !!(initial && initial.url === url && initial.state === 'ready' && initial.blob instanceof Blob);
 function poll() {
   const slot = window.__auditPrefetch;
-  if (!slot || slot.url !== url) {
+  if (!slot || slot.url !== url || slot.token !== token) {
     done({error: 'prefetch indisponível'});
     return;
   }
@@ -139,7 +156,7 @@ function poll() {
     return;
   }
   if (slot.state === 'error') {
-    done({error: slot.error || 'falha no prefetch'});
+    done({error: slot.error || 'falha no prefetch', timeout: !!slot.timedOut});
     return;
   }
   setTimeout(poll, 50);
@@ -150,10 +167,11 @@ poll();
 _READ_PREFETCH_CHUNK_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 const url = arguments[0];
-const offset = arguments[1];
-const length = arguments[2];
+const token = arguments[1];
+const offset = arguments[2];
+const length = arguments[3];
 const slot = window.__auditPrefetch;
-if (!slot || slot.url !== url || !(slot.blob instanceof Blob)) {
+if (!slot || slot.url !== url || slot.token !== token || !(slot.blob instanceof Blob)) {
   done({error: 'prefetch não inicializado'});
 } else {
   slot.blob.slice(offset, offset + length).arrayBuffer()
@@ -176,6 +194,8 @@ const done = arguments[arguments.length - 1];
 const url = arguments[0];
 const slot = window.__auditPrefetch;
 if (!slot || !url || slot.url === url) {
+  if (slot && slot.controller) slot.controller.abort();
+  if (slot) { slot.blob = null; slot.buffer = null; slot.error = null; }
   window.__auditPrefetch = null;
 }
 done({ok: true});
@@ -183,6 +203,9 @@ done({ok: true});
 _DOWNLOAD_CHUNK_SIZE = 512 * 1024
 _VERSION_PAGE_SIZE = 1000
 _VERSION_PAGE_RETRIES = 3
+FETCH_OPERATION_TIMEOUT_SECONDS = 60
+PREFETCH_RETRIES = 1
+NORMAL_DOWNLOAD_RETRIES = 1
 
 
 def _odata_value(payload: Mapping[str, Any]) -> object:
@@ -243,6 +266,7 @@ class BrowserSharePointSource:
         *,
         temp_directory: str | Path = "data/temp",
         owns_browser: bool = False,
+        status_callback: Callable[[str], None] | None = None,
     ) -> None:
         parsed = urlsplit(site_url)
         if parsed.scheme != "https" or not parsed.netloc:
@@ -265,6 +289,9 @@ class BrowserSharePointSource:
         self._workspace = TemporaryWorkspace(temp_directory)
         self._prefetch_url: str | None = None
         self._prefetch_started_at: float | None = None
+        self._prefetch_token: str | None = None
+        self._prefetch_version_id: str | None = None
+        self._status_callback = status_callback
         self._incremental_digests: dict[Path, str] = {}
 
     @classmethod
@@ -922,7 +949,13 @@ class BrowserSharePointSource:
         """
         url = self._version_download_url(spreadsheet, version)
         started = time.perf_counter()
-        result = self._browser.execute_async_script(_START_PREFETCH_SCRIPT, url)
+        token = f"{version.id}:{time.monotonic_ns()}"
+        result = self._browser.execute_async_script(
+            _START_PREFETCH_SCRIPT,
+            url,
+            int(FETCH_OPERATION_TIMEOUT_SECONDS * 1000),
+            token,
+        )
         if not isinstance(result, Mapping) or result.get("error") or not result.get("ok"):
             detail = result.get("error") if isinstance(result, Mapping) else "resposta inválida"
             logger.warning(
@@ -934,6 +967,8 @@ class BrowserSharePointSource:
             return False
         self._prefetch_url = url
         self._prefetch_started_at = started
+        self._prefetch_token = token
+        self._prefetch_version_id = version.id
         logger.info(
             "PERF prefetch_iniciado planilha=%s versao=%s estado=%s",
             spreadsheet.name,
@@ -952,6 +987,36 @@ class BrowserSharePointSource:
         finally:
             self._prefetch_url = None
             self._prefetch_started_at = None
+            self._prefetch_token = None
+            self._prefetch_version_id = None
+
+    def _notify_status(self, message: str) -> None:
+        if self._status_callback is not None:
+            try:
+                self._status_callback(message)
+            except Exception:
+                logger.warning("Falha ao publicar estado do fetch", exc_info=True)
+
+    def set_status_callback(self, callback: Callable[[str], None] | None) -> None:
+        """Define o canal thread-safe usado para mensagens operacionais da UI."""
+        self._status_callback = callback
+
+    def _abort_attempt(
+        self, spreadsheet: SpreadsheetInfo, version: VersionInfo, *, use_prefetch: bool
+    ) -> None:
+        cleanup_ok = True
+        try:
+            if use_prefetch:
+                self.cancel_prefetch()
+            else:
+                self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
+        except Exception:
+            cleanup_ok = False
+            logger.warning("Falha ao limpar tentativa de fetch", exc_info=True)
+        logger.warning(
+            "PERF fetch_abortado planilha=%s versao=%s limpeza_ok=%s",
+            spreadsheet.name, version.number, str(cleanup_ok).lower(),
+        )
 
     def _download_to_destination(
         self,
@@ -961,6 +1026,7 @@ class BrowserSharePointSource:
         destination: Path,
         *,
         use_prefetch: bool,
+        attempt: int,
     ) -> Path:
         total_started = time.perf_counter()
         prefetch_started_at = self._prefetch_started_at if use_prefetch else None
@@ -978,9 +1044,15 @@ class BrowserSharePointSource:
             "prefetch" if use_prefetch else "normal",
         )
         if use_prefetch:
-            result = self._browser.execute_async_script(_WAIT_PREFETCH_SCRIPT, url)
+            result = self._browser.execute_async_script(
+                _WAIT_PREFETCH_SCRIPT, url, self._prefetch_token
+            )
         else:
-            result = self._browser.execute_async_script(_BEGIN_DOWNLOAD_SCRIPT, url)
+            result = self._browser.execute_async_script(
+                _BEGIN_DOWNLOAD_SCRIPT,
+                url,
+                int(FETCH_OPERATION_TIMEOUT_SECONDS * 1000),
+            )
         begin_seconds = time.perf_counter() - begin_started
 
         if (
@@ -989,9 +1061,20 @@ class BrowserSharePointSource:
             or not result.get("ok")
         ):
             detail = result.get("error") if isinstance(result, Mapping) else "resposta inválida"
-            if not use_prefetch:
-                self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
-            raise SharePointReadError(f"Falha no download SharePoint REST: {detail}")
+            timed_out = bool(isinstance(result, Mapping) and result.get("timeout"))
+            if timed_out:
+                logger.warning(
+                    "PERF fetch_timeout planilha=%s versao=%s modo=%s tentativa=%d "
+                    "timeout=%.3fs prefetch_idade=%.3fs url=%s",
+                    spreadsheet.name, version.number,
+                    "prefetch" if use_prefetch else "normal", attempt,
+                    FETCH_OPERATION_TIMEOUT_SECONDS, prefetch_age, url,
+                )
+            self._abort_attempt(spreadsheet, version, use_prefetch=use_prefetch)
+            reason = "timeout" if timed_out else "erro"
+            raise SharePointReadError(
+                f"Falha no download SharePoint REST ({reason}): {detail}"
+            )
 
         temporary = destination.with_suffix(destination.suffix + ".part")
         clear_seconds = 0.0
@@ -1043,6 +1126,7 @@ class BrowserSharePointSource:
                         chunk = self._browser.execute_async_script(
                             _READ_PREFETCH_CHUNK_SCRIPT,
                             url,
+                            self._prefetch_token,
                             offset,
                             requested,
                         )
@@ -1131,6 +1215,8 @@ class BrowserSharePointSource:
                 self._browser.execute_async_script(_CLEAR_PREFETCH_SCRIPT, url)
                 self._prefetch_url = None
                 self._prefetch_started_at = None
+                self._prefetch_token = None
+                self._prefetch_version_id = None
             else:
                 self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
             clear_seconds = time.perf_counter() - clear_started
@@ -1178,25 +1264,74 @@ class BrowserSharePointSource:
             spreadsheet.drive_item_id,
             version.id,
         )
-        use_prefetch = self._prefetch_url == url
+        use_prefetch = (
+            self._prefetch_url == url and self._prefetch_version_id == version.id
+        )
         if use_prefetch:
+            last_prefetch_error: Exception | None = None
+            for attempt in range(1, PREFETCH_RETRIES + 2):
+                try:
+                    return self._download_to_destination(
+                        spreadsheet, version, url, destination,
+                        use_prefetch=True, attempt=attempt,
+                    )
+                except SharePointReadError as error:
+                    last_prefetch_error = error
+                    if attempt <= PREFETCH_RETRIES:
+                        logger.warning(
+                            "PERF fetch_retry planilha=%s versao=%s modo=prefetch "
+                            "tentativa=%d motivo=%s",
+                            spreadsheet.name, version.number, attempt + 1,
+                            "timeout" if "timeout" in str(error) else "erro",
+                        )
+                        self._notify_status(
+                            f"Prefetch excedeu {FETCH_OPERATION_TIMEOUT_SECONDS} s. "
+                            f"Retry {attempt}/{PREFETCH_RETRIES}..."
+                        )
+                        if not self.prefetch_version(spreadsheet, version):
+                            break
+            assert last_prefetch_error is not None
+            logger.warning(
+                    "PERF fetch_fallback planilha=%s versao=%s origem=prefetch "
+                    "destino=normal motivo=%s",
+                    spreadsheet.name, version.number,
+                    "timeout" if "timeout" in str(last_prefetch_error) else "erro",
+                )
+            self._notify_status(
+                f"Fallback para download normal da versão {version.number}..."
+            )
+            self.cancel_prefetch()
+
+        last_error: Exception | None = None
+        for attempt in range(1, NORMAL_DOWNLOAD_RETRIES + 2):
             try:
                 return self._download_to_destination(
-                    spreadsheet, version, url, destination, use_prefetch=True
+                    spreadsheet, version, url, destination,
+                    use_prefetch=False, attempt=attempt,
                 )
             except SharePointReadError as error:
+                last_error = error
+                if attempt <= NORMAL_DOWNLOAD_RETRIES:
+                    logger.warning(
+                        "PERF fetch_retry planilha=%s versao=%s modo=normal "
+                        "tentativa=%d motivo=%s",
+                        spreadsheet.name, version.number, attempt + 1,
+                        "timeout" if "timeout" in str(error) else "erro",
+                    )
+                    self._notify_status(
+                        "SharePoint demorando para responder. Tentando novamente..."
+                    )
+                    continue
                 logger.warning(
-                    "Prefetch falhou; repetindo download normal planilha=%s versao=%s "
-                    "url=%s fallback_download_normal=true retry=1 erro=%s",
-                    spreadsheet.name,
-                    version.number,
-                    url,
-                    error,
+                    "PERF fetch_falha_final planilha=%s versao=%s tentativas=%d erro=%s",
+                    spreadsheet.name, version.number, attempt, error,
                 )
-                self.cancel_prefetch()
-        return self._download_to_destination(
-            spreadsheet, version, url, destination, use_prefetch=False
+        assert last_error is not None
+        self._notify_status(
+            f"Falha ao obter a versão {version.number} após tentativas. "
+            "Auditoria interrompida com checkpoint preservado."
         )
+        raise last_error
 
     def release_version(self, path: Path) -> None:
         self._incremental_digests.pop(path, None)

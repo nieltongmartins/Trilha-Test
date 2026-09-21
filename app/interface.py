@@ -10,17 +10,18 @@ import subprocess
 import sys
 import threading
 import time
+from typing import TYPE_CHECKING
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
-from app.audit_service import AuditResult, AuditService
 from app.audit_storage import AuditStorageManager, RestoreConflictError
 from app.database import Database
 from app.models import AuditExecutionStatus
-from app.report_service import ReportService
 from app.report_artifacts import ReportArtifactManager
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
-from app.spreadsheet_comparator import ComparatorFrame
+
+if TYPE_CHECKING:
+    from app.audit_service import AuditResult
 
 
 logger = logging.getLogger("auditoria_excel.interface")
@@ -224,6 +225,8 @@ class AuditApplication(ttk.Frame):
             self._show_comparator()
 
     def _show_comparator(self) -> None:
+        from app.spreadsheet_comparator import ComparatorFrame
+
         if self._comparator_tab is None:
             self._comparator_tab = ComparatorFrame(
                 self.notebook, on_close=self._hide_comparator
@@ -419,6 +422,9 @@ class AuditApplication(ttk.Frame):
             self.status.set("Conecte ao SharePoint antes de atualizar a lista.")
             return
         source = self.source
+        set_status_callback = getattr(source, "set_status_callback", None)
+        if callable(set_status_callback):
+            set_status_callback(self._report_updates.put)
         self._version_cache.clear()
         self._start_work(
             "Consultando planilhas no SharePoint...",
@@ -550,6 +556,8 @@ class AuditApplication(ttk.Frame):
         self.status.set("Pronto.")
 
     def audit(self) -> None:
+        from app.audit_service import AuditService
+
         try:
             spreadsheet = self._selected()
         except ValueError as error:
@@ -559,6 +567,9 @@ class AuditApplication(ttk.Frame):
             self.status.set("Conecte ao SharePoint antes de auditar.")
             return
         source = self.source
+        set_status_callback = getattr(source, "set_status_callback", None)
+        if callable(set_status_callback):
+            set_status_callback(self._report_updates.put)
         cached_versions = self._cached_versions(spreadsheet)
         self.progress_bar.stop()
         self.progress_bar.configure(mode="determinate")
@@ -594,6 +605,8 @@ class AuditApplication(ttk.Frame):
         self.show_status()
 
     def generate_report(self) -> None:
+        from app.report_service import ReportService
+
         try:
             spreadsheet = self._selected()
         except ValueError as error:
