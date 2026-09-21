@@ -19,7 +19,7 @@ from app.database import Database
 from app.models import AuditExecutionStatus
 from app.report_service import ReportService
 from app.report_artifacts import ReportArtifactManager
-from app.sources.base import SpreadsheetInfo, VersionSource
+from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 from app.spreadsheet_comparator import ComparatorFrame
 
 
@@ -55,12 +55,20 @@ class AuditApplication(ttk.Frame):
             getattr(database, "connection", database), self.reports_directory
         )
         self.spreadsheets: list[SpreadsheetInfo] = []
+        # Cache curto da enumeração de versões. A listagem pode levar minutos em
+        # arquivos com dezenas de milhares de versões; reutilizá-la evita repetir
+        # a mesma consulta ao clicar em "Continuar auditoria".
+        self._version_cache: dict[str, tuple[float, tuple[VersionInfo, ...]]] = {}
+        self._version_cache_ttl = 300.0
         self.last_report: Path | None = None
         self._busy = False
         self._work_results: queue.SimpleQueue[tuple[bool, object]] = (
             queue.SimpleQueue()
         )
         self._progress_updates: queue.SimpleQueue[tuple[int, int]] = queue.SimpleQueue()
+        self._version_scan_updates: queue.SimpleQueue[int] = queue.SimpleQueue()
+        self._version_scan_started_at: float | None = None
+        self._version_scan_active = False
         self._audit_started_at: float | None = None
         self._progress_completed = 0
         self._progress_total = 0
@@ -394,6 +402,7 @@ class AuditApplication(ttk.Frame):
     def _connected(self, source: VersionSource) -> None:
         previous = self.source
         self.source = source
+        self._version_cache.clear()
         if previous is not None and previous is not source:
             try:
                 previous.close()  # type: ignore[attr-defined]
@@ -409,6 +418,7 @@ class AuditApplication(ttk.Frame):
             self.status.set("Conecte ao SharePoint antes de atualizar a lista.")
             return
         source = self.source
+        self._version_cache.clear()
         self._start_work(
             "Consultando planilhas no SharePoint...",
             lambda: list(source.list_spreadsheets()),
@@ -435,6 +445,31 @@ class AuditApplication(ttk.Frame):
             raise ValueError("Selecione uma planilha")
         return self.spreadsheets[index]
 
+    @staticmethod
+    def _version_cache_key(spreadsheet: SpreadsheetInfo) -> str:
+        return f"{spreadsheet.site_id}|{spreadsheet.drive_id}|{spreadsheet.drive_item_id}"
+
+    def _cached_versions(
+        self, spreadsheet: SpreadsheetInfo
+    ) -> tuple[VersionInfo, ...] | None:
+        key = self._version_cache_key(spreadsheet)
+        cached = self._version_cache.get(key)
+        if cached is None:
+            return None
+        created_at, versions = cached
+        if time.monotonic() - created_at > self._version_cache_ttl:
+            self._version_cache.pop(key, None)
+            return None
+        return versions
+
+    def _store_versions(
+        self, spreadsheet: SpreadsheetInfo, versions: tuple[VersionInfo, ...]
+    ) -> None:
+        self._version_cache[self._version_cache_key(spreadsheet)] = (
+            time.monotonic(),
+            versions,
+        )
+
     def _database_row(self, spreadsheet: SpreadsheetInfo):
         return self.database.connection.execute(
             """SELECT p.id, c.versao_numero FROM planilha p
@@ -449,8 +484,12 @@ class AuditApplication(ttk.Frame):
         except ValueError as error:
             self.status.set(str(error))
             return
+
+        if self._cached_versions(spreadsheet) is None:
+            self._begin_version_scan()
+
         self._start_work(
-            "Consultando versões...",
+            "Consultando histórico de versões no SharePoint...",
             lambda: self._spreadsheet_status(spreadsheet),
             self._show_status_finished,
         )
@@ -460,7 +499,28 @@ class AuditApplication(ttk.Frame):
             raise RuntimeError("Conecte ao SharePoint antes de consultar versões.")
         row = self._database_row(spreadsheet)
         checkpoint = row["versao_numero"] if row else None
-        versions = list(self.source.list_versions(spreadsheet))
+        cached = self._cached_versions(spreadsheet)
+        if cached is None:
+            list_versions = getattr(self.source, "list_versions")
+            try:
+                versions = tuple(
+                    list_versions(
+                        spreadsheet,
+                        progress_callback=self._version_scan_updates.put,
+                    )
+                )
+            except TypeError:
+                # Compatibilidade com fontes alternativas que ainda implementem
+                # a assinatura antiga do protocolo VersionSource.
+                versions = tuple(list_versions(spreadsheet))
+            self._store_versions(spreadsheet, versions)
+        else:
+            versions = cached
+            logger.info(
+                "Lista de versões reutilizada do cache para status planilha=%s total=%d",
+                spreadsheet.name,
+                len(versions),
+            )
         latest = versions[-1].number if versions else "—"
         ids = [version.id for version in versions]
         pending = max(len(versions) - 1, 0)
@@ -472,10 +532,13 @@ class AuditApplication(ttk.Frame):
                 pending = max(
                     len(versions) - ids.index(checkpoint_row["versao_id"]) - 1, 0
                 )
-        return checkpoint, latest, pending
+        return checkpoint, latest, pending, len(versions)
 
-    def _show_status_finished(self, result: tuple[str | None, str, int]) -> None:
-        checkpoint, latest, pending = result
+    def _show_status_finished(
+        self, result: tuple[str | None, str, int, int]
+    ) -> None:
+        checkpoint, latest, pending, total_versions = result
+        self._end_version_scan(total_versions=total_versions)
         self.details.set(
             f"Última auditada: {checkpoint or '—'} | "
             f"Última disponível: {latest} | Pendentes: {pending}"
@@ -495,6 +558,9 @@ class AuditApplication(ttk.Frame):
             self.status.set("Conecte ao SharePoint antes de auditar.")
             return
         source = self.source
+        cached_versions = self._cached_versions(spreadsheet)
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
         self._audit_started_at = time.monotonic()
         self._progress_completed = 0
         self._progress_total = 0
@@ -511,7 +577,7 @@ class AuditApplication(ttk.Frame):
             "Auditoria em andamento...",
             lambda: AuditService(
                 self.database, source, progress_callback=report_progress
-            ).audit(spreadsheet),
+            ).audit(spreadsheet, versions=cached_versions),
             self._audit_finished,
         )
 
@@ -584,6 +650,7 @@ class AuditApplication(ttk.Frame):
 
     def _poll_work_result(self, finished: Callable) -> None:
         self._poll_progress_updates()
+        self._poll_version_scan_updates()
         try:
             succeeded, result = self._work_results.get_nowait()
         except queue.Empty:
@@ -603,6 +670,8 @@ class AuditApplication(ttk.Frame):
     def _work_failed(self, error: Exception) -> None:
         self._busy = False
         self._set_action_state()
+        if self._version_scan_active:
+            self._end_version_scan(failed=True)
         if getattr(self, "_audit_started_at", None) is not None:
             elapsed = time.monotonic() - self._audit_started_at
             self.progress_text.set(
@@ -610,6 +679,77 @@ class AuditApplication(ttk.Frame):
             )
             self._audit_started_at = None
         self.status.set(f"Falha na operação: {error}")
+
+    def _begin_version_scan(self) -> None:
+        """Mostra atividade contínua enquanto o total de versões ainda é desconhecido."""
+        self._version_scan_started_at = time.monotonic()
+        self._version_scan_active = True
+        while True:
+            try:
+                self._version_scan_updates.get_nowait()
+            except queue.Empty:
+                break
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_value.set(0)
+        self.progress_bar.start(12)
+        self.progress_text.set(
+            "Carregando histórico do SharePoint... 0 versões encontradas | "
+            "Tempo: 00:00"
+        )
+
+    def _poll_version_scan_updates(self) -> None:
+        if not self._version_scan_active:
+            return
+        latest_count: int | None = None
+        while True:
+            try:
+                latest_count = self._version_scan_updates.get_nowait()
+            except queue.Empty:
+                break
+        if latest_count is None:
+            return
+        elapsed = (
+            time.monotonic() - self._version_scan_started_at
+            if self._version_scan_started_at is not None
+            else 0.0
+        )
+        self.progress_text.set(
+            f"Carregando histórico do SharePoint... "
+            f"{latest_count:,} versões encontradas | "
+            f"Tempo: {self._format_duration(elapsed)}"
+        )
+
+    def _end_version_scan(
+        self, *, total_versions: int | None = None, failed: bool = False
+    ) -> None:
+        if not self._version_scan_active:
+            return
+        elapsed = (
+            time.monotonic() - self._version_scan_started_at
+            if self._version_scan_started_at is not None
+            else 0.0
+        )
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_value.set(0 if failed else 100)
+        if failed:
+            self.progress_text.set(
+                "Carregamento do histórico interrompido | "
+                f"Tempo: {self._format_duration(elapsed)}"
+            )
+        else:
+            total_text = (
+                f"{total_versions:,} versões carregadas"
+                if total_versions is not None
+                else "histórico carregado"
+            )
+            self.progress_text.set(
+                f"Histórico do SharePoint: {total_text} | "
+                f"Tempo: {self._format_duration(elapsed)}"
+            )
+        self._version_scan_active = False
+        self._version_scan_started_at = None
 
     def _poll_progress_updates(self) -> None:
         if not hasattr(self, "_progress_updates"):

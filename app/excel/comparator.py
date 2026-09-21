@@ -1,6 +1,7 @@
 """Compara snapshots Excel sem acessar fonte externa ou persistência."""
 
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 
 from app.excel.reader import CellValue, Snapshot
@@ -21,6 +22,7 @@ class CellChange:
 _COORDINATE_PATTERN = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
 
 
+@lru_cache(maxsize=4096)
 def _column_number(letters: str) -> int:
     number = 0
     for letter in letters:
@@ -28,8 +30,17 @@ def _column_number(letters: str) -> int:
     return number
 
 
+@lru_cache(maxsize=262144)
 def _address_key(address: str) -> tuple[int, int, str]:
-    match = _COORDINATE_PATTERN.fullmatch(address.upper())
+    """Ordena endereços em ordem Excel e reutiliza chaves já calculadas.
+
+    Em históricos extensos, os mesmos endereços aparecem repetidamente entre
+    versões consecutivas. O cache evita repetir regex e conversão da coluna em
+    todas as comparações.
+    """
+
+    normalized = address.upper()
+    match = _COORDINATE_PATTERN.fullmatch(normalized)
     if match is None:
         return (2**31 - 1, 2**31 - 1, address)
     column, row = match.groups()
@@ -54,7 +65,7 @@ def compare_snapshots(previous: Snapshot, current: Snapshot) -> list[CellChange]
     for sheet in sorted(set(previous) | set(current)):
         previous_cells = previous.get(sheet, {})
         current_cells = current.get(sheet, {})
-        addresses = set(previous_cells) | set(current_cells)
+        addresses = previous_cells.keys() | current_cells.keys()
 
         for address in sorted(addresses, key=_address_key):
             existed = _has_content(previous_cells, address)

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import sqlite3
+import time
 from collections.abc import Callable
 from uuid import uuid4
 
@@ -43,7 +44,11 @@ class AuditService:
         self.source = source
         self.progress_callback = progress_callback
 
-    def audit(self, spreadsheet: SpreadsheetInfo) -> AuditResult:
+    def audit(
+        self,
+        spreadsheet: SpreadsheetInfo,
+        versions: list[VersionInfo] | tuple[VersionInfo, ...] | None = None,
+    ) -> AuditResult:
         connection = self.database.connection
         spreadsheet_id = self._upsert_spreadsheet(connection, spreadsheet)
         checkpoint = connection.execute(
@@ -78,7 +83,20 @@ class AuditService:
         )
 
         try:
-            versions = list(self.source.list_versions(spreadsheet))
+            if versions is None:
+                versions = list(self.source.list_versions(spreadsheet))
+                logger.info(
+                    "Lista de versões obtida na auditoria execucao=%s total=%d",
+                    execution_code,
+                    len(versions),
+                )
+            else:
+                versions = list(versions)
+                logger.info(
+                    "Lista de versões reutilizada do cache da interface execucao=%s total=%d",
+                    execution_code,
+                    len(versions),
+                )
             pairs = self._pending_pairs(versions, checkpoint["versao_id"] if checkpoint else None)
             logger.info(
                 "Versões descobertas execucao=%s planilha=%s total=%d comparacoes_pendentes=%d",
@@ -115,7 +133,14 @@ class AuditService:
         total_changes = 0
         final = initial_checkpoint
         previous_snapshot = None
-        for previous, current in pairs:
+        audit_perf_started = time.perf_counter()
+        for pair_index, (previous, current) in enumerate(pairs):
+            pair_started = time.perf_counter()
+            next_version = (
+                pairs[pair_index + 1][1]
+                if pair_index + 1 < len(pairs)
+                else None
+            )
             try:
                 logger.debug(
                     "Comparação iniciada execucao=%s planilha=%s versao_anterior=%s versao_atual=%s",
@@ -124,15 +149,45 @@ class AuditService:
                     previous.number,
                     current.number,
                 )
+                previous_read_seconds = 0.0
                 if previous_snapshot is None:
-                    previous_snapshot, _ = self._read_temporary_version(spreadsheet, previous)
+                    previous_started = time.perf_counter()
+                    previous_snapshot, _ = self._read_temporary_version(
+                        spreadsheet, previous, prefetch_next=current
+                    )
+                    previous_read_seconds = time.perf_counter() - previous_started
+
+                current_started = time.perf_counter()
                 current_snapshot, current_hash = self._read_temporary_version(
-                    spreadsheet, current
+                    spreadsheet, current, prefetch_next=next_version
                 )
+                current_read_seconds = time.perf_counter() - current_started
+
+                compare_started = time.perf_counter()
                 changes = compare_snapshots(previous_snapshot, current_snapshot)
+                compare_seconds = time.perf_counter() - compare_started
+
+                persist_started = time.perf_counter()
                 self._persist_comparison(
                     connection, spreadsheet_id, execution_id, previous, current,
                     current_hash, changes,
+                )
+                persist_seconds = time.perf_counter() - persist_started
+                pair_seconds = time.perf_counter() - pair_started
+
+                logger.info(
+                    "PERF comparacao planilha=%s anterior=%s atual=%s "
+                    "leitura_anterior=%.3fs leitura_atual=%.3fs comparar=%.3fs "
+                    "banco=%.3fs total=%.3fs alteracoes=%d",
+                    spreadsheet.name,
+                    previous.number,
+                    current.number,
+                    previous_read_seconds,
+                    current_read_seconds,
+                    compare_seconds,
+                    persist_seconds,
+                    pair_seconds,
+                    len(changes),
                 )
                 logger.debug(
                     "Comparação concluída execucao=%s planilha=%s versao_atual=%s alteracoes=%d",
@@ -142,6 +197,7 @@ class AuditService:
                     len(changes),
                 )
             except Exception as error:
+                self._cancel_prefetch()
                 connection.rollback()
                 return self._record_failure(
                     connection, execution_id, spreadsheet_id, execution_code,
@@ -153,9 +209,18 @@ class AuditService:
             final = current.number
             previous_snapshot = current_snapshot
 
+        self._cancel_prefetch()
         self._finish_execution(
             connection, execution_id, AuditExecutionStatus.COMPLETED,
             final, processed, total_changes, None,
+        )
+        audit_perf_seconds = time.perf_counter() - audit_perf_started
+        logger.info(
+            "PERF auditoria_resumo planilha=%s comparacoes=%d total=%.3fs media=%.3fs_por_comparacao",
+            spreadsheet.name,
+            processed,
+            audit_perf_seconds,
+            (audit_perf_seconds / processed) if processed else 0.0,
         )
         logger.info(
             "Auditoria concluída execucao=%s planilha=%s versoes_processadas=%d alteracoes=%d checkpoint=%s",
@@ -177,15 +242,77 @@ class AuditService:
             except Exception:
                 logger.warning("Falha ao publicar progresso da auditoria", exc_info=True)
 
-    def _read_temporary_version(
+    def _start_prefetch(
         self, spreadsheet: SpreadsheetInfo, version: VersionInfo
+    ) -> None:
+        prefetch = getattr(self.source, "prefetch_version", None)
+        if not callable(prefetch):
+            return
+        try:
+            prefetch(spreadsheet, version)
+        except Exception as error:
+            # Prefetch é apenas otimização. Uma falha aqui não invalida a
+            # auditoria: get_version fará o download normal quando necessário.
+            logger.warning(
+                "Prefetch opcional falhou planilha=%s versao=%s erro=%s",
+                spreadsheet.name,
+                version.number,
+                error,
+            )
+
+    def _cancel_prefetch(self) -> None:
+        cancel = getattr(self.source, "cancel_prefetch", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:
+                logger.debug("Falha ao cancelar prefetch opcional", exc_info=True)
+
+    def _read_temporary_version(
+        self,
+        spreadsheet: SpreadsheetInfo,
+        version: VersionInfo,
+        *,
+        prefetch_next: VersionInfo | None = None,
     ) -> tuple[Snapshot, str]:
+        total_started = time.perf_counter()
+        download_started = time.perf_counter()
         path = self.source.get_version(spreadsheet, version)
+        download_seconds = time.perf_counter() - download_started
+
+        # Assim que o binário atual chegou ao disco, o Edge começa a buscar a
+        # próxima versão em background. Enquanto isso, o Python calcula SHA,
+        # lê o XLSX e compara a versão atual. Não há duas comparações paralelas
+        # e o checkpoint continua sendo confirmado estritamente em ordem.
+        if prefetch_next is not None:
+            self._start_prefetch(spreadsheet, prefetch_next)
         try:
             # O digest representa exatamente o binário adquirido nesta execução,
             # antes que o XLSX temporário seja descartado pela fonte.
+            hash_started = time.perf_counter()
             digest = sha256_file(path)
-            return read_workbook(path), digest
+            hash_seconds = time.perf_counter() - hash_started
+
+            read_started = time.perf_counter()
+            snapshot = read_workbook(path)
+            read_seconds = time.perf_counter() - read_started
+            total_seconds = time.perf_counter() - total_started
+            try:
+                file_size = path.stat().st_size
+            except OSError:
+                file_size = -1
+            logger.info(
+                "PERF versao planilha=%s versao=%s bytes=%d download=%.3fs sha256=%.3fs "
+                "leitura_xlsx=%.3fs total=%.3fs",
+                spreadsheet.name,
+                version.number,
+                file_size,
+                download_seconds,
+                hash_seconds,
+                read_seconds,
+                total_seconds,
+            )
+            return snapshot, digest
         finally:
             try:
                 self.source.release_version(path)
