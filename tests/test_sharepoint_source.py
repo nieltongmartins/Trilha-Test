@@ -557,10 +557,9 @@ def test_version_enumeration_rejects_current_version_changed_during_pagination(
     [
         [{"ID": 99, "VersionLabel": "outro", "IsCurrentVersion": True}],
         [{"ID": 98, "VersionLabel": "0.99", "IsCurrentVersion": True}],
-        [{"ID": 98, "VersionLabel": "0.98", "IsCurrentVersion": True}],
     ],
 )
-def test_version_enumeration_rejects_inconsistent_current_version(
+def test_version_enumeration_rejects_current_id_or_label_conflict(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     historical: list[dict[str, object]],
@@ -570,6 +569,75 @@ def test_version_enumeration_rejects_inconsistent_current_version(
     )
     with source, pytest.raises(SharePointReadError, match="atual"):
         source.list_versions(spreadsheet)
+
+
+def test_historical_current_mismatch_is_warning_and_metadata_current_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, spreadsheet = _paged_source(
+        tmp_path,
+        monkeypatch,
+        {
+            "value": [
+                {
+                    "ID": 98,
+                    "VersionLabel": "0.98",
+                    "Created": "2026-09-15T10:00:00Z",
+                    "IsCurrentVersion": True,
+                }
+            ]
+        },
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "app.sources.sharepoint.logger.warning",
+        lambda message, *args, **_kwargs: warnings.append(message % args),
+    )
+
+    with source:
+        versions = source.list_versions(spreadsheet)
+
+    assert [(v.id, v.number, v.is_current) for v in versions] == [
+        ("98", "0.98", False),
+        ("99", "0.99", True),
+    ]
+    warning = "\n".join(warnings)
+    assert "id_historico=98" in warning
+    assert "label_historico=0.98" in warning
+    assert "data_historico=2026-09-15T10:00:00Z" in warning
+    assert "id_atual=99" in warning
+    assert "label_atual=0.99" in warning
+    assert "data_atual=2026-09-16T11:35:49Z" in warning
+
+
+def test_multiple_historical_current_markers_are_diagnostic_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, spreadsheet = _paged_source(
+        tmp_path,
+        monkeypatch,
+        {
+            "value": [
+                {"ID": 97, "VersionLabel": "0.97", "IsCurrentVersion": True},
+                {"ID": 98, "VersionLabel": "0.98", "IsCurrentVersion": True},
+            ],
+            "@odata.nextLink": f"{SITE}/_api/versions?page=2",
+        },
+        {"value": []},
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "app.sources.sharepoint.logger.warning",
+        lambda message, *args, **_kwargs: warnings.append(message % args),
+    )
+
+    with source:
+        versions = source.list_versions(spreadsheet)
+
+    assert [v.id for v in versions if v.is_current] == ["99"]
+    warning = "\n".join(warnings)
+    assert warning.count("IsCurrentVersion histórico diverge") == 2
+    assert "Múltiplos IsCurrentVersion" in warning
 
 
 def test_rejects_changed_unique_id_in_current_metadata(tmp_path: Path) -> None:
