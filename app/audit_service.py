@@ -291,6 +291,9 @@ class AuditService:
             # antes que o XLSX temporário seja descartado pela fonte.
             hash_started = time.perf_counter()
             digest = sha256_file(path)
+            verify_digest = getattr(self.source, "verify_download_digest", None)
+            if callable(verify_digest):
+                verify_digest(path, digest)
             hash_seconds = time.perf_counter() - hash_started
 
             read_started = time.perf_counter()

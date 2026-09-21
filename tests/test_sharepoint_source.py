@@ -1,5 +1,6 @@
 from io import BytesIO
 import base64
+import hashlib
 from pathlib import Path
 import zipfile
 
@@ -34,6 +35,9 @@ class FakeBrowser:
         self.quit_called = False
         self.current_url = SITE
         self.download_blob: bytes | None = None
+        self.prefetch_blob: bytes | None = None
+        self.prefetch_url: str | None = None
+        self.prefetch_error: str | None = None
         self.script_timeout: float | None = None
 
     def _response(self, url: str) -> object:
@@ -46,6 +50,45 @@ class FakeBrowser:
         self.visited.append(url)
 
     def execute_async_script(self, script: str, *args: object) -> object:
+        if "window.__auditPrefetch = null" in script:
+            self.prefetch_blob = None
+            self.prefetch_url = None
+            return {"ok": True}
+        if "const current = window.__auditPrefetch" in script:
+            url = str(args[0])
+            self.prefetch_url = url
+            value = self._response(url)
+            if isinstance(value, Exception):
+                self.prefetch_error = str(value)
+                return {"ok": True, "state": "started"}
+            assert isinstance(value, bytes)
+            self.prefetch_blob = value
+            return {"ok": True, "state": "started"}
+        if "function poll()" in script:
+            url = str(args[0])
+            if url != self.prefetch_url:
+                return {"error": "prefetch indisponível"}
+            if self.prefetch_error:
+                return {"error": self.prefetch_error}
+            assert self.prefetch_blob is not None
+            return {
+                "ok": True,
+                "size": len(self.prefetch_blob),
+                "wasReady": True,
+                "waitMs": 0.0,
+            }
+        if "const slot = window.__auditPrefetch" in script and "blob.slice" in script:
+            url, offset, length = str(args[0]), int(args[1]), int(args[2])
+            if url != self.prefetch_url or self.prefetch_blob is None:
+                return {"error": "prefetch não inicializado"}
+            data = self.prefetch_blob[offset : offset + length]
+            return {
+                "ok": True,
+                "data": base64.b64encode(data).decode("ascii"),
+                "offset": offset,
+                "length": len(data),
+                "serializationMs": 0.01,
+            }
         if "window.__auditDownloadBlob = null" in script:
             self.download_blob = None
             return {"ok": True}
@@ -56,7 +99,9 @@ class FakeBrowser:
             return {
                 "ok": True,
                 "data": base64.b64encode(data).decode("ascii"),
+                "offset": offset,
                 "length": len(data),
+                "serializationMs": 0.01,
             }
         url = str(args[0])
         assert "method: 'GET'" in script
@@ -542,9 +587,12 @@ def test_downloads_historical_and_current_using_distinct_read_only_endpoints(
     monkeypatch.setattr("app.sources.sharepoint._DOWNLOAD_CHUNK_SIZE", 32)
     responses = discovery_responses()
     responses["/Versions?"] = {"value": [{"ID": 98, "VersionLabel": "0.98"}]}
-    responses[")?$select=Name"] = file_metadata()
+    current_content = workbook_bytes("atual")
+    current_metadata = file_metadata()
+    current_metadata["Length"] = str(len(current_content))
+    responses[")?$select=Name"] = current_metadata
     responses["Versions(98)/$value"] = workbook_bytes("histórica")
-    responses["')/$value"] = workbook_bytes("atual")
+    responses["')/$value"] = current_content
     source, browser = make_source(tmp_path, responses)
     with source:
         spreadsheet = source.list_spreadsheets()[0]
@@ -584,6 +632,88 @@ def test_download_failure_from_fetch_is_reported_without_waiting(
 
     with source, pytest.raises(SharePointReadError, match="HTTP 403"):
         source.get_version(spreadsheet, VersionInfo("7", "0.7"))
+
+
+def test_prefetch_ready_is_consumed_and_cleared(tmp_path: Path) -> None:
+    content = workbook_bytes("prefetch")
+    source, browser = make_source(tmp_path, {"Versions(7)/$value": content})
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Setor A/Arquivo.xlsx"
+    )
+    from app.sources.base import VersionInfo
+
+    version = VersionInfo("7", "0.7", size=len(content))
+    with source:
+        assert source.prefetch_version(spreadsheet, version) is True
+        path = source.get_version(spreadsheet, version)
+        assert path.read_bytes() == content
+        source.verify_download_digest(path, hashlib.sha256(content).hexdigest())
+        with pytest.raises(SharePointReadError, match="diverge"):
+            source.verify_download_digest(path, "0" * 64)
+        source.release_version(path)
+    assert browser.prefetch_blob is None
+
+
+def test_prefetch_error_falls_back_to_normal_download(tmp_path: Path) -> None:
+    content = workbook_bytes("fallback")
+
+    class WaitFailsOnce(FakeBrowser):
+        def __init__(self) -> None:
+            super().__init__({"Versions(7)/$value": content})
+            self.failed = False
+
+        def execute_async_script(self, script: str, *args: object) -> object:
+            if "function poll()" in script and not self.failed:
+                self.failed = True
+                return {"error": "falha simulada"}
+            return super().execute_async_script(script, *args)
+
+    browser = WaitFailsOnce()
+    source = BrowserSharePointSource(SITE, [ROOT], browser, temp_directory=tmp_path)
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Setor A/Arquivo.xlsx"
+    )
+    from app.sources.base import VersionInfo
+
+    version = VersionInfo("7", "0.7", size=len(content))
+    with source:
+        source.prefetch_version(spreadsheet, version)
+        path = source.get_version(spreadsheet, version)
+        assert path.read_bytes() == content
+        source.release_version(path)
+    assert browser.failed is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda chunk: chunk.update(offset=int(chunk["offset"]) + 1), "fora de ordem"),
+        (lambda chunk: chunk.update(length=int(chunk["length"]) - 1), "Tamanho do bloco"),
+        (lambda chunk: chunk.update(data="%%%"), "base64"),
+    ],
+)
+def test_download_rejects_corrupt_chunk_and_cleans_temporary(
+    tmp_path: Path, mutation, message: str
+) -> None:
+    content = workbook_bytes("integridade")
+
+    class CorruptChunkBrowser(FakeBrowser):
+        def execute_async_script(self, script: str, *args: object) -> object:
+            result = super().execute_async_script(script, *args)
+            if "blob.slice" in script and isinstance(result, dict) and result.get("ok"):
+                mutation(result)
+            return result
+
+    browser = CorruptChunkBrowser({"Versions(7)/$value": content})
+    source = BrowserSharePointSource(SITE, [ROOT], browser, temp_directory=tmp_path)
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Setor A/Arquivo.xlsx"
+    )
+    from app.sources.base import VersionInfo
+
+    with source, pytest.raises((SharePointReadError, ValueError), match=message):
+        source.get_version(spreadsheet, VersionInfo("7", "0.7", size=len(content)))
+    assert not list(tmp_path.rglob("*.part"))
 
 
 def test_rejects_invalid_open_xml_and_incomplete_download(tmp_path: Path) -> None:
