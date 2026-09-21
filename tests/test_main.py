@@ -1,6 +1,26 @@
 from pathlib import Path
+import subprocess
+import sys
 
 import main
+
+
+def test_startup_imports_do_not_load_optional_heavy_modules() -> None:
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import main,sys; "
+            "assert 'selenium' not in sys.modules; "
+            "assert 'openpyxl' not in sys.modules; "
+            "assert 'app.sources.graph' not in sys.modules; "
+            "assert 'tools.benchmark_xlsx_reader' not in sys.modules",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, probe.stderr
 
 
 def test_application_starts_and_creates_database(tmp_path: Path, monkeypatch) -> None:

@@ -13,6 +13,11 @@ from app.database import Database
 from app.models import AuditExecutionStatus
 from app.sources import BrowserSharePointSource, SharePointReadError, SpreadsheetInfo
 from app.sources.sharepoint import _normalize_scope_path, _odata_object
+from app.sources.sharepoint import (
+    FETCH_OPERATION_TIMEOUT_SECONDS,
+    NORMAL_DOWNLOAD_RETRIES,
+    PREFETCH_RETRIES,
+)
 
 SITE = "https://tenant.sharepoint.com/sites/qualidade"
 ROOT = "/sites/qualidade/Documentos Compartilhados"
@@ -78,7 +83,7 @@ class FakeBrowser:
                 "waitMs": 0.0,
             }
         if "const slot = window.__auditPrefetch" in script and "blob.slice" in script:
-            url, offset, length = str(args[0]), int(args[1]), int(args[2])
+            url, offset, length = str(args[0]), int(args[-2]), int(args[-1])
             if url != self.prefetch_url or self.prefetch_blob is None:
                 return {"error": "prefetch não inicializado"}
             data = self.prefetch_blob[offset : offset + length]
@@ -750,6 +755,112 @@ def test_prefetch_error_falls_back_to_normal_download(tmp_path: Path) -> None:
         assert path.read_bytes() == content
         source.release_version(path)
     assert browser.failed is True
+
+
+def test_prefetch_timeout_is_cleaned_and_retried_with_same_identity(
+    tmp_path: Path,
+) -> None:
+    content = workbook_bytes("retry-prefetch")
+
+    class TimeoutThenReady(FakeBrowser):
+        def __init__(self) -> None:
+            super().__init__({"Versions(7)/$value": content})
+            self.waits = 0
+            self.started: list[tuple[object, ...]] = []
+
+        def execute_async_script(self, script: str, *args: object) -> object:
+            if "const current = window.__auditPrefetch" in script:
+                self.started.append(args)
+            if "function poll()" in script:
+                self.waits += 1
+                if self.waits == 1:
+                    return {"error": "AbortError", "timeout": True}
+            return super().execute_async_script(script, *args)
+
+    browser = TimeoutThenReady()
+    source = BrowserSharePointSource(SITE, [ROOT], browser, temp_directory=tmp_path)
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Setor A/Arquivo.xlsx"
+    )
+    from app.sources.base import VersionInfo
+
+    version = VersionInfo("7", "0.7", size=len(content))
+    source.prefetch_version(spreadsheet, version)
+    path = source.get_version(spreadsheet, version)
+    assert path.read_bytes() == content
+    assert browser.waits == 2
+    assert len(browser.started) == 2
+    assert browser.started[0][0] == browser.started[1][0]
+    assert browser.started[0][1] == browser.started[1][1] == 60_000
+    assert browser.started[0][2] != browser.started[1][2]
+    assert browser.prefetch_blob is None
+
+
+def test_prefetch_exhaustion_falls_back_and_normal_timeout_retries(
+    tmp_path: Path,
+) -> None:
+    content = workbook_bytes("fallback-normal")
+
+    class ControlledBrowser(FakeBrowser):
+        def __init__(self) -> None:
+            super().__init__({"Versions(7)/$value": content})
+            self.normal_attempts = 0
+
+        def execute_async_script(self, script: str, *args: object) -> object:
+            if "function poll()" in script:
+                return {"error": "AbortError", "timeout": True}
+            if "window.__auditDownloadBlob = blob" in script:
+                self.normal_attempts += 1
+                if self.normal_attempts == 1:
+                    self.download_blob = b"partial must be discarded"
+                    return {"error": "AbortError", "timeout": True}
+            return super().execute_async_script(script, *args)
+
+    browser = ControlledBrowser()
+    statuses: list[str] = []
+    source = BrowserSharePointSource(
+        SITE, [ROOT], browser, temp_directory=tmp_path, status_callback=statuses.append
+    )
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Setor A/Arquivo.xlsx"
+    )
+    from app.sources.base import VersionInfo
+
+    version = VersionInfo("7", "0.7", size=len(content))
+    source.prefetch_version(spreadsheet, version)
+    path = source.get_version(spreadsheet, version)
+    assert path.read_bytes() == content
+    assert browser.normal_attempts == 2
+    assert any("Fallback" in status for status in statuses)
+    assert any("Tentando novamente" in status for status in statuses)
+
+
+def test_final_normal_failure_has_bounded_attempts_and_no_partial_file(
+    tmp_path: Path,
+) -> None:
+    browser = FakeBrowser({"Versions(7)/$value": RuntimeError("indisponível")})
+    source = BrowserSharePointSource(SITE, [ROOT], browser, temp_directory=tmp_path)
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Setor A/Arquivo.xlsx"
+    )
+    from app.sources.base import VersionInfo
+
+    with pytest.raises(SharePointReadError, match="indisponível"):
+        source.get_version(spreadsheet, VersionInfo("7", "0.7"))
+    assert len(browser.visited) == NORMAL_DOWNLOAD_RETRIES + 1
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_fetch_timeout_configuration_and_browser_abort_are_explicit() -> None:
+    import inspect
+    import app.sources.sharepoint as module
+
+    source = inspect.getsource(module)
+    assert FETCH_OPERATION_TIMEOUT_SECONDS == 60
+    assert PREFETCH_RETRIES == NORMAL_DOWNLOAD_RETRIES == 1
+    assert "new AbortController()" in source
+    assert "controller.abort()" in source
+    assert "_DOWNLOAD_CHUNK_SIZE = 512 * 1024" in source
 
 
 @pytest.mark.parametrize(
