@@ -4,11 +4,13 @@
 
 `tools/benchmark_xlsx_reader.py` é uma ferramenta diagnóstica independente. Ela
 não instancia `AuditService`, não abre SQLite, não acessa SharePoint, não gera
-relatório e não lê nem grava checkpoint. O leitor oficial em
-`app/excel/reader.py` permanece inalterado.
+relatório e não lê nem grava checkpoint. O leitor oficial agora visita os
+filhos diretos de cada célula uma única vez; a implementação anterior com
+`find()` repetido permanece privada e acessível somente ao benchmark e testes.
 
 O benchmark executa primeiro `read_workbook` e usa o snapshot resultante como
-oráculo. Em seguida executa três variantes instrumentadas:
+oráculo. Além das três variantes instrumentadas, mede o caminho real anterior
+e o `read_workbook` otimizado após um warm-up:
 
 1. `instrumented_current`: mesmas funções de conversão e buscas `find()` do
    loop atual, mas sobre XML previamente descompactado para separar o custo do
@@ -38,7 +40,9 @@ JSON de saída deve ficar fora do repositório e não deve ser anexado à audito
 ## Métricas
 
 Por arquivo, a saída contém tamanho ZIP, RSS antes/depois, tempos individuais e
-mediana do leitor oficial. Por variante contém RSS, GC, total, equivalência,
+mediana do leitor oficial. `official_before_after` contém média, mediana, mínimo,
+máximo, amostras, células, RSS e equivalência tipada dos dois caminhos reais.
+Por variante contém RSS, GC, total, equivalência,
 ganho, worksheets, células armazenadas, XML descompactado, shared strings e
 entradas do snapshot.
 
@@ -58,12 +62,11 @@ portável o campo é `null`. A memória é medida no mesmo processo e pode reter
 arenas do Python entre variantes. Para máxima precisão de pico, execute um
 arquivo por processo e complemente com a ferramenta de memória do sistema.
 
-## Critério para futura adoção
+## Critério de equivalência
 
-Uma candidata só pode avançar quando todas as versões reportarem
+Uma otimização só pode permanecer quando todas as versões reportarem
 `snapshot_exactly_equal: true`. A revisão também deve cobrir abas, coordenadas,
 valores/tipos, fórmulas comuns e compartilhadas, datas nos dois epochs,
 booleanos, erros, vazios explícitos, shared strings e inline strings. Uma futura
-alteração do leitor exigirá testes unitários desses casos, regressão completa e
-benchmark repetível nos arquivos reais; este diagnóstico, sozinho, não aprova
-mudança de produção.
+alteração do leitor exigirá os mesmos testes unitários, regressão completa e
+benchmark repetível nos arquivos reais.
