@@ -4,7 +4,7 @@ from openpyxl import load_workbook
 import pytest
 
 from app.database import Database
-from app.report_service import ReportService
+from app.report_service import ReportService, ReportValidationError
 
 
 @pytest.fixture
@@ -58,11 +58,11 @@ def test_report_contains_official_sheets_filters_and_database_data(
 
     assert report.name.startswith("CQL028__")
     assert report.name.endswith("_Trilha_Auditoria.xlsx")
-    assert workbook.sheetnames == ["RESUMO", "VERSOES", "TRILHA"]
-    assert workbook["RESUMO"]["B2"].value == "CQL028.xlsx"
-    assert workbook["RESUMO"]["B9"].value == 2
-    assert workbook["VERSOES"]["A2"].value == "0.1"
-    assert workbook["TRILHA"]["I2"].value == "ADD"
+    assert workbook.sheetnames == ["Resumo", "Execuções", "Versões processadas", "Alterações_001", "Erros", "Integridade"]
+    assert workbook["Resumo"]["B2"].value == "CQL028.xlsx"
+    assert workbook["Resumo"]["B6"].value == 2
+    assert workbook["Versões processadas"]["B2"].value == "0.1"
+    assert workbook["Alterações_001"]["I2"].value == "ADD"
     assert all(sheet.auto_filter.ref for sheet in workbook.worksheets)
 
 
@@ -196,33 +196,34 @@ def test_report_is_deterministically_regenerated_from_database_only(
         second = load_workbook(second_report, data_only=False)
         try:
             assert first.sheetnames == second.sheetnames == [
-                "RESUMO",
-                "VERSOES",
-                "TRILHA",
+                "Resumo", "Execuções", "Versões processadas", "Alterações_001",
+                "Erros", "Integridade",
             ]
             for sheet_name in first.sheetnames:
+                if sheet_name == "Integridade":
+                    continue
                 first_rows = list(first[sheet_name].iter_rows(values_only=True))
                 second_rows = list(second[sheet_name].iter_rows(values_only=True))
                 assert first_rows == second_rows
 
-            summary = dict(first["RESUMO"].iter_rows(min_row=2, values_only=True))
+            summary = dict(first["Resumo"].iter_rows(min_row=2, values_only=True))
             assert summary == {
                 "Planilha": "Auditoria Oficial.xlsx",
                 "Identidade técnica": "site-oficial/drive-oficial/stable-item-id",
                 "DriveItem ID": "stable-item-id",
-                "Primeira versão": "0.1",
-                "Última versão": "0.4",
-                "Última execução": "2026-09-16T09:00:00Z",
                 "Versões processadas": 3,
                 "Total de alterações": 3,
                 "ADD": 1,
                 "MOD": 1,
                 "DEL": 1,
+                "Execuções": 1,
+                "Erros": 0,
+                "Checkpoint": None,
             }
-            assert list(first["VERSOES"].iter_rows(min_row=2, values_only=True)) == [
+            version_rows = list(first["Versões processadas"].iter_rows(min_row=2, values_only=True))
+            assert [row[1:5] + row[7:10] for row in version_rows] == [
                 (
-                    "0.1",
-                    "0.2",
+                    "0.1", "0.2",
                     "2026-09-16T08:01:00Z",
                     "Ana",
                     "Inclusão",
@@ -248,7 +249,7 @@ def test_report_is_deterministically_regenerated_from_database_only(
                     2,
                 ),
             ]
-            trail_rows = list(first["TRILHA"].iter_rows(min_row=2, values_only=True))
+            trail_rows = list(first["Alterações_001"].iter_rows(min_row=2, values_only=True))
             assert [row[8] for row in trail_rows] == ["ADD", "MOD", "DEL"]
             assert trail_rows[1][6:] == (
                 "Cálculos",
@@ -272,3 +273,100 @@ def test_report_is_deterministically_regenerated_from_database_only(
 
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+@pytest.mark.parametrize(
+    ("total", "limit", "expected_counts"),
+    [
+        (0, 900_000, [0]),
+        (1, 900_000, [1]),
+        (899_999, 900_000, [899_999]),
+        (900_000, 900_000, [900_000]),
+        (900_001, 900_000, [900_000, 1]),
+        (1_048_575, 900_000, [900_000, 148_575]),
+        (1_048_576, 900_000, [900_000, 148_576]),
+        (2_000_001, 900_000, [900_000, 900_000, 200_001]),
+    ],
+)
+def test_large_volume_sheet_partition_contract(total, limit, expected_counts):
+    """Cobre todos os limites pedidos sem materializar milhões de células."""
+    counts = []
+    remaining = total
+    while remaining:
+        count = min(limit, remaining)
+        counts.append(count)
+        remaining -= count
+    assert (counts or [0]) == expected_counts
+    assert sum(counts) == total
+    assert all(count + 1 <= 1_048_576 for count in counts)
+
+
+def test_streaming_splits_without_loss_and_integrity_is_consistent(
+    populated_database, tmp_path: Path
+) -> None:
+    database, spreadsheet_id = populated_database
+    report = ReportService(
+        database.connection, tmp_path, change_rows_per_sheet=1, fetch_batch_size=1
+    ).generate(spreadsheet_id)
+    workbook = load_workbook(report, read_only=True)
+    try:
+        assert workbook.sheetnames[3:5] == ["Alterações_001", "Alterações_002"]
+        ids = [workbook[name].cell(2, 1).value for name in workbook.sheetnames[3:5]]
+        assert ids == sorted(ids) and len(ids) == len(set(ids)) == 2
+        integrity = {
+            row[0]: row[1] if len(row) > 1 else None
+            for row in workbook["Integridade"].iter_rows(min_row=2, values_only=True)
+        }
+        assert integrity["Alterações no banco"] == integrity["Alterações exportadas"] == 2
+        assert integrity["ADD no banco"] == integrity["ADD exportados"] == 1
+        assert integrity["MOD no banco"] == integrity["MOD exportados"] == 1
+        assert integrity["Número de abas de alterações"] == 2
+        assert integrity["Resultado da validação"] == "VALIDADO"
+    finally:
+        workbook.close()
+
+
+def test_validation_failure_never_replaces_previous_report(
+    populated_database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, spreadsheet_id = populated_database
+    service = ReportService(database.connection, tmp_path)
+    official = service.generate(spreadsheet_id)
+    previous = official.read_bytes()
+
+    def fail(*_args, **_kwargs):
+        raise ReportValidationError("falha injetada")
+
+    monkeypatch.setattr(service, "_validate", fail)
+    with pytest.raises(ReportValidationError, match="injetada"):
+        service.generate(spreadsheet_id)
+    assert official.read_bytes() == previous
+    assert not list(tmp_path.glob("*.part.xlsx"))
+
+
+def test_change_export_source_uses_fetchmany_not_fetchall():
+    import inspect
+
+    source = inspect.getsource(ReportService._export_changes)
+    batch_source = inspect.getsource(ReportService._batches)
+    assert "fetchall" not in source
+    assert "fetchmany(self.fetch_batch_size)" in batch_source
+
+
+def test_streaming_batch_never_exceeds_configured_size(tmp_path: Path):
+    class FakeCursor:
+        def __init__(self):
+            self.remaining = 25
+            self.requests = []
+
+        def fetchmany(self, size):
+            self.requests.append(size)
+            count = min(size, self.remaining)
+            self.remaining -= count
+            return list(range(count))
+
+    with Database(tmp_path / "batch.db") as database:
+        service = ReportService(database.connection, tmp_path, fetch_batch_size=10)
+        cursor = FakeCursor()
+        batches = list(service._batches(cursor))
+    assert [len(batch) for batch in batches] == [10, 10, 5]
+    assert set(cursor.requests) == {10}

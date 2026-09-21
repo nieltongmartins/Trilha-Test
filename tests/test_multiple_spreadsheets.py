@@ -253,14 +253,14 @@ def test_three_spreadsheets_share_one_database_without_state_mixing(
             workbook = load_workbook(report_path, data_only=False)
             try:
                 summary = dict(
-                    workbook["RESUMO"].iter_rows(min_row=2, values_only=True)
+                    workbook["Resumo"].iter_rows(min_row=2, values_only=True)
                 )
                 versions = {
                     value
-                    for row in workbook["VERSOES"].iter_rows(
+                    for row in workbook["Versões processadas"].iter_rows(
                         min_row=2, values_only=True
                     )
-                    for value in row[:2]
+                    for value in row[1:3]
                 }
                 expected_versions, expected_changes = expected_reports[
                     spreadsheet.drive_item_id
@@ -268,7 +268,11 @@ def test_three_spreadsheets_share_one_database_without_state_mixing(
                 assert summary["DriveItem ID"] == spreadsheet.drive_item_id
                 assert summary["Total de alterações"] == expected_changes
                 assert versions == expected_versions
-                assert workbook["TRILHA"].max_row == expected_changes + 1
+                change_sheets = [
+                    sheet for sheet in workbook.worksheets
+                    if sheet.title.startswith("Alterações_")
+                ]
+                assert sum(sheet.max_row - 1 for sheet in change_sheets) == expected_changes
             finally:
                 workbook.close()
 
