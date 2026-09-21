@@ -66,6 +66,37 @@ class SchedulerFake:
         callback, args = self.callbacks.pop(0)
         callback(*args)
 
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+def test_close_is_blocked_while_background_operation_is_active(monkeypatch) -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    scheduler = SchedulerFake()
+    application._busy = True
+    application.winfo_toplevel = lambda: scheduler
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "app.interface.messagebox.showwarning",
+        lambda title, message: warnings.append((title, message)),
+    )
+
+    application.request_close()
+
+    assert scheduler.destroyed is False
+    assert warnings and "Aguarde" in warnings[0][1]
+
+
+def test_close_destroys_window_after_background_operation_finishes() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    scheduler = SchedulerFake()
+    application._busy = False
+    application.winfo_toplevel = lambda: scheduler
+
+    application.request_close()
+
+    assert scheduler.destroyed is True
+
 
 def _application_for_connection(
     connect_source, save_configuration=lambda *_args: None
