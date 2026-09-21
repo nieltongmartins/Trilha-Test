@@ -14,6 +14,7 @@ from io import BytesIO
 import gc
 import json
 from pathlib import Path
+from statistics import mean, median
 import sys
 from time import perf_counter_ns
 from typing import Any, Callable
@@ -288,6 +289,49 @@ def _typed_equal(left: object, right: object) -> bool:
     return left == right
 
 
+def _summary(samples: list[int]) -> dict[str, int | float]:
+    return {
+        "median_ns": median(samples),
+        "mean_ns": mean(samples),
+        "min_ns": min(samples),
+        "max_ns": max(samples),
+    }
+
+
+def benchmark_official_before_after(path: Path, repeat: int = 5) -> dict[str, Any]:
+    """Measure the old and optimized real reader paths after one warm-up."""
+    before_snapshot = reader._read_fast_repeated_find(path)
+    optimized_snapshot = reader.read_workbook(path)
+    rss_before = _rss_bytes()
+    before_times: list[int] = []
+    optimized_times: list[int] = []
+    for _ in range(repeat):
+        started = perf_counter_ns()
+        before_snapshot = reader._read_fast_repeated_find(path)
+        before_times.append(perf_counter_ns() - started)
+
+        started = perf_counter_ns()
+        optimized_snapshot = reader.read_workbook(path)
+        optimized_times.append(perf_counter_ns() - started)
+    rss_after = _rss_bytes()
+    before_summary = _summary(before_times)
+    optimized_summary = _summary(optimized_times)
+    before_median = float(before_summary["median_ns"])
+    return {
+        "repetitions_after_warmup": repeat,
+        "cells": sum(len(cells) for cells in optimized_snapshot.values()),
+        "snapshot_exactly_equal": _typed_equal(before_snapshot, optimized_snapshot),
+        "previous_reader": {"samples_ns": before_times, **before_summary},
+        "optimized_reader": {"samples_ns": optimized_times, **optimized_summary},
+        "median_gain_percent": (
+            before_median - float(optimized_summary["median_ns"])
+        ) * 100 / before_median,
+        "rss_before": rss_before,
+        "rss_after": rss_after,
+        "rss_delta": None if rss_before is None or rss_after is None else rss_after - rss_before,
+    }
+
+
 def profile_file(path: Path, repeat: int = 1) -> dict[str, Any]:
     rss_before = _rss_bytes()
     official_times: list[int] = []
@@ -339,6 +383,7 @@ def profile_file(path: Path, repeat: int = 1) -> dict[str, Any]:
         "official_reader_median_ns": sorted(official_times)[len(official_times) // 2],
         "rss_before": rss_before,
         "rss_after": _rss_bytes(),
+        "official_before_after": benchmark_official_before_after(path, repeat),
         "variants": variants,
     }
 
@@ -346,7 +391,10 @@ def profile_file(path: Path, repeat: int = 1) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Profile e compare o leitor XLSX oficial")
     parser.add_argument("paths", nargs="+", type=Path, help="arquivos ou diretórios com versões .xlsx")
-    parser.add_argument("--repeat", type=int, default=3, help="repetições do leitor oficial")
+    parser.add_argument(
+        "--repeat", type=int, default=5,
+        help="repetições após warm-up dos leitores oficiais anterior e otimizado",
+    )
     parser.add_argument("--output", type=Path, help="JSON de saída (stdout por padrão)")
     args = parser.parse_args(argv)
     if args.repeat < 1:

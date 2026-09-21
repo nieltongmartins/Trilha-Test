@@ -10,7 +10,7 @@ from __future__ import annotations
 from io import BytesIO
 import logging
 from pathlib import Path, PurePosixPath
-from typing import TypeAlias
+from typing import Callable, TypeAlias
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -43,6 +43,11 @@ class _FastReaderUnsupported(RuntimeError):
 
 def _tag(local: str) -> str:
     return f"{{{_MAIN_NS}}}{local}"
+
+
+_FORMULA_TAG = _tag("f")
+_VALUE_TAG = _tag("v")
+_INLINE_STRING_TAG = _tag("is")
 
 
 def _read_openpyxl(path: Path) -> Snapshot:
@@ -162,12 +167,11 @@ def _sheet_targets(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
     return result
 
 
-def _formula_value(
-    cell: ET.Element,
+def _formula_element_value(
+    formula: ET.Element | None,
     coordinate: str,
     shared_formulas: dict[str, tuple[str, str]],
 ) -> str | None:
-    formula = cell.find("m:f", _NS)
     if formula is None:
         return None
     formula_type = formula.get("t")
@@ -194,24 +198,35 @@ def _formula_value(
     return "=" + text
 
 
-def _cell_value(
+def _formula_value(
     cell: ET.Element,
     coordinate: str,
+    shared_formulas: dict[str, tuple[str, str]],
+) -> str | None:
+    """Compatibility helper used by the profiling baseline."""
+    return _formula_element_value(cell.find("m:f", _NS), coordinate, shared_formulas)
+
+
+def _convert_cell_value(
+    cell: ET.Element,
+    coordinate: str,
+    formula_element: ET.Element | None,
+    value_element: ET.Element | None,
+    inline_element: ET.Element | None,
     shared_strings: list[str],
     date_styles: set[int],
     epoch: object,
     shared_formulas: dict[str, tuple[str, str]],
 ) -> object:
-    formula = _formula_value(cell, coordinate, shared_formulas)
+    formula = _formula_element_value(formula_element, coordinate, shared_formulas)
     if formula is not None:
         return formula
 
     cell_type = cell.get("t", "n")
-    value_element = cell.find("m:v", _NS)
     raw = value_element.text if value_element is not None else None
 
     if cell_type == "inlineStr":
-        text = _all_text(cell.find("m:is", _NS))
+        text = _all_text(inline_element)
         return text if text != "" else None
     if raw is None:
         return None
@@ -237,7 +252,87 @@ def _cell_value(
     return value
 
 
-def _read_fast(path: Path) -> Snapshot:
+def _cell_value(
+    cell: ET.Element,
+    coordinate: str,
+    shared_strings: list[str],
+    date_styles: set[int],
+    epoch: object,
+    shared_formulas: dict[str, tuple[str, str]],
+) -> object:
+    """Converte uma célula após uma única visita a seus filhos XML diretos."""
+    formula_element = value_element = inline_element = None
+    for child in cell:
+        # Element.find() selecionava a primeira ocorrência; mantenha a mesma
+        # semântica até para XML incomum com filhos duplicados.
+        if child.tag == _FORMULA_TAG and formula_element is None:
+            formula_element = child
+        elif child.tag == _VALUE_TAG and value_element is None:
+            value_element = child
+        elif child.tag == _INLINE_STRING_TAG and inline_element is None:
+            inline_element = child
+    return _convert_cell_value(
+        cell,
+        coordinate,
+        formula_element,
+        value_element,
+        inline_element,
+        shared_strings,
+        date_styles,
+        epoch,
+        shared_formulas,
+    )
+
+
+def _cell_value_repeated_find(
+    cell: ET.Element,
+    coordinate: str,
+    shared_strings: list[str],
+    date_styles: set[int],
+    epoch: object,
+    shared_formulas: dict[str, tuple[str, str]],
+) -> object:
+    """Implementação anterior, mantida apenas como baseline de equivalência."""
+    formula = _formula_value(cell, coordinate, shared_formulas)
+    if formula is not None:
+        return formula
+
+    cell_type = cell.get("t", "n")
+    value_element = cell.find("m:v", _NS)
+    raw = value_element.text if value_element is not None else None
+    if cell_type == "inlineStr":
+        text = _all_text(cell.find("m:is", _NS))
+        return text if text != "" else None
+    if raw is None:
+        return None
+    if cell_type == "s":
+        return shared_strings[int(raw)]
+    if cell_type == "b":
+        return raw == "1"
+    if cell_type in {"str", "e"}:
+        return raw
+    if cell_type == "d":
+        return from_ISO8601(raw)
+
+    value = _cast_number(raw)
+    style_text = cell.get("s")
+    if style_text is not None:
+        try:
+            style_id = int(style_text)
+        except ValueError:
+            style_id = -1
+        if style_id in date_styles:
+            return from_excel(value, epoch)
+    return value
+
+
+def _read_fast_with(
+    path: Path,
+    cell_reader: Callable[
+        [ET.Element, str, list[str], set[int], object, dict[str, tuple[str, str]]],
+        object,
+    ],
+) -> Snapshot:
     with zipfile.ZipFile(path) as archive:
         shared = _shared_strings(archive)
         date_styles = _date_styles(archive)
@@ -254,7 +349,7 @@ def _read_fast(path: Path) -> Snapshot:
                         continue
                     coordinate = element.get("r")
                     if coordinate:
-                        value = _cell_value(
+                        value = cell_reader(
                             element,
                             coordinate,
                             shared,
@@ -267,6 +362,15 @@ def _read_fast(path: Path) -> Snapshot:
                     element.clear()
             snapshot[title] = cells
         return snapshot
+
+
+def _read_fast(path: Path) -> Snapshot:
+    return _read_fast_with(path, _cell_value)
+
+
+def _read_fast_repeated_find(path: Path) -> Snapshot:
+    """Executa o leitor anterior para testes e benchmarks, nunca em produção."""
+    return _read_fast_with(path, _cell_value_repeated_find)
 
 
 def read_workbook(path: str | Path) -> Snapshot:
