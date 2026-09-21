@@ -45,16 +45,23 @@ class AuditApplication(ttk.Frame):
         connect_source: SourceFactory | None = None,
         save_configuration: ConfigurationSaver | None = None,
     ) -> None:
+        self._startup_started = time.perf_counter()
+        self._startup_last = self._startup_started
+        self._startup_complete = False
+        self._startup_log("entrada_init")
         super().__init__(master, padding=12)
+        self._startup_log("frame_tk")
         self.database = database
         self.source = source
         self.connect_source = connect_source
         self.save_configuration = save_configuration
         self.reports_directory = Path(reports_directory)
         self.storage = AuditStorageManager(database, backups_directory)
+        self._startup_log("criar_audit_storage")
         self.report_artifacts = ReportArtifactManager(
             getattr(database, "connection", database), self.reports_directory
         )
+        self._startup_log("criar_report_artifacts")
         self.spreadsheets: list[SpreadsheetInfo] = []
         # Cache curto da enumeração de versões. A listagem pode levar minutos em
         # arquivos com dezenas de milhares de versões; reutilizá-la evita repetir
@@ -75,6 +82,9 @@ class AuditApplication(ttk.Frame):
         self._progress_completed = 0
         self._progress_total = 0
         self._hidden_clicks: list[float] = []
+        # AuditService, ReportService, leitor XLSX/openpyxl, fontes SharePoint e
+        # Graph permanecem fora deste caminho e são importados somente nas ações.
+        self._startup_log("imports_lazy_nao_disparados")
         self.site_url = tk.StringVar(value=site_url)
         self.scope_paths = tk.StringVar(value=";".join(scope_paths))
         # Preserve the public attribute used by installations upgraded from the
@@ -89,7 +99,21 @@ class AuditApplication(ttk.Frame):
             )
         )
         self.details = tk.StringVar(value="Selecione uma planilha.")
+        self._startup_log("configurar_variaveis_tk")
         self._build()
+        self._startup_log("finalizacao")
+        self._startup_complete = True
+
+    def _startup_log(self, stage: str) -> None:
+        """Registra cada trecho síncrono percorrido antes da primeira pintura."""
+        now = time.perf_counter()
+        logger.info(
+            "STARTUP_INTERFACE etapa=%s duracao=%.3fs acumulado=%.3fs",
+            stage,
+            now - self._startup_last,
+            now - self._startup_started,
+        )
+        self._startup_last = now
 
     def _build(self) -> None:
         self.master.columnconfigure(0, weight=1)
@@ -103,6 +127,7 @@ class AuditApplication(ttk.Frame):
         stored_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(audit_tab, text="Auditoria")
         self.notebook.add(stored_tab, text="Auditorias armazenadas")
+        self._startup_log("criar_abas")
         self._audit_tab = audit_tab
         self._comparator_tab = None
         audit_tab.columnconfigure(0, weight=1)
@@ -170,9 +195,13 @@ class AuditApplication(ttk.Frame):
         ttk.Label(audit_tab, textvariable=self.progress_text).grid(
             row=7, column=0, sticky="w"
         )
+        self._startup_log("widgets_auditoria")
         self._build_stored_tab(stored_tab)
+        self._startup_log("widgets_auditorias_armazenadas")
         self._set_action_state()
+        self._startup_log("configurar_callbacks_estado")
         self.refresh_stored()
+        self._startup_log("refresh_inicial")
 
     def _build_stored_tab(self, tab: ttk.Frame) -> None:
         tab.columnconfigure(0, weight=1)
@@ -247,11 +276,23 @@ class AuditApplication(ttk.Frame):
             return
         for item in self.stored_tree.get_children():
             self.stored_tree.delete(item)
-        for audit in self.storage.list_audits():
+        query_started = time.perf_counter()
+        audits = self.storage.list_audits()
+        query_finished = time.perf_counter()
+        if not getattr(self, "_startup_complete", True):
+            logger.info(
+                "STARTUP_INTERFACE etapa=consultar_banco_auditorias duracao=%.3fs acumulado=%.3fs",
+                query_finished - query_started,
+                query_finished - self._startup_started,
+            )
+            self._startup_last = query_finished
+        for audit in audits:
             self.stored_tree.insert("", "end", iid=str(audit.id), values=(
                 audit.name, audit.path or "—", audit.unique_id,
                 audit.last_version or "—", audit.processed_versions, audit.changes,
                 audit.last_audit or "—", audit.checkpoint or "—"))
+        if not getattr(self, "_startup_complete", True):
+            self._startup_log("popular_auditorias_armazenadas")
 
     def _selected_stored(self) -> tuple[int, str]:
         selection = self.stored_tree.selection()
