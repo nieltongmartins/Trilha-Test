@@ -24,6 +24,11 @@ def test_ui_is_created_without_opening_sharepoint(tmp_path: Path, monkeypatch) -
         def minsize(self, *_size: int) -> None:
             pass
 
+        def protocol(self, name: str, callback) -> None:
+            assert name == "WM_DELETE_WINDOW"
+            assert callable(callback)
+            events.append("close-protocol")
+
         def mainloop(self) -> None:
             events.append("mainloop")
 
@@ -33,6 +38,9 @@ def test_ui_is_created_without_opening_sharepoint(tmp_path: Path, monkeypatch) -
             events.append("ui")
 
         def close_source(self) -> None:
+            pass
+
+        def request_close(self) -> None:
             pass
 
     monkeypatch.setenv("AUDIT_DATABASE_PATH", str(tmp_path / "audit.db"))
@@ -51,4 +59,4 @@ def test_ui_is_created_without_opening_sharepoint(tmp_path: Path, monkeypatch) -
     )
 
     assert main.main(launch_ui=True) == 0
-    assert events == ["tk", "ui", "mainloop"]
+    assert events == ["tk", "ui", "close-protocol", "mainloop"]

@@ -59,6 +59,7 @@ def main(*, launch_ui: bool | None = None) -> int:
             connect_source=connect_source,
             save_configuration=settings.save_browser_sharepoint,
         )
+        root.protocol("WM_DELETE_WINDOW", application.request_close)
         logger.info("Interface pronta; aguardando ação do usuário para conectar")
         root.mainloop()
     except Exception:

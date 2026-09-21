@@ -847,6 +847,24 @@ class AuditApplication(ttk.Frame):
                 close()
             self.source = None
 
+    def request_close(self) -> None:
+        """Fecha a janela somente quando não há operação em andamento.
+
+        As operações usam uma thread daemon e compartilham a conexão SQLite e a
+        fonte SharePoint com a interface. Destruir a janela durante esse trabalho
+        faria o bloco ``finally`` do processo fechar esses recursos enquanto a
+        thread ainda os utiliza. Sem cancelamento cooperativo, a alternativa
+        segura é manter a aplicação aberta até a unidade atual terminar.
+        """
+        if self._busy:
+            messagebox.showwarning(
+                "Operação em andamento",
+                "Aguarde a operação atual terminar antes de fechar a aplicação. "
+                "Isso preserva o checkpoint e os arquivos temporários.",
+            )
+            return
+        self.winfo_toplevel().destroy()
+
     def open_report(self) -> None:
         if self.last_report is None or not self.last_report.exists():
             messagebox.showinfo("Relatório", "Gere o relatório primeiro.")
