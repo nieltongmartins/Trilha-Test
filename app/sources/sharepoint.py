@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from collections.abc import Callable, Mapping, Sequence
+import hashlib
+import json
 from pathlib import Path
 import logging
 import re
@@ -67,12 +70,15 @@ if (!(blob instanceof Blob)) {
 } else {
   blob.slice(offset, offset + length).arrayBuffer()
     .then(buffer => {
+      const serializationStarted = performance.now();
       const bytes = new Uint8Array(buffer);
       let binary = '';
       for (let index = 0; index < bytes.length; index += 1) {
         binary += String.fromCharCode(bytes[index]);
       }
-      done({ok: true, data: btoa(binary), length: bytes.length});
+      const data = btoa(binary);
+      done({ok: true, data, offset, length: bytes.length,
+            serializationMs: performance.now() - serializationStarted});
     }).catch(error => done({error: String(error)}));
 }
 """
@@ -117,6 +123,9 @@ if (current && current.url === url && (current.state === 'loading' || current.st
 _WAIT_PREFETCH_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 const url = arguments[0];
+const waitStarted = performance.now();
+const initial = window.__auditPrefetch;
+const wasReady = !!(initial && initial.url === url && initial.state === 'ready' && initial.blob instanceof Blob);
 function poll() {
   const slot = window.__auditPrefetch;
   if (!slot || slot.url !== url) {
@@ -124,7 +133,8 @@ function poll() {
     return;
   }
   if (slot.state === 'ready' && slot.blob instanceof Blob) {
-    done({ok: true, size: slot.size});
+    done({ok: true, size: slot.size, wasReady,
+          waitMs: performance.now() - waitStarted});
     return;
   }
   if (slot.state === 'error') {
@@ -147,12 +157,15 @@ if (!slot || slot.url !== url || !(slot.blob instanceof Blob)) {
 } else {
   slot.blob.slice(offset, offset + length).arrayBuffer()
     .then(buffer => {
+      const serializationStarted = performance.now();
       const bytes = new Uint8Array(buffer);
       let binary = '';
       for (let index = 0; index < bytes.length; index += 1) {
         binary += String.fromCharCode(bytes[index]);
       }
-      done({ok: true, data: btoa(binary), length: bytes.length});
+      const data = btoa(binary);
+      done({ok: true, data, offset, length: bytes.length,
+            serializationMs: performance.now() - serializationStarted});
     }).catch(error => done({error: String(error)}));
 }
 """
@@ -251,6 +264,7 @@ class BrowserSharePointSource:
         self._workspace = TemporaryWorkspace(temp_directory)
         self._prefetch_url: str | None = None
         self._prefetch_started_at: float | None = None
+        self._incremental_digests: dict[Path, str] = {}
 
     @classmethod
     def open_edge(
@@ -411,12 +425,16 @@ class BrowserSharePointSource:
             raise SharePointReadError("SharePoint REST retornou JSON inválido")
         return payload
 
-    def _json_url_with_retry(self, url: str, *, page: int) -> Mapping[str, Any]:
+    def _json_url_with_retry(
+        self, url: str, *, page: int
+    ) -> tuple[Mapping[str, Any], int, float]:
         """Repete somente a página que falhou, sem reiniciar toda a enumeração."""
         last_error: Exception | None = None
         for attempt in range(1, _VERSION_PAGE_RETRIES + 1):
             try:
-                return self._json_url(url)
+                started = time.perf_counter()
+                payload = self._json_url(url)
+                return payload, attempt - 1, time.perf_counter() - started
             except Exception as error:
                 last_error = error
                 if attempt >= _VERSION_PAGE_RETRIES:
@@ -613,8 +631,20 @@ class BrowserSharePointSource:
                 )
             visited_page_urls.add(next_url)
             page += 1
-            payload = self._json_url_with_retry(next_url, page=page)
+            payload, retries, webdriver_seconds = self._json_url_with_retry(
+                next_url, page=page
+            )
+            parse_started = time.perf_counter()
             items = _odata_results(payload)
+            # This is deliberately an approximation of the browser-to-Python JSON
+            # payload, useful for comparing $top candidates without changing its
+            # fields or wire representation.
+            json_bytes = len(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            parse_seconds = time.perf_counter() - parse_started
 
             if not items and self._next_page_url(payload) is not None:
                 raise SharePointReadError(
@@ -663,17 +693,25 @@ class BrowserSharePointSource:
                         exc_info=True,
                     )
 
+            next_link = self._next_page_url(payload)
             logger.info(
-                "Enumeração de versões pagina=%d lote=%d novas=%d acumulado=%d skip=%d planilha=%s",
+                "PERF enumeracao_pagina planilha=%s pagina=%d itens=%d "
+                "primeiro_id=%s ultimo_id=%s webdriver=%.3fs json_bytes_aprox=%d "
+                "parse_python=%.3fs retries=%d nextlink=%s acumulado=%d skip=%d",
+                spreadsheet.name,
                 page,
                 len(items),
-                len(items),
+                items[0].get("ID") if items else None,
+                items[-1].get("ID") if items else None,
+                webdriver_seconds,
+                json_bytes,
+                parse_seconds,
+                retries,
+                next_link or "-",
                 len(historical),
                 skip,
-                spreadsheet.name,
             )
 
-            next_link = self._next_page_url(payload)
             if next_link is not None:
                 next_url = urljoin(self.site_url + "/", next_link)
                 # Mantemos o skip apenas para log/fallback caso o próximo payload
@@ -879,7 +917,20 @@ class BrowserSharePointSource:
         use_prefetch: bool,
     ) -> Path:
         total_started = time.perf_counter()
+        prefetch_started_at = self._prefetch_started_at if use_prefetch else None
+        prefetch_age = (
+            time.perf_counter() - prefetch_started_at
+            if prefetch_started_at is not None
+            else 0.0
+        )
         begin_started = time.perf_counter()
+        logger.info(
+            "PERF fetch_edge_inicio planilha=%s versao=%s url=%s modo=%s",
+            spreadsheet.name,
+            version.number,
+            url,
+            "prefetch" if use_prefetch else "normal",
+        )
         if use_prefetch:
             result = self._browser.execute_async_script(_WAIT_PREFETCH_SCRIPT, url)
         else:
@@ -892,34 +943,68 @@ class BrowserSharePointSource:
             or not result.get("ok")
         ):
             detail = result.get("error") if isinstance(result, Mapping) else "resposta inválida"
+            if not use_prefetch:
+                self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
             raise SharePointReadError(f"Falha no download SharePoint REST: {detail}")
 
         temporary = destination.with_suffix(destination.suffix + ".part")
         clear_seconds = 0.0
         size = result.get("size")
         if not isinstance(size, int) or size <= 0:
+            if use_prefetch:
+                self.cancel_prefetch()
+            else:
+                self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
             raise SharePointReadError("Download SharePoint vazio ou com tamanho inválido")
+        if version.size is not None and size != version.size:
+            if use_prefetch:
+                self.cancel_prefetch()
+            else:
+                self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
+            raise SharePointReadError(
+                "Tamanho do blob diverge do metadado da versão: "
+                f"esperado={version.size} recebido={size}"
+            )
+        logger.info(
+            "PERF fetch_edge_concluido planilha=%s versao=%s url=%s bytes=%d "
+            "fetch=%.3fs prefetch_idade=%.3fs prefetch_pronto=%s espera_residual=%.3fs",
+            spreadsheet.name,
+            version.number,
+            url,
+            size,
+            begin_seconds,
+            prefetch_age,
+            bool(result.get("wasReady")) if use_prefetch else False,
+            float(result.get("waitMs", begin_seconds * 1000.0)) / 1000.0
+            if use_prefetch
+            and isinstance(result.get("waitMs", begin_seconds * 1000.0), (int, float))
+            else 0.0,
+        )
 
         try:
             chunk_calls = 0
             chunk_transfer_seconds = 0.0
-            decode_write_seconds = 0.0
+            serialization_seconds = 0.0
+            decode_seconds = 0.0
+            write_seconds = 0.0
+            incremental_digest = hashlib.sha256()
             with temporary.open("wb") as output:
                 offset = 0
                 while offset < size:
+                    requested = min(_DOWNLOAD_CHUNK_SIZE, size - offset)
                     chunk_started = time.perf_counter()
                     if use_prefetch:
                         chunk = self._browser.execute_async_script(
                             _READ_PREFETCH_CHUNK_SCRIPT,
                             url,
                             offset,
-                            min(_DOWNLOAD_CHUNK_SIZE, size - offset),
+                            requested,
                         )
                     else:
                         chunk = self._browser.execute_async_script(
                             _READ_DOWNLOAD_CHUNK_SCRIPT,
                             offset,
-                            min(_DOWNLOAD_CHUNK_SIZE, size - offset),
+                            requested,
                         )
                     chunk_transfer_seconds += time.perf_counter() - chunk_started
                     chunk_calls += 1
@@ -934,20 +1019,63 @@ class BrowserSharePointSource:
                         raise SharePointReadError(
                             f"Falha ao ler download SharePoint: {detail}"
                         )
+                    if chunk.get("offset") != offset:
+                        raise SharePointReadError(
+                            "Bloco SharePoint fora de ordem: "
+                            f"esperado={offset} recebido={chunk.get('offset')}"
+                        )
+                    if chunk["length"] != requested:
+                        raise SharePointReadError(
+                            "Tamanho do bloco SharePoint incorreto: "
+                            f"esperado={requested} recebido={chunk['length']}"
+                        )
                     decode_started = time.perf_counter()
-                    decoded = base64.b64decode(chunk["data"], validate=True)
+                    try:
+                        decoded = base64.b64decode(chunk["data"], validate=True)
+                    except (binascii.Error, ValueError) as error:
+                        raise SharePointReadError(
+                            "Bloco SharePoint contém base64 inválido"
+                        ) from error
                     if len(decoded) != chunk["length"]:
                         raise SharePointReadError(
                             "Tamanho do bloco baixado diverge do informado"
                         )
+                    decode_seconds += time.perf_counter() - decode_started
+                    write_started = time.perf_counter()
                     output.write(decoded)
+                    incremental_digest.update(decoded)
+                    write_seconds += time.perf_counter() - write_started
+                    serialization_ms = chunk.get("serializationMs", 0.0)
+                    if isinstance(serialization_ms, (int, float)):
+                        serialization_seconds += float(serialization_ms) / 1000.0
+                    logger.info(
+                        "PERF download_chunk planilha=%s versao=%s url=%s numero=%d "
+                        "offset=%d bytes=%d webdriver=%.3fs base64_serializacao=%.3fs",
+                        spreadsheet.name,
+                        version.number,
+                        url,
+                        chunk_calls,
+                        offset,
+                        chunk["length"],
+                        time.perf_counter() - chunk_started,
+                        float(serialization_ms) / 1000.0
+                        if isinstance(serialization_ms, (int, float))
+                        else 0.0,
+                    )
                     offset += chunk["length"]
-                    decode_write_seconds += time.perf_counter() - decode_started
+            if offset != size or temporary.stat().st_size != size:
+                raise SharePointReadError(
+                    f"Download SharePoint truncado: esperado={size} gravado={offset}"
+                )
+            rename_started = time.perf_counter()
             temporary.replace(destination)
+            rename_seconds = time.perf_counter() - rename_started
+            self._incremental_digests[destination] = incremental_digest.hexdigest()
             validate_started = time.perf_counter()
             self._validate_xlsx(destination)
             validate_seconds = time.perf_counter() - validate_started
         except Exception:
+            self._incremental_digests.pop(destination, None)
             temporary.unlink(missing_ok=True)
             destination.unlink(missing_ok=True)
             raise
@@ -962,24 +1090,28 @@ class BrowserSharePointSource:
             clear_seconds = time.perf_counter() - clear_started
 
         total_seconds = time.perf_counter() - total_started
-        prefetch_age = 0.0
-        if use_prefetch and self._prefetch_started_at is not None:
-            prefetch_age = time.perf_counter() - self._prefetch_started_at
         logger.info(
-            "PERF download_sharepoint planilha=%s versao=%s modo=%s bytes=%d blocos=%d "
+            "PERF download_sharepoint planilha=%s versao=%s url=%s modo=%s bytes=%d blocos=%d "
             "bloco_bytes=%d espera_fetch=%.3fs transferencia_blocos=%.3fs "
-            "decode_gravacao=%.3fs validacao_xlsx=%.3fs limpeza=%.3fs total=%.3fs",
+            "base64_serializacao=%.3fs base64_decode=%.3fs escrita=%.3fs rename=%.3fs "
+            "validacao_zip=%.3fs limpeza=%.3fs prefetch_idade=%.3fs round_trips=%d total=%.3fs",
             spreadsheet.name,
             version.number,
+            url,
             "prefetch" if use_prefetch else "normal",
             size,
             chunk_calls,
             _DOWNLOAD_CHUNK_SIZE,
             begin_seconds,
             chunk_transfer_seconds,
-            decode_write_seconds,
+            serialization_seconds,
+            decode_seconds,
+            write_seconds,
+            rename_seconds,
             validate_seconds,
             clear_seconds,
+            prefetch_age,
+            chunk_calls + 2,
             total_seconds,
         )
         logger.debug(
@@ -1008,9 +1140,11 @@ class BrowserSharePointSource:
                 )
             except SharePointReadError as error:
                 logger.warning(
-                    "Prefetch falhou; repetindo download normal planilha=%s versao=%s erro=%s",
+                    "Prefetch falhou; repetindo download normal planilha=%s versao=%s "
+                    "url=%s fallback_download_normal=true retry=1 erro=%s",
                     spreadsheet.name,
                     version.number,
+                    url,
                     error,
                 )
                 self.cancel_prefetch()
@@ -1019,7 +1153,24 @@ class BrowserSharePointSource:
         )
 
     def release_version(self, path: Path) -> None:
+        self._incremental_digests.pop(path, None)
         self._workspace.release(path)
+
+    def verify_download_digest(self, path: Path, reference_digest: str) -> None:
+        """Compara o SHA incremental da transferência com a leitura de referência."""
+        incremental = self._incremental_digests.get(path)
+        if incremental is None:
+            raise SharePointReadError("SHA-256 incremental do download indisponível")
+        if incremental != reference_digest:
+            raise SharePointReadError(
+                "SHA-256 incremental diverge do arquivo gravado em disco"
+            )
+        logger.info(
+            "PERF sha256_download arquivo=%s incremental=%s referencia=%s equivalente=true",
+            path.name,
+            incremental,
+            reference_digest,
+        )
 
     @staticmethod
     def _validate_xlsx(path: Path) -> None:
