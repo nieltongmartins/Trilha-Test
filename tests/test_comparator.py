@@ -1,8 +1,38 @@
 from pathlib import Path
+import random
 
 from app.excel.comparator import CellChange, compare_snapshots
 from app.excel.reader import read_workbook
 from app.models import ChangeType
+
+
+def _reference_compare(previous, current):
+    """Implementação anterior mantida como oráculo de equivalência."""
+    from app.excel.comparator import _address_key, _has_content, _values_equal
+
+    changes = []
+    for sheet in sorted(set(previous) | set(current)):
+        previous_cells = previous.get(sheet, {})
+        current_cells = current.get(sheet, {})
+        for address in sorted(
+            previous_cells.keys() | current_cells.keys(), key=_address_key
+        ):
+            existed = _has_content(previous_cells, address)
+            exists = _has_content(current_cells, address)
+            previous_value = previous_cells.get(address)
+            new_value = current_cells.get(address)
+            if not existed and exists:
+                kind = ChangeType.ADD
+            elif existed and not exists:
+                kind = ChangeType.DEL
+            elif existed and exists and not _values_equal(previous_value, new_value):
+                kind = ChangeType.MOD
+            else:
+                continue
+            changes.append(
+                CellChange(sheet, address, kind, previous_value, new_value)
+            )
+    return changes
 
 
 def test_comparator_detects_required_changes_from_controlled_files(
@@ -90,3 +120,38 @@ def test_removed_sheet_is_represented_as_cell_deletions() -> None:
     assert changes == [
         CellChange("Removida", "B1", ChangeType.DEL, "valor", None)
     ]
+
+
+def test_optimized_comparator_is_exactly_equivalent_to_reference() -> None:
+    randomizer = random.Random(20260921)
+    values = [None, "", "texto", 0, 1, False, True, 1.5, "=SUM(A1:A2)"]
+
+    for _ in range(100):
+        previous = {}
+        current = {}
+        for sheet in ("Alfa", "Zeta", "Removida", "Nova"):
+            addresses = [
+                f"{column}{row}"
+                for row in range(1, 25)
+                for column in ("A", "B", "Z", "AA")
+            ]
+            randomizer.shuffle(addresses)
+            previous_cells = {
+                address: randomizer.choice(values)
+                for address in addresses
+                if randomizer.random() < 0.55
+            }
+            randomizer.shuffle(addresses)
+            current_cells = {
+                address: randomizer.choice(values)
+                for address in addresses
+                if randomizer.random() < 0.55
+            }
+            if sheet != "Nova":
+                previous[sheet] = previous_cells
+            if sheet != "Removida":
+                current[sheet] = current_cells
+
+        assert compare_snapshots(previous, current) == _reference_compare(
+            previous, current
+        )

@@ -355,6 +355,178 @@ def test_current_is_not_duplicated_when_versions_also_contains_it(
     ]
 
 
+def _paged_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first: dict[str, object],
+    second: dict[str, object] | None = None,
+) -> tuple[BrowserSharePointSource, SpreadsheetInfo]:
+    monkeypatch.setattr("app.sources.sharepoint._VERSION_PAGE_SIZE", 2)
+    responses: dict[str, object] = {"$skip=0": first}
+    if second is not None:
+        responses["page=2"] = second
+    source, _ = make_source(tmp_path, responses)
+    monkeypatch.setattr(source, "_file_metadata", lambda _spreadsheet: file_metadata())
+    spreadsheet = SpreadsheetInfo(
+        SITE,
+        "sharepoint-rest",
+        "UUID-A",
+        "Arquivo.xlsx",
+        f"{ROOT}/Setor A/Arquivo.xlsx",
+    )
+    return source, spreadsheet
+
+
+def test_version_pagination_accepts_complete_monotonic_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, spreadsheet = _paged_source(
+        tmp_path,
+        monkeypatch,
+        {
+            "value": [
+                {"ID": 1, "VersionLabel": "0.1"},
+                {"ID": 2, "VersionLabel": "0.2"},
+            ],
+            "@odata.nextLink": f"{SITE}/_api/versions?page=2",
+        },
+        {"value": [{"ID": 3, "VersionLabel": "0.3"}]},
+    )
+
+    with source:
+        versions = source.list_versions(spreadsheet)
+
+    assert [(item.id, item.number) for item in versions] == [
+        ("1", "0.1"), ("2", "0.2"), ("3", "0.3"), ("99", "0.99")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("second_page", "message"),
+    [
+        (
+            {
+                "value": [
+                    {"ID": 2, "VersionLabel": "0.2"},
+                    {"ID": 3, "VersionLabel": "0.3"},
+                ]
+            },
+            "duplicada",
+        ),
+        (
+            {
+                "value": [
+                    {"ID": 4, "VersionLabel": "0.4"},
+                    {"ID": 3, "VersionLabel": "0.3"},
+                ]
+            },
+            "fora de ordem",
+        ),
+        (
+            {"value": [{"ID": 3, "VersionLabel": "0.2"}]},
+            "VersionLabel",
+        ),
+    ],
+)
+def test_version_pagination_rejects_partial_duplicates_order_and_label_conflicts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    second_page: dict[str, object],
+    message: str,
+) -> None:
+    source, spreadsheet = _paged_source(
+        tmp_path,
+        monkeypatch,
+        {
+            "value": [
+                {"ID": 1, "VersionLabel": "0.1"},
+                {"ID": 2, "VersionLabel": "0.2"},
+            ],
+            "@odata.nextLink": f"{SITE}/_api/versions?page=2",
+        },
+        second_page,
+    )
+
+    with source, pytest.raises(SharePointReadError, match=message):
+        source.list_versions(spreadsheet)
+
+
+def test_version_pagination_rejects_repeated_next_link_and_incomplete_empty_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repeated = f"{SITE}/_api/versions?page=2"
+    source, spreadsheet = _paged_source(
+        tmp_path,
+        monkeypatch,
+        {
+            "value": [
+                {"ID": 1, "VersionLabel": "0.1"},
+                {"ID": 2, "VersionLabel": "0.2"},
+            ],
+            "@odata.nextLink": repeated,
+        },
+        {
+            "value": [{"ID": 3, "VersionLabel": "0.3"}],
+            "@odata.nextLink": repeated,
+        },
+    )
+    with source, pytest.raises(SharePointReadError, match="nextLink"):
+        source.list_versions(spreadsheet)
+
+    source, spreadsheet = _paged_source(
+        tmp_path / "empty",
+        monkeypatch,
+        {
+            "value": [
+                {"ID": 1, "VersionLabel": "0.1"},
+                {"ID": 2, "VersionLabel": "0.2"},
+            ],
+            "@odata.nextLink": repeated,
+        },
+        {"value": [], "@odata.nextLink": f"{SITE}/_api/versions?page=3"},
+    )
+    with source, pytest.raises(SharePointReadError, match="incompleta"):
+        source.list_versions(spreadsheet)
+
+
+def test_version_enumeration_rejects_current_version_changed_during_pagination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, spreadsheet = _paged_source(
+        tmp_path, monkeypatch, {"value": [{"ID": 98, "VersionLabel": "0.98"}]}
+    )
+    metadata = iter(
+        (
+            file_metadata(label="0.99", ui_version=99),
+            file_metadata(label="1.0", ui_version=100),
+        )
+    )
+    monkeypatch.setattr(source, "_file_metadata", lambda _spreadsheet: next(metadata))
+
+    with source, pytest.raises(SharePointReadError, match="potencialmente incompleta"):
+        source.list_versions(spreadsheet)
+
+
+@pytest.mark.parametrize(
+    "historical",
+    [
+        [{"ID": 99, "VersionLabel": "outro", "IsCurrentVersion": True}],
+        [{"ID": 98, "VersionLabel": "0.99", "IsCurrentVersion": True}],
+        [{"ID": 98, "VersionLabel": "0.98", "IsCurrentVersion": True}],
+    ],
+)
+def test_version_enumeration_rejects_inconsistent_current_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    historical: list[dict[str, object]],
+) -> None:
+    source, spreadsheet = _paged_source(
+        tmp_path, monkeypatch, {"value": historical}
+    )
+    with source, pytest.raises(SharePointReadError, match="atual"):
+        source.list_versions(spreadsheet)
+
+
 def test_rejects_changed_unique_id_in_current_metadata(tmp_path: Path) -> None:
     responses = discovery_responses()
     responses["/Versions?"] = {"value": []}

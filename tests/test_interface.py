@@ -87,6 +87,12 @@ def _application_for_connection(
     application.source = None
     application._busy = False
     application._work_results = queue.SimpleQueue()
+    application._progress_updates = queue.SimpleQueue()
+    application._version_scan_updates = queue.SimpleQueue()
+    application._version_scan_started_at = None
+    application._version_scan_active = False
+    application._version_cache = {}
+    application._version_cache_ttl = 300.0
     application.connect_button = ButtonFake()
     application.refresh_button = ButtonFake()
     application.audit_button = ButtonFake()
@@ -233,6 +239,11 @@ def test_versions_read_error_is_presented_without_closing_interface() -> None:
     application.details = VariableFake()
     application.status = VariableFake()
     application.audit_button = ButtonFake()
+    application._version_cache = {}
+    application._version_cache_ttl = 300.0
+    application._version_scan_updates = queue.SimpleQueue()
+    application._version_scan_active = False
+    application._audit_started_at = None
 
     try:
         application._spreadsheet_status(application.spreadsheets[0])
