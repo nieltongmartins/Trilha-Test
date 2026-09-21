@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -789,26 +790,71 @@ class BrowserSharePointSource:
         current_by_label = next(
             (v for v in historical if v.number == current.number), None
         )
-        if (current_by_id is None) != (current_by_label is None):
+        if current_by_id is not None and current_by_id.number != current.number:
             raise SharePointReadError(
-                "Versão atual inconsistente entre ID e VersionLabel."
+                "ID dos metadados atuais associado a VersionLabel diferente no "
+                f"histórico: ID={current.id!r}, label_historico="
+                f"{current_by_id.number!r}, label_atual={current.number!r}."
             )
-        if current_by_id is not None and current_by_id is not current_by_label:
+        if current_by_label is not None and current_by_label.id != current.id:
             raise SharePointReadError(
-                "Versão atual possui correspondência conflitante de ID/VersionLabel."
+                "VersionLabel dos metadados atuais associado a ID diferente no "
+                f"histórico: label={current.number!r}, id_historico="
+                f"{current_by_label.id!r}, id_atual={current.id!r}."
             )
         marked_current = [version for version in historical if version.is_current]
-        if any(version is not current_by_id for version in marked_current):
-            raise SharePointReadError(
-                "Histórico marcou como atual uma versão diferente dos metadados do arquivo."
-            )
+        for marked in marked_current:
+            if marked.id != current.id or marked.number != current.number:
+                logger.warning(
+                    "IsCurrentVersion histórico diverge dos metadados atuais "
+                    "planilha=%s id_historico=%s label_historico=%s "
+                    "data_historico=%s id_atual=%s label_atual=%s data_atual=%s",
+                    spreadsheet.name,
+                    marked.id,
+                    marked.number,
+                    marked.modified_at,
+                    current.id,
+                    current.number,
+                    current.modified_at,
+                )
         if len(marked_current) > 1:
-            raise SharePointReadError("Histórico retornou mais de uma versão atual.")
+            logger.warning(
+                "Múltiplos IsCurrentVersion no histórico planilha=%s quantidade=%d "
+                "marcadores=%s atual_autoritativa=(id=%s,label=%s,data=%s)",
+                spreadsheet.name,
+                len(marked_current),
+                [(v.id, v.number, v.modified_at) for v in marked_current],
+                current.id,
+                current.number,
+                current.modified_at,
+            )
 
         # Quando o endpoint histórico inclui a atual, substituímos somente a
-        # duplicata exata pelos metadados atuais mais completos.
-        combined = [version for version in historical if version is not current_by_id]
+        # duplicata exata pelos metadados atuais mais completos. IsCurrentVersion
+        # histórico é apenas diagnóstico; não redefine a versão atual.
+        combined = [
+            replace(version, is_current=False)
+            for version in historical
+            if version is not current_by_id
+        ]
         combined.append(current)
+        combined_ids = [version.id for version in combined]
+        combined_labels = [version.number for version in combined]
+        if len(combined_ids) != len(set(combined_ids)):
+            raise SharePointReadError("ID duplicado após reconciliar a versão atual.")
+        if len(combined_labels) != len(set(combined_labels)):
+            raise SharePointReadError(
+                "VersionLabel conflitante após reconciliar a versão atual."
+            )
+        historical_ids = [int(version.id) for version in combined[:-1]]
+        if historical_ids != sorted(historical_ids):
+            raise SharePointReadError(
+                "Ordem histórica inválida após reconciliar a versão atual."
+            )
+        if [version for version in combined if version.is_current] != [current]:
+            raise SharePointReadError(
+                "Reconciliação não produziu exatamente a versão atual autoritativa."
+            )
         logger.info(
             "Versões enumeradas planilha=%s identidade=%s total=%d modo=read-only",
             spreadsheet.name,
