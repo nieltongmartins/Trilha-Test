@@ -92,15 +92,37 @@ def test_complete_audit_records_changes_empty_version_checkpoint_and_execution(
     database: Database, local_history: list[tuple[VersionInfo, Path]],
 ) -> None:
     progress: list[tuple[int, int]] = []
+    confirmed: list[tuple[str, int, int, str, bool]] = []
+
+    def checkpoint_confirmed(version_number: str, completed: int, pending: int) -> None:
+        persisted = database.connection.execute(
+            "SELECT versao_numero FROM checkpoint"
+        ).fetchone()
+        confirmed.append(
+            (
+                version_number,
+                completed,
+                pending,
+                persisted["versao_numero"],
+                database.connection.in_transaction,
+            )
+        )
+
     result = AuditService(
         database,
         source(local_history),
         progress_callback=lambda completed, total: progress.append((completed, total)),
+        checkpoint_callback=checkpoint_confirmed,
     ).audit(SPREADSHEET)
     connection = database.connection
 
     assert result.status is AuditExecutionStatus.COMPLETED
     assert progress == [(0, 3), (1, 3), (2, 3), (3, 3)]
+    assert confirmed == [
+        ("0.85", 1, 2, "0.85", False),
+        ("0.86", 2, 1, "0.86", False),
+        ("0.99", 3, 0, "0.99", False),
+    ]
     assert (result.processed_versions, result.changes, result.final_version) == (3, 4, "0.99")
     checkpoint = connection.execute("SELECT * FROM checkpoint").fetchone()
     assert (checkpoint["versao_id"], checkpoint["versao_numero"]) == (
@@ -185,6 +207,32 @@ def test_reexecution_without_new_versions_is_idempotent(
     assert executions[1][6] is not None and executions[1][7] is None
     assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_failure_before_first_checkpoint_does_not_publish_confirmation(
+    database: Database,
+    local_history: list[tuple[VersionInfo, Path]],
+    monkeypatch,
+) -> None:
+    confirmed: list[tuple[str, int, int]] = []
+    service = AuditService(
+        database,
+        source(local_history),
+        checkpoint_callback=lambda version_number, completed, pending: confirmed.append(
+            (version_number, completed, pending)
+        ),
+    )
+
+    def fail_before_checkpoint(*_args, **_kwargs) -> None:
+        raise RuntimeError("falha antes do checkpoint")
+
+    monkeypatch.setattr(service, "_persist_comparison", fail_before_checkpoint)
+    result = service.audit(SPREADSHEET)
+
+    assert result.status is AuditExecutionStatus.FAILED
+    assert result.final_version is None
+    assert confirmed == []
+    assert database.connection.execute("SELECT * FROM checkpoint").fetchone() is None
 
 
 def test_hashes_content_of_sharepoint_current_version(
@@ -325,9 +373,17 @@ def test_failure_rolls_back_pair_keeps_last_checkpoint_and_can_resume(
         return original_get_version(spreadsheet, item)
 
     failing_source.get_version = record_failed_attempt  # type: ignore[method-assign]
-    failed = AuditService(database, failing_source).audit(SPREADSHEET)
+    confirmed: list[tuple[str, int, int]] = []
+    failed = AuditService(
+        database,
+        failing_source,
+        checkpoint_callback=lambda version_number, completed, pending: confirmed.append(
+            (version_number, completed, pending)
+        ),
+    ).audit(SPREADSHEET)
 
     assert failed.status is AuditExecutionStatus.FAILED
+    assert confirmed == [("1.01", 1, 2)]
     assert (
         failed.processed_versions,
         failed.changes,
