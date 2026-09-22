@@ -465,6 +465,148 @@ def test_version_pagination_accepts_complete_monotonic_pages(
     ]
 
 
+def test_incremental_enumeration_uses_technical_id_accepts_gaps_and_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.sources.sharepoint._VERSION_PAGE_SIZE", 2)
+    responses: dict[str, object] = {
+        "$filter=ID ge 10": {
+            "value": [
+                {"ID": 10, "VersionLabel": "5.129"},
+                {"ID": 42, "VersionLabel": "5.130"},
+            ],
+            "@odata.nextLink": f"{SITE}/_api/incremental?page=2",
+        },
+        "incremental?page=2": {
+            "value": [{"ID": 88, "VersionLabel": "5.131"}]
+        },
+    }
+    source, browser = make_source(tmp_path, responses)
+    monkeypatch.setattr(source, "_file_metadata", lambda _spreadsheet: file_metadata())
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Arquivo.xlsx"
+    )
+    progress: list[int] = []
+
+    versions = source.list_versions(
+        spreadsheet,
+        progress_callback=progress.append,
+        checkpoint_id="10",
+        checkpoint_label="5.129",
+    )
+
+    assert [(version.id, version.number) for version in versions] == [
+        ("10", "5.129"), ("42", "5.130"), ("88", "5.131"), ("99", "0.99")
+    ]
+    assert progress == [2, 3]
+    assert any("$filter=ID ge 10" in call for call in browser.calls)
+    assert any("$orderby=ID asc" in call for call in browser.calls)
+
+
+@pytest.mark.parametrize(
+    "incremental_items",
+    [
+        [{"ID": 11, "VersionLabel": "5.129"}],
+        [{"ID": 10, "VersionLabel": "divergente"}],
+    ],
+)
+def test_invalid_incremental_boundary_falls_back_to_equivalent_full_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    incremental_items: list[dict[str, object]],
+) -> None:
+    responses: dict[str, object] = {
+        "$filter=ID ge 10": {"value": incremental_items},
+        "/Versions?": {
+            "value": [
+                {"ID": 1, "VersionLabel": "5.128"},
+                {"ID": 10, "VersionLabel": "5.129"},
+                {"ID": 42, "VersionLabel": "5.130"},
+            ]
+        },
+    }
+    source, _ = make_source(tmp_path, responses)
+    monkeypatch.setattr(source, "_file_metadata", lambda _spreadsheet: file_metadata())
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Arquivo.xlsx"
+    )
+
+    incremental = source.list_versions(
+        spreadsheet, checkpoint_id="10", checkpoint_label="5.129"
+    )
+    complete = source.list_versions(spreadsheet)
+    expected = [(version.id, version.number) for version in complete]
+
+    assert [(version.id, version.number) for version in incremental] == expected
+    assert expected[1:] == [("10", "5.129"), ("42", "5.130"), ("99", "0.99")]
+
+
+def test_unsupported_incremental_query_falls_back_and_resets_real_counter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses: dict[str, object] = {
+        "$filter=ID ge 10": RuntimeError("HTTP 400"),
+        "/Versions?": {"value": [{"ID": 10, "VersionLabel": "5.129"}]},
+    }
+    source, _ = make_source(tmp_path, responses)
+    monkeypatch.setattr(source, "_file_metadata", lambda _spreadsheet: file_metadata())
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Arquivo.xlsx"
+    )
+    progress: list[int] = []
+
+    versions = source.list_versions(
+        spreadsheet, progress.append, checkpoint_id="10", checkpoint_label="5.129"
+    )
+
+    assert [version.id for version in versions] == ["10", "99"]
+    assert progress == [0, 1]
+
+
+def test_checkpoint_label_conflict_is_rejected_even_after_full_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses: dict[str, object] = {
+        "$filter=ID ge 10": RuntimeError("HTTP 400"),
+        "/Versions?": {"value": [{"ID": 10, "VersionLabel": "outro"}]},
+    }
+    source, _ = make_source(tmp_path, responses)
+    monkeypatch.setattr(source, "_file_metadata", lambda _spreadsheet: file_metadata())
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Arquivo.xlsx"
+    )
+
+    with pytest.raises(SharePointReadError, match="diverge do histórico completo"):
+        source.list_versions(
+            spreadsheet, checkpoint_id="10", checkpoint_label="5.129"
+        )
+
+
+def test_incremental_enumeration_with_no_new_version_keeps_checkpoint_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses: dict[str, object] = {
+        "$filter=ID ge 99": {
+            "value": [
+                {"ID": 99, "VersionLabel": "0.99", "IsCurrentVersion": True}
+            ]
+        }
+    }
+    source, _ = make_source(tmp_path, responses)
+    monkeypatch.setattr(source, "_file_metadata", lambda _spreadsheet: file_metadata())
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Arquivo.xlsx"
+    )
+
+    versions = source.list_versions(
+        spreadsheet, checkpoint_id="99", checkpoint_label="0.99"
+    )
+
+    assert [(version.id, version.number, version.is_current) for version in versions] == [
+        ("99", "0.99", True)
+    ]
+
+
 @pytest.mark.parametrize(
     ("second_page", "message"),
     [
