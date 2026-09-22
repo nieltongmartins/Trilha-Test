@@ -37,10 +37,45 @@ class SelectorFake:
 class ButtonFake:
     def __init__(self) -> None:
         self.state = "normal"
+        self.text = ""
 
     def configure(self, **kwargs: object) -> None:
         if "state" in kwargs:
             self.state = kwargs["state"]
+        if "text" in kwargs:
+            self.text = kwargs["text"]
+
+
+def test_pause_continue_and_stop_buttons_update_control_events() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application._audit_active = True
+    application._audit_paused = False
+    application._pause_event = threading.Event()
+    application._stop_event = threading.Event()
+    application.pause_button = ButtonFake()
+    application.stop_button = ButtonFake()
+    application.status = VariableFake()
+
+    application.toggle_pause()
+    assert application._pause_event.is_set()
+    assert "Finalizando a versão atual" in application.status.value
+
+    application._control_updates = queue.SimpleQueue()
+    application._control_updates.put(("paused", "4.365"))
+    application._poll_control_updates()
+    assert application._audit_paused is True
+    assert application.pause_button.text == "Continuar"
+    assert application.status.value == "Auditoria pausada no checkpoint 4.365."
+
+    application.toggle_pause()
+    assert not application._pause_event.is_set()
+    assert application.pause_button.text == "Pausar"
+    assert application.status.value == "Auditoria retomada."
+
+    application.stop_audit()
+    assert application._stop_event.is_set()
+    assert application.pause_button.state == "disabled"
+    assert application.stop_button.state == "disabled"
 
 
 class SchedulerFake:

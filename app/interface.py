@@ -71,6 +71,10 @@ class AuditApplication(ttk.Frame):
         self._version_cache_ttl = 300.0
         self.last_report: Path | None = None
         self._busy = False
+        self._audit_active = False
+        self._audit_paused = False
+        self._pause_event = threading.Event()
+        self._stop_event = threading.Event()
         self._work_results: queue.SimpleQueue[tuple[bool, object]] = (
             queue.SimpleQueue()
         )
@@ -80,6 +84,7 @@ class AuditApplication(ttk.Frame):
         )
         self._version_progress_updates: queue.SimpleQueue[object] = queue.SimpleQueue()
         self._report_updates: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._control_updates: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
         self._version_scan_updates: queue.SimpleQueue[int] = queue.SimpleQueue()
         self._version_scan_started_at: float | None = None
         self._version_scan_active = False
@@ -193,6 +198,10 @@ class AuditApplication(ttk.Frame):
         ttk.Button(buttons, text="Abrir relatório", command=self.open_report).pack(
             side="left", padx=6
         )
+        self.pause_button = ttk.Button(buttons, text="Pausar", command=self.toggle_pause)
+        self.pause_button.pack(side="left", padx=6)
+        self.stop_button = ttk.Button(buttons, text="Parar", command=self.stop_audit)
+        self.stop_button.pack(side="left", padx=6)
         ttk.Label(audit_tab, textvariable=self.status, wraplength=720).grid(
             row=5, column=0, sticky="w"
         )
@@ -632,6 +641,10 @@ class AuditApplication(ttk.Frame):
             self.status.set("Conecte ao SharePoint antes de auditar.")
             return
         source = self.source
+        self._pause_event.clear()
+        self._stop_event.clear()
+        self._audit_paused = False
+        self._audit_active = True
         set_status_callback = getattr(source, "set_status_callback", None)
         if callable(set_status_callback):
             set_status_callback(self._report_updates.put)
@@ -660,6 +673,9 @@ class AuditApplication(ttk.Frame):
         def report_version_progress(event: object) -> None:
             self._version_progress_updates.put(event)
 
+        def report_control(state: str, checkpoint: str | None) -> None:
+            self._control_updates.put((state, checkpoint))
+
         self._start_work(
             "Auditoria em andamento...",
             lambda: AuditService(
@@ -668,13 +684,32 @@ class AuditApplication(ttk.Frame):
                 progress_callback=report_progress,
                 checkpoint_callback=report_checkpoint,
                 version_progress_callback=report_version_progress,
+                pause_event=self._pause_event,
+                stop_event=self._stop_event,
+                control_callback=report_control,
             ).audit(spreadsheet, versions=cached_versions),
             self._audit_finished,
         )
 
     def _audit_finished(self, result: AuditResult) -> None:
+        self._audit_active = False
+        self._audit_paused = False
+        self._pause_event.clear()
+        self._stop_event.clear()
+        self._set_action_state()
         if result.status is AuditExecutionStatus.FAILED:
             self._finish_progress(failed=True)
+        elif result.status is AuditExecutionStatus.STOPPED:
+            self._finish_progress(failed=True)
+            self.status.set(
+                "Auditoria interrompida pelo usuário no checkpoint "
+                f"{result.final_version or 'nenhum'}."
+            )
+            self.audit_button.configure(
+                text="Continuar auditoria" if result.final_version else "Auditar histórico"
+            )
+            self.refresh_stored()
+            return
         else:
             self._finish_progress()
         self.status.set(
@@ -682,6 +717,32 @@ class AuditApplication(ttk.Frame):
             f"{result.changes} alterações."
         )
         self.show_status()
+
+    def toggle_pause(self) -> None:
+        if not self._audit_active:
+            return
+        if self._audit_paused or self._pause_event.is_set():
+            self._pause_event.clear()
+            self._audit_paused = False
+            self.pause_button.configure(text="Pausar")
+            self.status.set("Auditoria retomada.")
+        else:
+            self._pause_event.set()
+            self.status.set(
+                "Solicitação de pausa recebida. Finalizando a versão atual..."
+            )
+
+    def stop_audit(self) -> None:
+        if not self._audit_active:
+            return
+        self._stop_event.set()
+        # Desbloqueia imediatamente uma worker que já esteja aguardando em pausa.
+        self._pause_event.clear()
+        self.status.set(
+            "Solicitação de parada recebida. Finalizando a versão atual..."
+        )
+        self.pause_button.configure(state="disabled")
+        self.stop_button.configure(state="disabled")
 
     def generate_report(self) -> None:
         from app.report_service import ReportService
@@ -748,6 +809,7 @@ class AuditApplication(ttk.Frame):
         self._poll_version_progress_updates()
         self._poll_version_scan_updates()
         self._poll_report_updates()
+        self._poll_control_updates()
         try:
             succeeded, result = self._work_results.get_nowait()
         except queue.Empty:
@@ -766,6 +828,14 @@ class AuditApplication(ttk.Frame):
 
     def _work_failed(self, error: Exception) -> None:
         self._busy = False
+        self._audit_active = False
+        self._audit_paused = False
+        pause_event = getattr(self, "_pause_event", None)
+        stop_event = getattr(self, "_stop_event", None)
+        if pause_event is not None:
+            pause_event.clear()
+        if stop_event is not None:
+            stop_event.clear()
         self._set_action_state()
         if self._version_scan_active:
             self._end_version_scan(failed=True)
@@ -776,6 +846,25 @@ class AuditApplication(ttk.Frame):
             )
             self._audit_started_at = None
         self.status.set(f"Falha na operação: {error}")
+
+    def _poll_control_updates(self) -> None:
+        if not hasattr(self, "_control_updates"):
+            return
+        while True:
+            try:
+                state, checkpoint = self._control_updates.get_nowait()
+            except queue.Empty:
+                break
+            if state == "paused":
+                self._audit_paused = True
+                self.pause_button.configure(text="Continuar")
+                self.status.set(
+                    f"Auditoria pausada no checkpoint {checkpoint or 'nenhum'}."
+                )
+            elif state == "resumed":
+                self._audit_paused = False
+                self.pause_button.configure(text="Pausar")
+                self.status.set("Auditoria retomada.")
 
     def _begin_version_scan(self) -> None:
         """Mostra atividade contínua enquanto o total de versões ainda é desconhecido."""
@@ -1004,6 +1093,15 @@ class AuditApplication(ttk.Frame):
         for name in ("refresh_button", "audit_button", "report_button"):
             if hasattr(self, name):
                 getattr(self, name).configure(state=connected_state)
+        if hasattr(self, "pause_button"):
+            self.pause_button.configure(
+                text="Continuar" if self._audit_paused else "Pausar",
+                state="normal" if self._audit_active and not self._stop_event.is_set() else "disabled",
+            )
+        if hasattr(self, "stop_button"):
+            self.stop_button.configure(
+                state="normal" if self._audit_active and not self._stop_event.is_set() else "disabled"
+            )
         for button in getattr(self, "storage_buttons", ()):
             button.configure(state=state)
         self._stored_selection_changed()

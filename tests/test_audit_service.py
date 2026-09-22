@@ -2,6 +2,8 @@ from dataclasses import replace
 import logging
 from pathlib import Path
 import sqlite3
+import threading
+import time
 
 from openpyxl import Workbook
 import pytest
@@ -75,6 +77,105 @@ def source(history: list[tuple[VersionInfo, Path]]) -> LocalSource:
 
 def scalar(connection: sqlite3.Connection, query: str) -> int:
     return int(connection.execute(query).fetchone()[0])
+
+
+class ControlledLocalSource(LocalSource):
+    def __init__(self, history: list[tuple[VersionInfo, Path]]) -> None:
+        identity = (SPREADSHEET.site_id, SPREADSHEET.drive_id, SPREADSHEET.drive_item_id)
+        super().__init__([SPREADSHEET], {identity: history})
+        self.cancel_count = 0
+        self.close_count = 0
+
+    def cancel_prefetch(self) -> None:
+        self.cancel_count += 1
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
+def test_pause_at_safe_point_then_continue_from_next_pair(
+    database: Database, local_history: list[tuple[VersionInfo, Path]],
+) -> None:
+    pause = threading.Event()
+    stop = threading.Event()
+    paused = threading.Event()
+    states: list[tuple[str, str | None]] = []
+    confirmed: list[str] = []
+    pause.set()
+    controlled_source = ControlledLocalSource(local_history)
+
+    def control(state: str, checkpoint: str | None) -> None:
+        states.append((state, checkpoint))
+        if state == "paused":
+            paused.set()
+
+    service = AuditService(
+        database, controlled_source, pause_event=pause, stop_event=stop,
+        control_callback=control,
+        checkpoint_callback=lambda version, *_args: confirmed.append(version),
+    )
+    outcome: list[object] = []
+    worker = threading.Thread(target=lambda: outcome.append(service.audit(SPREADSHEET)))
+    worker.start()
+    assert paused.wait(timeout=2)
+    assert confirmed == []
+    assert scalar(database.connection, "SELECT COUNT(*) FROM versao_processada") == 0
+
+    pause.clear()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    result = outcome[0]
+    assert result.status is AuditExecutionStatus.COMPLETED
+    assert confirmed == ["0.85", "0.86", "0.99"]
+    assert states == [("paused", None), ("resumed", None)]
+    assert controlled_source.cancel_count >= 2
+    assert controlled_source.close_count == 0
+
+
+def test_stop_requested_during_pair_waits_for_confirmed_checkpoint(
+    database: Database, local_history: list[tuple[VersionInfo, Path]], monkeypatch,
+) -> None:
+    stop = threading.Event()
+    entered_persist = threading.Event()
+    release_persist = threading.Event()
+    controlled_source = ControlledLocalSource(local_history)
+    service = AuditService(database, controlled_source, stop_event=stop)
+    original_persist = service._persist_comparison
+
+    def blocked_persist(*args, **kwargs) -> None:
+        entered_persist.set()
+        assert release_persist.wait(timeout=2)
+        original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_persist_comparison", blocked_persist)
+    outcome: list[object] = []
+    worker = threading.Thread(target=lambda: outcome.append(service.audit(SPREADSHEET)))
+    worker.start()
+    assert entered_persist.wait(timeout=2)
+    stop.set()
+    time.sleep(0.05)
+    assert worker.is_alive()
+    assert database.connection.execute("SELECT * FROM checkpoint").fetchone() is None
+    release_persist.set()
+    worker.join(timeout=5)
+
+    result = outcome[0]
+    assert result.status is AuditExecutionStatus.STOPPED
+    assert (result.processed_versions, result.final_version) == (1, "0.85")
+    assert scalar(database.connection, "SELECT COUNT(*) FROM versao_processada") == 1
+    execution = database.connection.execute(
+        "SELECT status, mensagem FROM execucao_auditoria"
+    ).fetchone()
+    assert tuple(execution) == ("CONCLUIDA", "Interrompida pelo usuário.")
+    assert scalar(database.connection, "SELECT COUNT(*) FROM erro_processamento") == 0
+    assert controlled_source.cancel_count >= 1
+    assert controlled_source.close_count == 0
+
+    resumed = AuditService(database, controlled_source).audit(SPREADSHEET)
+    assert resumed.status is AuditExecutionStatus.COMPLETED
+    assert resumed.initial_checkpoint == "0.85"
+    assert resumed.processed_versions == 2
 
 
 def test_prefetch_plan_uses_configured_buffer_without_current_or_duplicates(
