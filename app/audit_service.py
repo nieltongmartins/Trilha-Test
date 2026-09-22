@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 import sqlite3
+import threading
 import time
 from collections.abc import Callable
 from uuid import uuid4
@@ -51,12 +52,18 @@ class AuditService:
         progress_callback: Callable[[int, int], None] | None = None,
         checkpoint_callback: Callable[[str, int, int], None] | None = None,
         version_progress_callback: Callable[[VersionProgress], None] | None = None,
+        pause_event: threading.Event | None = None,
+        stop_event: threading.Event | None = None,
+        control_callback: Callable[[str, str | None], None] | None = None,
     ) -> None:
         self.database = database
         self.source = source
         self.progress_callback = progress_callback
         self.checkpoint_callback = checkpoint_callback
         self.version_progress_callback = version_progress_callback
+        self.pause_event = pause_event or threading.Event()
+        self.stop_event = stop_event or threading.Event()
+        self.control_callback = control_callback
 
     def audit(
         self,
@@ -148,6 +155,11 @@ class AuditService:
         final = initial_checkpoint
         previous_snapshot = None
         audit_perf_started = time.perf_counter()
+        if self._wait_at_safe_point(initial_checkpoint):
+            return self._stop_execution(
+                connection, execution_id, execution_code, initial_checkpoint,
+                0, 0, initial_checkpoint,
+            )
         for pair_index, (previous, current) in enumerate(pairs):
             pair_started = time.perf_counter()
             future_versions = tuple(pair[1] for pair in pairs[pair_index:])
@@ -234,6 +246,14 @@ class AuditService:
             final = current.number
             previous_snapshot = current_snapshot
 
+            # Este é o único ponto de controle dentro do loop: a persistência e
+            # o checkpoint da versão atual já foram confirmados atomicamente.
+            if self._wait_at_safe_point(final):
+                return self._stop_execution(
+                    connection, execution_id, execution_code, initial_checkpoint,
+                    processed, total_changes, final,
+                )
+
         self._cancel_prefetch()
         self._finish_execution(
             connection, execution_id, AuditExecutionStatus.COMPLETED,
@@ -258,6 +278,51 @@ class AuditService:
         return AuditResult(
             execution_code, AuditExecutionStatus.COMPLETED, processed,
             total_changes, initial_checkpoint, final,
+        )
+
+    def _wait_at_safe_point(self, checkpoint: str | None) -> bool:
+        """Obedece pausa/parada somente entre comparações confirmadas."""
+        if self.stop_event.is_set():
+            self._cancel_prefetch()
+            return True
+        if not self.pause_event.is_set():
+            return False
+
+        # Downloads especulativos não devem continuar ocupando o buffer durante
+        # uma pausa. O WebDriver e a sessão autenticada não são encerrados.
+        self._cancel_prefetch()
+        self._report_control("paused", checkpoint)
+        while self.pause_event.is_set():
+            if self.stop_event.wait(0.1):
+                return True
+        self._report_control("resumed", checkpoint)
+        return self.stop_event.is_set()
+
+    def _report_control(self, state: str, checkpoint: str | None) -> None:
+        if self.control_callback is not None:
+            try:
+                self.control_callback(state, checkpoint)
+            except Exception:
+                logger.warning("Falha ao publicar estado de controle", exc_info=True)
+
+    def _stop_execution(
+        self, connection: sqlite3.Connection, execution_id: int,
+        execution_code: str, initial_checkpoint: str | None,
+        processed: int, changes: int, final: str | None,
+    ) -> AuditResult:
+        self._cancel_prefetch()
+        self._finish_execution(
+            connection, execution_id, AuditExecutionStatus.STOPPED,
+            final, processed, changes, "Interrompida pelo usuário.",
+        )
+        self._report_control("stopped", final)
+        logger.info(
+            "Auditoria interrompida pelo usuário execucao=%s checkpoint=%s",
+            execution_code, final or "nenhum",
+        )
+        return AuditResult(
+            execution_code, AuditExecutionStatus.STOPPED, processed, changes,
+            initial_checkpoint, final,
         )
 
     def _report_version_progress(
@@ -526,6 +591,14 @@ class AuditService:
         changes: int,
         message: str | None,
     ) -> None:
+        # O schema histórico restringe os valores persistidos. Uma interrupção
+        # graciosa é uma execução concluída (não uma falha); a mensagem preserva
+        # a causa sem exigir migração destrutiva da tabela existente.
+        persisted_status = (
+            AuditExecutionStatus.COMPLETED
+            if status is AuditExecutionStatus.STOPPED
+            else status
+        )
         connection.execute(
             """
             UPDATE execucao_auditoria SET
@@ -534,7 +607,7 @@ class AuditService:
                 status = ?, mensagem = ?
             WHERE id = ?
             """,
-            (final, processed, changes, status.value, message, execution_id),
+            (final, processed, changes, persisted_status.value, message, execution_id),
         )
         connection.commit()
 
