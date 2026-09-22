@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
 import logging
@@ -18,6 +17,7 @@ import tkinter as tk
 from app.audit_storage import AuditStorageManager, RestoreConflictError
 from app.database import Database
 from app.models import AuditExecutionStatus
+from app.progress import SmoothVersionProgress
 from app.report_artifacts import ReportArtifactManager
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 
@@ -89,7 +89,9 @@ class AuditApplication(ttk.Frame):
         self._latest_available = "—"
         self._current_version_started_at: float | None = None
         self._current_version = "—"
-        self._recent_version_durations: deque[float] = deque(maxlen=20)
+        self._smooth_version_progress = SmoothVersionProgress()
+        self._version_animation_interval = 0.15
+        self._version_last_animation = 0.0
         self._version_last_clock_update = 0.0
         self._hidden_clicks: list[float] = []
         # AuditService, ReportService, leitor XLSX/openpyxl, fontes SharePoint e
@@ -643,7 +645,8 @@ class AuditApplication(ttk.Frame):
         self.progress_text.set("0 / 0 (0%) | Tempo total: 00:00")
         self._current_version_started_at = None
         self._current_version = "—"
-        self._recent_version_durations.clear()
+        self._smooth_version_progress = SmoothVersionProgress()
+        self._version_last_animation = 0.0
         self.version_progress_value.set(0)
         self.version_stage_text.set("Preparando auditoria...")
         self._update_version_timing()
@@ -867,18 +870,26 @@ class AuditApplication(ttk.Frame):
             except queue.Empty:
                 break
             now = time.monotonic()
+            occurred_at = getattr(event, "occurred_at", now)
             if event.percent == 0:
                 self._current_version = event.version
-                self._current_version_started_at = now
-                self.version_progress_value.set(0)
+                self._current_version_started_at = occurred_at
                 self.current_version_frame.configure(text=f"Versão atual: {event.version}")
-            self.version_progress_value.set(event.percent)
+            value = self._smooth_version_progress.observe(
+                event.version, event.percent, occurred_at
+            )
+            self.version_progress_value.set(value)
             self.version_stage_text.set(event.stage)
             if event.percent == 100 and self._current_version_started_at is not None:
-                self._recent_version_durations.append(now - self._current_version_started_at)
                 self._current_version_started_at = None
             self._update_version_timing(now)
         now = time.monotonic()
+        if (
+            self._current_version_started_at is not None
+            and now - self._version_last_animation >= self._version_animation_interval
+        ):
+            self.version_progress_value.set(self._smooth_version_progress.estimate(now))
+            self._version_last_animation = now
         if self._current_version_started_at is not None and now - self._version_last_clock_update >= 0.5:
             self._update_version_timing(now)
 
@@ -890,8 +901,8 @@ class AuditApplication(ttk.Frame):
             if self._current_version_started_at is not None
             else 0.0
         )
-        if self._recent_version_durations:
-            average = sum(self._recent_version_durations) / len(self._recent_version_durations)
+        average = self._smooth_version_progress.total_average()
+        if average is not None:
             remaining = average * max(self._progress_total - self._progress_completed, 0)
             average_text = self._format_duration(average)
             eta_text = self._format_duration(remaining)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 import sqlite3
@@ -38,6 +38,7 @@ class VersionProgress:
     version: str
     percent: int
     stage: str
+    occurred_at: float = field(default_factory=time.monotonic)
 
 
 class AuditService:

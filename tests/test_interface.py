@@ -465,8 +465,6 @@ def test_open_stored_report_does_not_generate_when_missing(monkeypatch) -> None:
 
 
 def _application_for_version_progress() -> AuditApplication:
-    from collections import deque
-
     application = AuditApplication.__new__(AuditApplication)
     application._version_progress_updates = queue.SimpleQueue()
     application.version_progress_value = VariableFake()
@@ -475,7 +473,10 @@ def _application_for_version_progress() -> AuditApplication:
     application.current_version_frame = ButtonFake()
     application._current_version_started_at = None
     application._current_version = "—"
-    application._recent_version_durations = deque(maxlen=20)
+    from app.progress import SmoothVersionProgress
+    application._smooth_version_progress = SmoothVersionProgress()
+    application._version_animation_interval = 0.15
+    application._version_last_animation = 0.0
     application._version_last_clock_update = 0.0
     application._progress_completed = 0
     application._progress_total = 30
@@ -488,13 +489,19 @@ def test_version_bar_starts_at_zero_advances_and_resets(monkeypatch) -> None:
     application = _application_for_version_progress()
     ticks = iter((10.0, 11.0, 12.0, 13.0, 14.0))
     monkeypatch.setattr("app.interface.time.monotonic", lambda: next(ticks))
-    application._version_progress_updates.put(VersionProgress("2.18", 0, "Obtendo versão 2.18..."))
-    application._version_progress_updates.put(VersionProgress("2.18", 55, "Validando arquivo..."))
+    application._version_progress_updates.put(
+        VersionProgress("2.18", 0, "Obtendo versão 2.18...", 10.0)
+    )
+    application._version_progress_updates.put(
+        VersionProgress("2.18", 55, "Validando arquivo...", 11.0)
+    )
     application._poll_version_progress_updates()
-    assert application.version_progress_value.value == 55
+    assert 55 < application.version_progress_value.value < 70
     assert application._current_version == "2.18"
 
-    application._version_progress_updates.put(VersionProgress("2.19", 0, "Obtendo versão 2.19..."))
+    application._version_progress_updates.put(
+        VersionProgress("2.19", 0, "Obtendo versão 2.19...", 13.0)
+    )
     application._poll_version_progress_updates()
     assert application.version_progress_value.value == 0
     assert application._current_version == "2.19"
@@ -502,14 +509,14 @@ def test_version_bar_starts_at_zero_advances_and_resets(monkeypatch) -> None:
 
 def test_recent_average_keeps_only_twenty_and_eta_uses_it(monkeypatch) -> None:
     application = _application_for_version_progress()
-    application._recent_version_durations.extend(range(1, 22))
+    application._smooth_version_progress.total_history.extend(range(1, 22))
     application._progress_completed = 25
     application._progress_total = 30
     monkeypatch.setattr("app.interface.time.monotonic", lambda: 100.0)
 
     application._update_version_timing()
 
-    assert list(application._recent_version_durations) == list(range(2, 22))
+    assert list(application._smooth_version_progress.total_history) == list(range(2, 22))
     assert "Média recente: 00:12" in application.version_timing_text.value
     assert "Estimativa restante: 00:58" in application.version_timing_text.value
 
