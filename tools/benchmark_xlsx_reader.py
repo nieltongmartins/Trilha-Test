@@ -12,11 +12,13 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from io import BytesIO
 import gc
+import hashlib
 import json
 from pathlib import Path
 from statistics import mean, median
 import sys
 from time import perf_counter_ns
+import tracemalloc
 from typing import Any, Callable
 import xml.etree.ElementTree as ET
 import zipfile
@@ -35,6 +37,147 @@ FORMULA_TAG = reader._tag("f")
 VALUE_TAG = reader._tag("v")
 INLINE_TAG = reader._tag("is")
 SI_TAG = reader._tag("si")
+
+
+def _digest(payload: bytes | None) -> str:
+    """Hash bytes, distinguishing a missing ZIP member from an empty one."""
+    if payload is None:
+        return "missing"
+    return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True)
+class CachedSheet:
+    """A worksheet snapshot plus the complete inputs used to interpret it."""
+
+    signature: tuple[str, ...]
+    snapshot: dict[str, reader.CellValue]
+
+
+class ConsecutiveSheetPrototype:
+    """Conservative, diagnostic-only cache for consecutive XLSX versions.
+
+    ZIP CRC/size are recorded as useful cheap metadata, but are never accepted
+    as proof. Reuse requires SHA-256 equality of the worksheet and every input
+    consumed by the official fast reader that can change cell interpretation.
+    """
+
+    def __init__(self) -> None:
+        self._previous: dict[str, CachedSheet] = {}
+
+    def read(self, path: Path) -> tuple[reader.Snapshot, dict[str, Any]]:
+        total_started = perf_counter_ns()
+        phases: Counter[str] = Counter()
+        rss_before = _rss_bytes()
+        open_started = perf_counter_ns()
+        archive = zipfile.ZipFile(path)
+        phases["zip_open"] += perf_counter_ns() - open_started
+        new_cache: dict[str, CachedSheet] = {}
+        snapshot: reader.Snapshot = {}
+        sheet_metrics: list[dict[str, Any]] = []
+        try:
+            names = set(archive.namelist())
+
+            def member(name: str) -> bytes | None:
+                if name not in names:
+                    return None
+                started = perf_counter_ns()
+                value = archive.read(name)
+                phases["zip_member_read"] += perf_counter_ns() - started
+                return value
+
+            workbook_xml = member("xl/workbook.xml")
+            relationships_xml = member("xl/_rels/workbook.xml.rels")
+            shared_xml = member("xl/sharedStrings.xml")
+            styles_xml = member("xl/styles.xml")
+            assert workbook_xml is not None and relationships_xml is not None
+
+            dependencies_started = perf_counter_ns()
+            dependency_hashes = (_digest(shared_xml), _digest(styles_xml))
+            shared = reader._shared_strings(archive)
+            date_styles = reader._date_styles(archive)
+            styles_count = 0
+            if styles_xml is not None:
+                styles_root = ET.fromstring(styles_xml)
+                cell_xfs = styles_root.find("m:cellXfs", NS)
+                styles_count = 0 if cell_xfs is None else len(cell_xfs.findall("m:xf", NS))
+            epoch = reader._workbook_epoch(archive)
+            sheets = reader._sheet_targets(archive)
+            phases["dependencies_parse"] += perf_counter_ns() - dependencies_started
+
+            # The exact relationship document is deliberately included. This
+            # is more conservative than necessary (adding a sheet invalidates
+            # all sheets), but cannot silently reinterpret a target.
+            relationship_hash = _digest(relationships_xml)
+            for title, target in sheets:
+                raw_started = perf_counter_ns()
+                xml = archive.read(target)
+                phases["worksheet_zip_read"] += perf_counter_ns() - raw_started
+                info = archive.getinfo(target)
+                hash_started = perf_counter_ns()
+                signature = (
+                    _digest(xml),
+                    *dependency_hashes,
+                    "1904" if epoch == reader.CALENDAR_MAC_1904 else "1900",
+                    relationship_hash,
+                    target,
+                )
+                phases["hashing"] += perf_counter_ns() - hash_started
+                cached = self._previous.get(target)
+                reused = cached is not None and cached.signature == signature
+                cells_seen = 0
+                if reused:
+                    cells = cached.snapshot
+                else:
+                    cells = {}
+                    shared_formulas: dict[str, tuple[str, str]] = {}
+                    parse_started = perf_counter_ns()
+                    for _, element in ET.iterparse(BytesIO(xml), events=("end",)):
+                        if element.tag != CELL_TAG:
+                            continue
+                        cells_seen += 1
+                        coordinate = element.get("r")
+                        if coordinate:
+                            value = reader._cell_value(
+                                element, coordinate, shared, date_styles, epoch,
+                                shared_formulas,
+                            )
+                            if value is not None:
+                                cells[coordinate] = value
+                        element.clear()
+                    phases["worksheet_parse_conversion_snapshot"] += perf_counter_ns() - parse_started
+                snapshot[title] = cells
+                new_cache[target] = CachedSheet(signature, cells)
+                sheet_metrics.append({
+                    "title": title,
+                    "target": target,
+                    "reused": reused,
+                    "zip_crc32": info.CRC,
+                    "compressed_bytes": info.compress_size,
+                    "xml_bytes": info.file_size,
+                    "sha256": signature[0],
+                    "cells_processed": cells_seen,
+                    "cells_in_snapshot": len(cells),
+                })
+        finally:
+            close_started = perf_counter_ns()
+            archive.close()
+            phases["zip_close"] += perf_counter_ns() - close_started
+        self._previous = new_cache
+        return snapshot, {
+            "total_ns": perf_counter_ns() - total_started,
+            "phases_ns": dict(phases),
+            "worksheets": sheet_metrics,
+            "worksheets_reused": sum(item["reused"] for item in sheet_metrics),
+            "cells_processed": sum(item["cells_processed"] for item in sheet_metrics),
+            "cells_in_snapshot": sum(item["cells_in_snapshot"] for item in sheet_metrics),
+            "shared_strings": len(shared),
+            "styles": styles_count,
+            "date_styles": len(date_styles),
+            "xlsx_bytes": path.stat().st_size,
+            "rss_before": rss_before,
+            "rss_after": _rss_bytes(),
+        }
 
 
 def _rss_bytes() -> int | None:
@@ -298,6 +441,67 @@ def _summary(samples: list[int]) -> dict[str, int | float]:
     }
 
 
+def _changed_cells(previous: reader.Snapshot | None, current: reader.Snapshot) -> int:
+    """Count coordinate changes, including sheet additions and removals."""
+    if previous is None:
+        return sum(len(sheet) for sheet in current.values())
+    changed = 0
+    for title in previous.keys() | current.keys():
+        before = previous.get(title, {})
+        after = current.get(title, {})
+        for coordinate in before.keys() | after.keys():
+            if coordinate not in before or coordinate not in after:
+                changed += 1
+            elif not _typed_equal(before[coordinate], after[coordinate]):
+                changed += 1
+    return changed
+
+
+def benchmark_sequence(paths: list[Path]) -> dict[str, Any]:
+    """Compare official full reads with the safe per-sheet prototype."""
+    prototype = ConsecutiveSheetPrototype()
+    versions: list[dict[str, Any]] = []
+    previous: reader.Snapshot | None = None
+    all_equal = True
+    for path in paths:
+        tracemalloc.start()
+        official_started = perf_counter_ns()
+        official = reader.read_workbook(path)
+        official_ns = perf_counter_ns() - official_started
+        _, official_peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        comparison_started = perf_counter_ns()
+        changed = _changed_cells(previous, official)
+        comparison_ns = perf_counter_ns() - comparison_started
+        tracemalloc.start()
+        optimized, metrics = prototype.read(path)
+        _, prototype_peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        equal = _typed_equal(official, optimized)
+        all_equal = all_equal and equal
+        versions.append({
+            "file": str(path),
+            "snapshot_exactly_equal": equal,
+            "official_total_ns": official_ns,
+            "official_peak_traced_bytes": official_peak,
+            "prototype_total_ns": metrics["total_ns"],
+            "prototype_peak_traced_bytes": prototype_peak,
+            "comparison_ns": comparison_ns,
+            "cells_effectively_changed": changed,
+            **metrics,
+        })
+        previous = official
+    return {
+        "snapshot_exactly_equal": all_equal,
+        "versions": versions,
+        "official_total_ns": sum(item["official_total_ns"] for item in versions),
+        "prototype_total_ns": sum(item["prototype_total_ns"] for item in versions),
+        "worksheets_reused": sum(item["worksheets_reused"] for item in versions),
+        "cells_processed": sum(item["cells_processed"] for item in versions),
+        "cells_effectively_changed": sum(item["cells_effectively_changed"] for item in versions),
+    }
+
+
 def benchmark_official_before_after(path: Path, repeat: int = 5) -> dict[str, Any]:
     """Measure the old and optimized real reader paths after one warm-up."""
     before_snapshot = reader._read_fast_repeated_find(path)
@@ -405,17 +609,22 @@ def main(argv: list[str] | None = None) -> int:
     files = list(dict.fromkeys(item.resolve() for item in files))
     if not files:
         parser.error("nenhum arquivo .xlsx encontrado")
-    results = {"schema_version": 1, "files": [profile_file(path, args.repeat) for path in files]}
+    results = {
+        "schema_version": 2,
+        "files": [profile_file(path, args.repeat) for path in files],
+        "consecutive_sheet_reuse": benchmark_sequence(files),
+    }
     payload = json.dumps(results, ensure_ascii=False, indent=2, default=str)
     if args.output:
         args.output.write_text(payload + "\n", encoding="utf-8")
     else:
         print(payload)
-    return 1 if any(
+    variants_equal = not any(
         not variant["snapshot_exactly_equal"]
         for result in results["files"]
         for variant in result["variants"].values()
-    ) else 0
+    )
+    return 0 if variants_equal and results["consecutive_sheet_reuse"]["snapshot_exactly_equal"] else 1
 
 
 if __name__ == "__main__":
