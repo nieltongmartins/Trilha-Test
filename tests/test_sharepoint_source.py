@@ -11,7 +11,12 @@ from app.audit_service import AuditService
 from app.config import Settings
 from app.database import Database
 from app.models import AuditExecutionStatus
-from app.sources import BrowserSharePointSource, SharePointReadError, SpreadsheetInfo
+from app.sources import (
+    BrowserSharePointSource,
+    SharePointReadError,
+    SpreadsheetInfo,
+    VersionInfo,
+)
 from app.sources.sharepoint import _normalize_scope_path, _odata_object
 from app.sources.sharepoint import (
     FETCH_OPERATION_TIMEOUT_SECONDS,
@@ -840,6 +845,58 @@ def test_downloads_historical_and_current_using_distinct_read_only_endpoints(
     assert "/Versions(" not in browser.visited[-1] and browser.visited[-1].endswith(
         "/$value"
     )
+
+
+def test_historical_download_uses_authoritative_url_after_versions_value_fails(
+    tmp_path: Path,
+) -> None:
+    content = workbook_bytes("checkpoint recuperado")
+    historical_url = f"{ROOT}/_vti_history/2622/Arquivo.xlsx"
+    source, browser = make_source(
+        tmp_path,
+        {
+            "Versions(2622)/$value": RuntimeError("timeout"),
+            "_vti_history/2622/Arquivo.xlsx": content,
+        },
+    )
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Arquivo.xlsx"
+    )
+    version = VersionInfo(
+        id="2622",
+        number="5.62",
+        size=len(content),
+        source_url=historical_url,
+    )
+
+    with source:
+        downloaded = source.get_version(spreadsheet, version)
+        assert downloaded.read_bytes() == content
+
+    assert any("Versions(2622)/$value" in url for url in browser.visited)
+    assert any("_vti_history/2622/Arquivo.xlsx" in url for url in browser.visited)
+
+
+def test_historical_download_never_uses_fileversion_url_outside_site(
+    tmp_path: Path,
+) -> None:
+    source, browser = make_source(
+        tmp_path,
+        {"Versions(2622)/$value": RuntimeError("HTTP 404")},
+    )
+    spreadsheet = SpreadsheetInfo(
+        SITE, "sharepoint-rest", "UUID-A", "Arquivo.xlsx", f"{ROOT}/Arquivo.xlsx"
+    )
+    version = VersionInfo(
+        id="2622",
+        number="5.62",
+        source_url="https://example.invalid/_vti_history/2622/Arquivo.xlsx",
+    )
+
+    with source, pytest.raises(SharePointReadError):
+        source.get_version(spreadsheet, version)
+
+    assert all("example.invalid" not in url for url in browser.visited)
     assert all("/_api/" in url for url in browser.visited)
 
 

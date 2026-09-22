@@ -1098,6 +1098,37 @@ class BrowserSharePointSource:
             relative += f"/Versions({version.id})"
         return self._endpoint(relative + "/$value")
 
+    def _historical_url_fallback(self, version: VersionInfo) -> str | None:
+        """Normaliza o ``FileVersion.Url`` sem aceitar saída do site autenticado.
+
+        Alguns tenants enumeram corretamente uma versão, mas deixam a rota
+        ``Versions(id)/$value`` aguardando indefinidamente. ``FileVersion.Url``
+        identifica o mesmo binário histórico e é devolvido junto do ID técnico;
+        ele é usado apenas como segunda rota, nunca para localizar o checkpoint.
+        """
+        if version.is_current or not version.source_url:
+            return None
+        candidate = urljoin(self.site_url.rstrip("/") + "/", version.source_url)
+        parsed = urlsplit(candidate)
+        if f"{parsed.scheme}://{parsed.netloc}" != self._origin:
+            logger.warning(
+                "URL histórica alternativa rejeitada por origem diferente versao=%s",
+                version.number,
+            )
+            return None
+        site_prefix = self._site_path.rstrip("/") + "/"
+        if self._site_path and not (
+            parsed.path.casefold().startswith(site_prefix.casefold())
+            or parsed.path.casefold() == self._site_path.casefold()
+        ):
+            logger.warning(
+                "URL histórica alternativa rejeitada fora do site versao=%s path=%s",
+                version.number,
+                parsed.path,
+            )
+            return None
+        return candidate
+
     def prefetch_version(
         self, spreadsheet: SpreadsheetInfo, version: VersionInfo
     ) -> bool:
@@ -1606,6 +1637,7 @@ class BrowserSharePointSource:
 
     def get_version(self, spreadsheet: SpreadsheetInfo, version: VersionInfo) -> Path:
         url = self._version_download_url(spreadsheet, version)
+        alternate_url = self._historical_url_fallback(version)
         destination = self._workspace.filename(
             spreadsheet.site_id,
             spreadsheet.drive_id,
@@ -1680,29 +1712,53 @@ class BrowserSharePointSource:
             self.cancel_prefetch()
 
         last_error: Exception | None = None
+        normal_urls = (
+            tuple(dict.fromkeys((url, alternate_url)))
+            if alternate_url
+            else (url,)
+        )
         for attempt in range(1, NORMAL_DOWNLOAD_RETRIES + 2):
-            try:
-                return self._download_to_destination(
-                    spreadsheet, version, url, destination,
-                    use_prefetch=False, attempt=attempt,
-                )
-            except SharePointReadError as error:
-                last_error = error
-                if attempt <= NORMAL_DOWNLOAD_RETRIES:
+            for route_index, normal_url in enumerate(normal_urls, start=1):
+                try:
+                    if route_index > 1:
+                        logger.warning(
+                            "PERF fetch_fallback planilha=%s versao=%s "
+                            "origem=versions_value destino=fileversion_url tentativa=%d",
+                            spreadsheet.name,
+                            version.number,
+                            attempt,
+                        )
+                        self._notify_status(
+                            f"Tentando rota histórica alternativa para a versão "
+                            f"{version.number}..."
+                        )
+                    return self._download_to_destination(
+                        spreadsheet, version, normal_url, destination,
+                        use_prefetch=False, attempt=attempt,
+                    )
+                except SharePointReadError as error:
+                    last_error = error
                     logger.warning(
                         "PERF fetch_retry planilha=%s versao=%s modo=normal "
-                        "tentativa=%d motivo=%s",
-                        spreadsheet.name, version.number, attempt + 1,
+                        "tentativa=%d rota=%d/%d motivo=%s",
+                        spreadsheet.name, version.number, attempt,
+                        route_index, len(normal_urls),
                         "timeout" if "timeout" in str(error) else "erro",
                     )
+            if attempt <= NORMAL_DOWNLOAD_RETRIES:
+                assert last_error is not None
+                if len(normal_urls) == 1:
                     self._notify_status(
                         "SharePoint demorando para responder. Tentando novamente..."
                     )
-                    continue
-                logger.warning(
-                    "PERF fetch_falha_final planilha=%s versao=%s tentativas=%d erro=%s",
-                    spreadsheet.name, version.number, attempt, error,
-                )
+        logger.warning(
+            "PERF fetch_falha_final planilha=%s versao=%s tentativas=%d rotas=%d erro=%s",
+            spreadsheet.name,
+            version.number,
+            NORMAL_DOWNLOAD_RETRIES + 1,
+            len(normal_urls),
+            last_error,
+        )
         assert last_error is not None
         self._notify_status(
             f"Falha ao obter a versão {version.number} após tentativas. "
