@@ -390,7 +390,9 @@ def test_failure_rolls_back_pair_keeps_last_checkpoint_and_can_resume(
         failed.initial_checkpoint,
         failed.final_version,
     ) == (1, 1, "1.00", "1.01")
-    assert acquired_before_failure == ["1.00", "1.01", "1.02"]
+    # 1.03 pode ser materializada/lida antecipadamente, mas jamais persistida
+    # antes de a comparacao 1.01 -> 1.02 ser confirmada.
+    assert acquired_before_failure == ["1.00", "1.01", "1.02", "1.03"]
     assert connection.execute(
         "SELECT versao_id, versao_numero FROM checkpoint"
     ).fetchone()[:] == ("version-101", "1.01")

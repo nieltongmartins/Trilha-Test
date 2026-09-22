@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
+from pathlib import Path
 import sqlite3
 import time
 from collections.abc import Callable
@@ -13,6 +14,7 @@ from uuid import uuid4
 from app.database import Database
 from app.excel.comparator import CellChange, compare_snapshots
 from app.excel.reader import CellValue, Snapshot, read_workbook
+from app.excel.read_ahead import ReadAheadExecutor, main_process_rss_bytes
 from app.integrity import sha256_file
 from app.models import AuditExecutionStatus, ProcessedVersionStatus
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
@@ -147,6 +149,8 @@ class AuditService:
         total_changes = 0
         final = initial_checkpoint
         previous_snapshot = None
+        read_ahead = ReadAheadExecutor()
+        prepared: tuple[VersionInfo, Path, str, str] | None = None
         audit_perf_started = time.perf_counter()
         for pair_index, (previous, current) in enumerate(pairs):
             pair_started = time.perf_counter()
@@ -185,12 +189,56 @@ class AuditService:
                     previous_read_seconds = time.perf_counter() - previous_started
 
                 current_started = time.perf_counter()
-                current_snapshot, current_hash = self._read_temporary_version(
-                    spreadsheet, current, prefetch_next=next_version,
-                    prefetch_additional=second_next_version,
-                    report_stages=True,
-                )
+                read_wait_seconds = 0.0
+                snapshot_ready = False
+                if prepared is None:
+                    current_snapshot, current_hash = self._read_temporary_version(
+                        spreadsheet, current, prefetch_next=next_version,
+                        prefetch_additional=second_next_version,
+                        report_stages=True,
+                    )
+                else:
+                    prepared_version, prepared_path, prepared_hash, token = prepared
+                    if (
+                        prepared_version.id != current.id
+                        or prepared_version.number != current.number
+                    ):
+                        raise RuntimeError(
+                            "snapshot antecipado associado a versao inesperada"
+                        )
+                    self._report_version_progress(current.number, 55, "Validando arquivo...")
+                    self._report_version_progress(current.number, 70, "Lendo XLSX...")
+                    wait_started = time.perf_counter()
+                    result, snapshot_ready = read_ahead.result(
+                        current.id, current.number, prepared_path, token
+                    )
+                    read_wait_seconds = time.perf_counter() - wait_started
+                    current_snapshot, current_hash = result.snapshot, prepared_hash
+                    self.source.release_version(prepared_path)
+                    prepared = None
+                    self._report_version_progress(current.number, 90, "Comparando...")
+                    logger.info(
+                        "PERF read_ahead versao=%s pronta=%s espera=%.3fs leitura_xlsx=%.3fs "
+                        "rss_principal=%d rss_worker=%d snapshot_bytes=%d celulas=%d snapshots=2",
+                        current.number, snapshot_ready, read_wait_seconds, result.read_seconds,
+                        main_process_rss_bytes(), result.worker_rss_bytes,
+                        result.snapshot_bytes, result.cell_count,
+                    )
                 current_read_seconds = time.perf_counter() - current_started
+
+                # Materializa somente a proxima versao e entrega sua leitura ao
+                # worker. Comparacao e persistencia atuais continuam no processo
+                # principal e na ordem oficial.
+                if next_version is not None:
+                    next_path = self.source.get_version(spreadsheet, next_version)
+                    next_hash = sha256_file(next_path)
+                    verify_digest = getattr(self.source, "verify_download_digest", None)
+                    if callable(verify_digest):
+                        verify_digest(next_path, next_hash)
+                    token = read_ahead.submit(
+                        next_version.id, next_version.number, next_path
+                    )
+                    prepared = (next_version, next_path, next_hash, token)
 
                 compare_started = time.perf_counter()
                 changes = compare_snapshots(previous_snapshot, current_snapshot)
@@ -229,6 +277,15 @@ class AuditService:
                 )
             except Exception as error:
                 self._cancel_prefetch()
+                if prepared is not None:
+                    read_ahead.close()
+                    try:
+                        self.source.release_version(prepared[1])
+                    except Exception:
+                        logger.debug("Falha ao liberar read-ahead", exc_info=True)
+                    prepared = None
+                else:
+                    read_ahead.close()
                 connection.rollback()
                 return self._record_failure(
                     connection, execution_id, spreadsheet_id, execution_code,
@@ -242,6 +299,7 @@ class AuditService:
             final = current.number
             previous_snapshot = current_snapshot
 
+        read_ahead.close()
         self._cancel_prefetch()
         self._finish_execution(
             connection, execution_id, AuditExecutionStatus.COMPLETED,
