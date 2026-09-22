@@ -88,6 +88,7 @@ class AuditApplication(ttk.Frame):
         self._version_scan_updates: queue.SimpleQueue[int] = queue.SimpleQueue()
         self._version_scan_started_at: float | None = None
         self._version_scan_active = False
+        self._version_scan_checkpoint_label: str | None = None
         self._audit_started_at: float | None = None
         self._progress_completed = 0
         self._progress_total = 0
@@ -555,7 +556,7 @@ class AuditApplication(ttk.Frame):
 
     def _database_row(self, spreadsheet: SpreadsheetInfo):
         return self.database.connection.execute(
-            """SELECT p.id, c.versao_numero FROM planilha p
+            """SELECT p.id, c.versao_id, c.versao_numero FROM planilha p
                LEFT JOIN checkpoint c ON c.planilha_id = p.id
                WHERE p.site_id=? AND p.drive_id=? AND p.drive_item_id=?""",
             (spreadsheet.site_id, spreadsheet.drive_id, spreadsheet.drive_item_id),
@@ -569,7 +570,8 @@ class AuditApplication(ttk.Frame):
             return
 
         if self._cached_versions(spreadsheet) is None:
-            self._begin_version_scan()
+            row = self._database_row(spreadsheet)
+            self._begin_version_scan(row["versao_numero"] if row else None)
 
         self._start_work(
             "Consultando histórico de versões no SharePoint...",
@@ -590,6 +592,8 @@ class AuditApplication(ttk.Frame):
                     list_versions(
                         spreadsheet,
                         progress_callback=self._version_scan_updates.put,
+                        checkpoint_id=row["versao_id"] if row else None,
+                        checkpoint_label=checkpoint,
                     )
                 )
             except TypeError:
@@ -866,10 +870,11 @@ class AuditApplication(ttk.Frame):
                 self.pause_button.configure(text="Pausar")
                 self.status.set("Auditoria retomada.")
 
-    def _begin_version_scan(self) -> None:
+    def _begin_version_scan(self, checkpoint_label: str | None = None) -> None:
         """Mostra atividade contínua enquanto o total de versões ainda é desconhecido."""
         self._version_scan_started_at = time.monotonic()
         self._version_scan_active = True
+        self._version_scan_checkpoint_label = checkpoint_label
         while True:
             try:
                 self._version_scan_updates.get_nowait()
@@ -879,8 +884,13 @@ class AuditApplication(ttk.Frame):
         self.progress_bar.configure(mode="indeterminate")
         self.progress_value.set(0)
         self.progress_bar.start(12)
+        prefix = (
+            f"Buscando versões após o checkpoint {checkpoint_label}..."
+            if checkpoint_label
+            else "Buscando versões no SharePoint..."
+        )
         self.progress_text.set(
-            "Carregando histórico do SharePoint... 0 versões encontradas | "
+            f"{prefix} Versões encontradas: 0 | "
             "Tempo: 00:00"
         )
 
@@ -900,9 +910,14 @@ class AuditApplication(ttk.Frame):
             if self._version_scan_started_at is not None
             else 0.0
         )
+        prefix = (
+            f"Buscando versões após o checkpoint "
+            f"{self._version_scan_checkpoint_label}... "
+            if getattr(self, "_version_scan_checkpoint_label", None)
+            else "Buscando versões no SharePoint... "
+        )
         self.progress_text.set(
-            f"Carregando histórico do SharePoint... "
-            f"{latest_count:,} versões encontradas | "
+            prefix + f"Versões encontradas: {latest_count:,} | "
             f"Tempo: {self._format_duration(elapsed)}"
         )
 
@@ -926,7 +941,7 @@ class AuditApplication(ttk.Frame):
             )
         else:
             total_text = (
-                f"{total_versions:,} versões carregadas"
+                f"{total_versions:,} versões encontradas"
                 if total_versions is not None
                 else "histórico carregado"
             )
@@ -936,6 +951,7 @@ class AuditApplication(ttk.Frame):
             )
         self._version_scan_active = False
         self._version_scan_started_at = None
+        self._version_scan_checkpoint_label = None
 
     def _poll_progress_updates(self) -> None:
         if not hasattr(self, "_progress_updates"):

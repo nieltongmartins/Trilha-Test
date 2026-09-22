@@ -105,7 +105,20 @@ class AuditService:
 
         try:
             if versions is None:
-                versions = list(self.source.list_versions(spreadsheet))
+                list_versions = getattr(self.source, "list_versions")
+                try:
+                    versions = list(
+                        list_versions(
+                            spreadsheet,
+                            checkpoint_id=checkpoint["versao_id"] if checkpoint else None,
+                            checkpoint_label=(
+                                checkpoint["versao_numero"] if checkpoint else None
+                            ),
+                        )
+                    )
+                except TypeError:
+                    # Fontes locais/alternativas conservam o contrato mínimo.
+                    versions = list(list_versions(spreadsheet))
                 logger.info(
                     "Lista de versões obtida na auditoria execucao=%s total=%d",
                     execution_code,

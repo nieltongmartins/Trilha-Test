@@ -644,6 +644,85 @@ class BrowserSharePointSource:
         self,
         spreadsheet: SpreadsheetInfo,
         progress_callback: Callable[[int], None] | None = None,
+        *,
+        checkpoint_id: str | None = None,
+        checkpoint_label: str | None = None,
+    ) -> tuple[VersionInfo, ...]:
+        """Enumera versões, preferindo uma consulta incremental comprovável.
+
+        ``checkpoint_id`` é a única chave usada na consulta. O label serve
+        exclusivamente para validar a fronteira devolvida pelo servidor. Caso
+        o tenant rejeite/ignore ``$filter`` ou ``$orderby``, ou a fronteira não
+        possa ser provada, a enumeração completa é repetida automaticamente.
+        """
+        if checkpoint_id is None:
+            return self._list_versions(spreadsheet, progress_callback)
+        if checkpoint_label is None:
+            logger.info(
+                "PERF enumeracao_fallback planilha=%s motivo=checkpoint_sem_label",
+                spreadsheet.name,
+            )
+            return self._list_versions(spreadsheet, progress_callback)
+        try:
+            technical_id = int(checkpoint_id)
+        except (TypeError, ValueError):
+            logger.info(
+                "PERF enumeracao_fallback planilha=%s motivo=checkpoint_id_invalido",
+                spreadsheet.name,
+            )
+            return self._list_versions(spreadsheet, progress_callback)
+
+        try:
+            return self._list_versions(
+                spreadsheet,
+                progress_callback,
+                checkpoint=(technical_id, checkpoint_label),
+            )
+        except SharePointReadError as error:
+            # Mudança do watermark nunca deve ser mascarada por uma segunda
+            # leitura: a enumeração observada já é potencialmente incompleta.
+            if "mudou durante a paginação" in str(error):
+                raise
+            logger.warning(
+                "PERF enumeracao_fallback planilha=%s checkpoint_id=%s motivo=%s",
+                spreadsheet.name,
+                checkpoint_id,
+                str(error).replace("\n", " "),
+            )
+            logger.warning(
+                "ENUMERACAO modo=completa_fallback planilha=%s motivo=%s",
+                spreadsheet.name,
+                str(error).replace("\n", " "),
+            )
+            if progress_callback is not None:
+                progress_callback(0)
+            complete = self._list_versions(
+                spreadsheet, progress_callback, fallback=True
+            )
+            boundary = next(
+                (version for version in complete if version.id == str(technical_id)),
+                None,
+            )
+            if boundary is None:
+                raise SharePointReadError(
+                    f"checkpoint técnico ID {technical_id} ausente também na "
+                    "enumeração completa"
+                )
+            if boundary.number != checkpoint_label:
+                raise SharePointReadError(
+                    "checkpoint local diverge do histórico completo: "
+                    f"ID={technical_id}, salvo={checkpoint_label!r}, "
+                    f"retornado={boundary.number!r}"
+                )
+            return complete
+
+    def _list_versions(
+        self,
+        spreadsheet: SpreadsheetInfo,
+        progress_callback: Callable[[int], None] | None = None,
+        *,
+        checkpoint: tuple[int, str] | None = None,
+        fallback: bool = False,
     ) -> tuple[VersionInfo, ...]:
         """Enumera todo o histórico em páginas, sem aceitar truncamento silencioso.
 
@@ -655,6 +734,16 @@ class BrowserSharePointSource:
         entregar uma lista incompleta à auditoria.
         """
         self._validate_spreadsheet(spreadsheet)
+        mode = "incremental" if checkpoint is not None else (
+            "completa_fallback" if fallback else "completa"
+        )
+        logger.info(
+            "PERF enumeracao_inicio planilha=%s modo=%s checkpoint_id=%s checkpoint_label=%s",
+            spreadsheet.name,
+            mode,
+            checkpoint[0] if checkpoint else None,
+            checkpoint[1] if checkpoint else None,
+        )
         # Um watermark antes/depois impede aceitar silenciosamente uma lista
         # montada enquanto uma nova versão era publicada no SharePoint.
         initial_metadata = self._file_metadata(spreadsheet)
@@ -669,6 +758,11 @@ class BrowserSharePointSource:
             "?$expand=CreatedBy&$select=ID,VersionLabel,Created,CreatedBy/Title,"
             "CreatedBy/Email,CreatedBy/LoginName,CheckInComment,Size,Length,Url,IsCurrentVersion"
         )
+        if checkpoint is not None:
+            # ID is numeric in File/Versions. Explicit ordering plus an
+            # inclusive boundary makes the checkpoint snapshot available for
+            # the first pending comparison; gaps in IDs are intentionally fine.
+            base_relative += f"&$filter=ID ge {checkpoint[0]}&$orderby=ID asc"
 
         next_url: str | None = self._endpoint(
             base_relative + f"&$top={_VERSION_PAGE_SIZE}&$skip=0"
@@ -770,6 +864,10 @@ class BrowserSharePointSource:
                 len(historical),
                 skip,
             )
+            logger.info(
+                "PERF enumeracao_progresso planilha=%s modo=%s encontradas=%d paginas=%d",
+                spreadsheet.name, mode, len(historical), page,
+            )
 
             if next_link is not None:
                 next_url = urljoin(self.site_url + "/", next_link)
@@ -787,15 +885,11 @@ class BrowserSharePointSource:
             else:
                 next_url = None
 
+        if checkpoint is not None and ordering_direction < 0:
+            raise SharePointReadError(
+                "servidor não respeitou a ordenação incremental ascendente"
+            )
         historical.sort(key=lambda version: int(version.id))
-        logger.info(
-            "PERF enumeracao_versoes planilha=%s paginas=%d historicas=%d total=%.3fs",
-            spreadsheet.name,
-            page,
-            len(historical),
-            time.perf_counter() - started,
-        )
-
         metadata = self._file_metadata(spreadsheet)
         final_watermark = (
             metadata.get("UniqueId"),
@@ -807,6 +901,26 @@ class BrowserSharePointSource:
                 "A versão atual mudou durante a paginação; a enumeração "
                 "foi rejeitada como potencialmente incompleta."
             )
+        if checkpoint is not None:
+            checkpoint_id, checkpoint_label = checkpoint
+            boundary = next(
+                (version for version in historical if int(version.id) == checkpoint_id),
+                None,
+            )
+            if boundary is None:
+                raise SharePointReadError(
+                    f"checkpoint técnico ID {checkpoint_id} ausente no resultado incremental"
+                )
+            if boundary.number != checkpoint_label:
+                raise SharePointReadError(
+                    "checkpoint com conflito ID/VersionLabel: "
+                    f"ID={checkpoint_id}, salvo={checkpoint_label!r}, "
+                    f"retornado={boundary.number!r}"
+                )
+            if any(int(version.id) < checkpoint_id for version in historical):
+                raise SharePointReadError(
+                    "servidor ignorou a fronteira incremental solicitada"
+                )
         unique_id = metadata.get("UniqueId")
         if (
             not isinstance(unique_id, str)
@@ -909,6 +1023,20 @@ class BrowserSharePointSource:
             raise SharePointReadError(
                 "Ordem histórica inválida após reconciliar a versão atual."
             )
+        logger.info(
+            "ENUMERACAO modo=%s planilha=%s checkpoint_id=%s",
+            mode, spreadsheet.name, checkpoint[0] if checkpoint else None,
+        )
+        logger.info(
+            "PERF enumeracao_versoes planilha=%s modo=%s checkpoint_id=%s "
+            "historicas_recebidas=%d paginas=%d total_segundos=%.3f",
+            spreadsheet.name,
+            mode,
+            checkpoint[0] if checkpoint else None,
+            len(historical),
+            page,
+            time.perf_counter() - started,
+        )
         if [version for version in combined if version.is_current] != [current]:
             raise SharePointReadError(
                 "Reconciliação não produziu exatamente a versão atual autoritativa."
