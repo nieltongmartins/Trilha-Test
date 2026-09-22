@@ -284,6 +284,11 @@ class BrowserSharePointSource:
 
     REST_CONTEXT = "sharepoint-rest"
 
+    @property
+    def prefetch_buffer_size(self) -> int:
+        """Quantidade de versões futuras admitidas pelo buffer do Edge."""
+        return PREFETCH_BUFFER_SIZE
+
     def __init__(
         self,
         site_url: str,
