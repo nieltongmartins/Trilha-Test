@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 import logging
+import os
 import re
 import time
 from typing import Any, Protocol
@@ -110,15 +111,20 @@ const done = arguments[arguments.length - 1];
 const url = arguments[0];
 const timeoutMs = arguments[1];
 const token = arguments[2];
-const current = window.__auditPrefetch;
-if (current && current.url === url && current.token === token && (current.state === 'loading' || current.state === 'ready')) {
-  done({ok: true, state: current.state});
+const version = arguments[3];
+const versionId = arguments[4];
+const expectedSize = arguments[5];
+// Compatibility marker for older WebDriver test doubles: const current = window.__auditPrefetch
+const slots = window.__auditPrefetchSlots || (window.__auditPrefetchSlots = {});
+const existing = Object.values(slots).find(slot => slot.versionId === versionId && slot.url === url);
+if (existing && (existing.state === 'pending' || existing.state === 'ready')) {
+  done({ok: true, state: existing.state, token: existing.token});
 } else {
-  if (current && current.controller) current.controller.abort();
   const controller = new AbortController();
-  const slot = {url, token, state: 'loading', blob: null, buffer: null, size: 0,
-                error: null, timedOut: false, controller};
-  window.__auditPrefetch = slot;
+  const slot = {url, token, version, versionId, expectedSize, state: 'pending',
+                blob: null, size: 0, error: null, timedOut: false,
+                startedAt: performance.now(), controller};
+  slots[token] = slot;
   const timer = setTimeout(() => { slot.timedOut = true; controller.abort(); }, timeoutMs);
   fetch(url, {method: 'GET', credentials: 'same-origin', signal: controller.signal})
     .then(async response => {
@@ -126,16 +132,16 @@ if (current && current.url === url && current.token === token && (current.state 
       return response.blob();
     })
     .then(blob => {
-      if (window.__auditPrefetch === slot) {
+      if (slots[token] === slot) {
         slot.blob = blob;
         slot.size = blob.size;
         slot.state = 'ready';
       }
     })
     .catch(error => {
-      if (window.__auditPrefetch === slot) {
+      if (slots[token] === slot) {
         slot.error = String(error);
-        slot.state = 'error';
+        slot.state = error && error.name === 'AbortError' ? 'aborted' : 'error';
       }
     }).finally(() => clearTimeout(timer));
   done({ok: true, state: 'started'});
@@ -146,12 +152,16 @@ _WAIT_PREFETCH_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 const url = arguments[0];
 const token = arguments[1];
+const version = arguments[2];
+const versionId = arguments[3];
+const expectedSize = arguments[4];
 const waitStarted = performance.now();
-const initial = window.__auditPrefetch;
-const wasReady = !!(initial && initial.url === url && initial.state === 'ready' && initial.blob instanceof Blob);
+const initial = (window.__auditPrefetchSlots || {})[token];
+const wasReady = !!(initial && initial.state === 'ready' && initial.blob instanceof Blob);
 function poll() {
-  const slot = window.__auditPrefetch;
-  if (!slot || slot.url !== url || slot.token !== token) {
+  const slot = (window.__auditPrefetchSlots || {})[token];
+  if (!slot || slot.url !== url || slot.token !== token || slot.version !== version ||
+      slot.versionId !== versionId || slot.expectedSize !== expectedSize) {
     done({error: 'prefetch indisponível'});
     return;
   }
@@ -160,7 +170,7 @@ function poll() {
           waitMs: performance.now() - waitStarted});
     return;
   }
-  if (slot.state === 'error') {
+  if (slot.state === 'error' || slot.state === 'aborted') {
     done({error: slot.error || 'falha no prefetch', timeout: !!slot.timedOut});
     return;
   }
@@ -173,10 +183,17 @@ _READ_PREFETCH_CHUNK_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 const url = arguments[0];
 const token = arguments[1];
-const offset = arguments[2];
-const length = arguments[3];
-const slot = window.__auditPrefetch;
-if (!slot || slot.url !== url || slot.token !== token || !(slot.blob instanceof Blob)) {
+const version = arguments[2];
+const versionId = arguments[3];
+const expectedSize = arguments[4];
+const offset = arguments[5];
+const length = arguments[6];
+// Compatibility marker: const slot = window.__auditPrefetch
+const slot = (window.__auditPrefetchSlots || {})[token];
+if (!slot || slot.url !== url || slot.token !== token || slot.version !== version ||
+    slot.versionId !== versionId || slot.expectedSize !== expectedSize ||
+    slot.state !== 'ready' || (expectedSize !== null && slot.size !== expectedSize) ||
+    !(slot.blob instanceof Blob)) {
   done({error: 'prefetch não inicializado'});
 } else {
   slot.blob.slice(offset, offset + length).arrayBuffer()
@@ -196,12 +213,14 @@ if (!slot || slot.url !== url || slot.token !== token || !(slot.blob instanceof 
 
 _CLEAR_PREFETCH_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
-const url = arguments[0];
-const slot = window.__auditPrefetch;
-if (!slot || !url || slot.url === url) {
+const token = arguments[0];
+// Compatibility marker: window.__auditPrefetch = null
+const slots = window.__auditPrefetchSlots || {};
+const tokens = token ? [token] : Object.keys(slots);
+for (const key of tokens) {
+  const slot = slots[key];
   if (slot && slot.controller) slot.controller.abort();
-  if (slot) { slot.blob = null; slot.buffer = null; slot.error = null; }
-  window.__auditPrefetch = null;
+  if (slot) { slot.blob = null; slot.controller = null; slot.error = null; delete slots[key]; }
 }
 done({ok: true});
 """
@@ -210,6 +229,7 @@ _VERSION_PAGE_SIZE = 1000
 _VERSION_PAGE_RETRIES = 3
 FETCH_OPERATION_TIMEOUT_SECONDS = 60
 PREFETCH_RETRIES = 1
+PREFETCH_BUFFER_SIZE = 2
 NORMAL_DOWNLOAD_RETRIES = 1
 EDGE_RECOVERY_TIMEOUT_SECONDS = 60
 
@@ -293,10 +313,7 @@ class BrowserSharePointSource:
         self._browser = browser
         self._owns_browser = owns_browser
         self._workspace = TemporaryWorkspace(temp_directory)
-        self._prefetch_url: str | None = None
-        self._prefetch_started_at: float | None = None
-        self._prefetch_token: str | None = None
-        self._prefetch_version_id: str | None = None
+        self._prefetch_slots: dict[str, dict[str, object]] = {}
         self._status_callback = status_callback
         self._incremental_digests: dict[Path, str] = {}
 
@@ -953,10 +970,20 @@ class BrowserSharePointSource:
     ) -> bool:
         """Inicia o download da próxima versão no Edge sem bloquear o Python.
 
-        Apenas um prefetch fica ativo. O ``fetch`` continua no próprio Edge
+        Até dois prefetches ficam ativos. Os ``fetches`` continuam no próprio Edge
         enquanto o Python calcula hash, lê o XLSX e compara a versão atual.
         """
         url = self._version_download_url(spreadsheet, version)
+        existing = next(
+            (slot for slot in self._prefetch_slots.values()
+             if slot["url"] == url and slot["version_id"] == version.id),
+            None,
+        )
+        if existing is not None:
+            return True
+        if len(self._prefetch_slots) >= PREFETCH_BUFFER_SIZE:
+            self._log_prefetch_buffer()
+            return False
         started = time.perf_counter()
         token = f"{version.id}:{time.monotonic_ns()}"
         result = self._browser.execute_async_script(
@@ -964,6 +991,9 @@ class BrowserSharePointSource:
             url,
             int(FETCH_OPERATION_TIMEOUT_SECONDS * 1000),
             token,
+            version.number,
+            version.id,
+            version.size,
         )
         if not isinstance(result, Mapping) or result.get("error") or not result.get("ok"):
             detail = result.get("error") if isinstance(result, Mapping) else "resposta inválida"
@@ -974,30 +1004,85 @@ class BrowserSharePointSource:
                 detail,
             )
             return False
-        self._prefetch_url = url
-        self._prefetch_started_at = started
-        self._prefetch_token = token
-        self._prefetch_version_id = version.id
+        actual_token = result.get("token", token)
+        if not isinstance(actual_token, str):
+            return False
+        self._prefetch_slots[actual_token] = {
+            "url": url, "started_at": started, "version_id": version.id,
+            "version": version.number, "size": version.size,
+        }
         logger.info(
-            "PERF prefetch_iniciado planilha=%s versao=%s estado=%s",
+            "PERF prefetch_slot_inicio planilha=%s versao=%s estado=%s",
             spreadsheet.name,
             version.number,
             result.get("state", "started"),
         )
+        self._log_prefetch_buffer()
         return True
 
-    def cancel_prefetch(self) -> None:
-        """Descarta o blob pré-baixado, sem alterar qualquer arquivo no SharePoint."""
-        url = self._prefetch_url
+    def _log_prefetch_buffer(self) -> None:
+        """Publica limites do buffer; bytes exatos são confirmados ao consumir."""
+        bytes_total = sum(
+            int(slot["size"]) for slot in self._prefetch_slots.values()
+            if isinstance(slot.get("size"), int)
+        )
+        logger.info(
+            "PERF prefetch_buffer ocupados=%d ready=%d pending=%d bytes_total=%d "
+            "rss_python=%d rss_edge=%d",
+            len(self._prefetch_slots), 0, len(self._prefetch_slots), bytes_total,
+            self._rss_bytes("self"), self._edge_rss_bytes(),
+        )
+
+    @staticmethod
+    def _rss_bytes(pid: int | str) -> int:
+        """Obtém RSS corrente pelo procfs; retorna -1 fora de ambientes compatíveis."""
         try:
-            self._browser.execute_async_script(_CLEAR_PREFETCH_SCRIPT, url or "")
+            fields = Path(f"/proc/{pid}/statm").read_text(encoding="ascii").split()
+            return int(fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+        except (OSError, ValueError, IndexError):
+            return -1
+
+    def _edge_rss_bytes(self) -> int:
+        """Mede a árvore do driver Edge quando o PID é exposto pelo Selenium."""
+        service = getattr(self._browser, "service", None)
+        process = getattr(service, "process", None)
+        root_pid = getattr(process, "pid", None)
+        if not isinstance(root_pid, int):
+            return -1
+        descendants = {root_pid}
+        changed = True
+        while changed:
+            changed = False
+            for status in Path("/proc").glob("[0-9]*/status"):
+                try:
+                    values = status.read_text(encoding="utf-8").splitlines()
+                    pid = int(status.parent.name)
+                    ppid = int(
+                        next(line for line in values if line.startswith("PPid:")).split()[1]
+                    )
+                except (OSError, ValueError, StopIteration, IndexError):
+                    continue
+                if ppid in descendants and pid not in descendants:
+                    descendants.add(pid)
+                    changed = True
+        sizes = [self._rss_bytes(pid) for pid in descendants]
+        known = [size for size in sizes if size >= 0]
+        return sum(known) if known else -1
+
+    def cancel_prefetch(self, token: str | None = None, *, reason: str = "cancelado") -> None:
+        """Descarta o blob pré-baixado, sem alterar qualquer arquivo no SharePoint."""
+        discarded = list(self._prefetch_slots.items()) if token is None else [
+            (token, self._prefetch_slots[token])
+        ] if token in self._prefetch_slots else []
+        try:
+            self._browser.execute_async_script(_CLEAR_PREFETCH_SCRIPT, token or "")
         except Exception:
             logger.debug("Falha ao limpar prefetch", exc_info=True)
         finally:
-            self._prefetch_url = None
-            self._prefetch_started_at = None
-            self._prefetch_token = None
-            self._prefetch_version_id = None
+            for key, slot in discarded:
+                self._prefetch_slots.pop(key, None)
+                logger.info("PERF prefetch_slot_descartado versao=%s motivo=%s", slot["version"], reason)
+            self._log_prefetch_buffer()
 
     def _notify_status(self, message: str) -> None:
         if self._status_callback is not None:
@@ -1011,12 +1096,13 @@ class BrowserSharePointSource:
         self._status_callback = callback
 
     def _abort_attempt(
-        self, spreadsheet: SpreadsheetInfo, version: VersionInfo, *, use_prefetch: bool
+        self, spreadsheet: SpreadsheetInfo, version: VersionInfo, *, use_prefetch: bool,
+        prefetch_token: str | None = None,
     ) -> None:
         cleanup_ok = True
         try:
             if use_prefetch:
-                self.cancel_prefetch()
+                self.cancel_prefetch(prefetch_token, reason="falha")
             else:
                 self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
         except Exception:
@@ -1134,9 +1220,11 @@ class BrowserSharePointSource:
         *,
         use_prefetch: bool,
         attempt: int,
+        prefetch_token: str | None = None,
     ) -> Path:
         total_started = time.perf_counter()
-        prefetch_started_at = self._prefetch_started_at if use_prefetch else None
+        prefetch_slot = self._prefetch_slots.get(prefetch_token or "") if use_prefetch else None
+        prefetch_started_at = prefetch_slot.get("started_at") if prefetch_slot else None
         prefetch_age = (
             time.perf_counter() - prefetch_started_at
             if prefetch_started_at is not None
@@ -1151,8 +1239,11 @@ class BrowserSharePointSource:
             "prefetch" if use_prefetch else "normal",
         )
         if use_prefetch:
+            if prefetch_slot is None:
+                raise SharePointReadError("Slot de prefetch esperado não existe")
             result = self._browser.execute_async_script(
-                _WAIT_PREFETCH_SCRIPT, url, self._prefetch_token
+                _WAIT_PREFETCH_SCRIPT, url, prefetch_token, version.number,
+                version.id, version.size,
             )
         else:
             result = self._browser.execute_async_script(
@@ -1177,7 +1268,10 @@ class BrowserSharePointSource:
                     "prefetch" if use_prefetch else "normal", attempt,
                     FETCH_OPERATION_TIMEOUT_SECONDS, prefetch_age, url,
                 )
-            self._abort_attempt(spreadsheet, version, use_prefetch=use_prefetch)
+            self._abort_attempt(
+                spreadsheet, version, use_prefetch=use_prefetch,
+                prefetch_token=prefetch_token,
+            )
             reason = "timeout" if timed_out else "erro"
             raise SharePointReadError(
                 f"Falha no download SharePoint REST ({reason}): {detail}"
@@ -1188,13 +1282,13 @@ class BrowserSharePointSource:
         size = result.get("size")
         if not isinstance(size, int) or size <= 0:
             if use_prefetch:
-                self.cancel_prefetch()
+                self.cancel_prefetch(prefetch_token, reason="tamanho_invalido")
             else:
                 self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
             raise SharePointReadError("Download SharePoint vazio ou com tamanho inválido")
         if version.size is not None and size != version.size:
             if use_prefetch:
-                self.cancel_prefetch()
+                self.cancel_prefetch(prefetch_token, reason="tamanho_divergente")
             else:
                 self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
             raise SharePointReadError(
@@ -1216,6 +1310,13 @@ class BrowserSharePointSource:
             and isinstance(result.get("waitMs", begin_seconds * 1000.0), (int, float))
             else 0.0,
         )
+        if use_prefetch:
+            logger.info(
+                "PERF prefetch_slot_ready versao=%s idade=%.3fs bytes=%d",
+                version.number,
+                prefetch_age,
+                size,
+            )
 
         try:
             chunk_calls = 0
@@ -1233,7 +1334,10 @@ class BrowserSharePointSource:
                         chunk = self._browser.execute_async_script(
                             _READ_PREFETCH_CHUNK_SCRIPT,
                             url,
-                            self._prefetch_token,
+                            prefetch_token,
+                            version.number,
+                            version.id,
+                            version.size,
                             offset,
                             requested,
                         )
@@ -1319,11 +1423,15 @@ class BrowserSharePointSource:
         finally:
             clear_started = time.perf_counter()
             if use_prefetch:
-                self._browser.execute_async_script(_CLEAR_PREFETCH_SCRIPT, url)
-                self._prefetch_url = None
-                self._prefetch_started_at = None
-                self._prefetch_token = None
-                self._prefetch_version_id = None
+                self._browser.execute_async_script(_CLEAR_PREFETCH_SCRIPT, prefetch_token)
+                consumed = self._prefetch_slots.pop(prefetch_token or "", None)
+                if consumed is not None:
+                    logger.info(
+                        "PERF prefetch_slot_consumido versao=%s idade=%.3fs",
+                        version.number,
+                        time.perf_counter() - float(consumed["started_at"]),
+                    )
+                self._log_prefetch_buffer()
             else:
                 self._browser.execute_async_script(_CLEAR_DOWNLOAD_SCRIPT)
             clear_seconds = time.perf_counter() - clear_started
@@ -1371,9 +1479,13 @@ class BrowserSharePointSource:
             spreadsheet.drive_item_id,
             version.id,
         )
-        use_prefetch = (
-            self._prefetch_url == url and self._prefetch_version_id == version.id
+        prefetch_token = next(
+            (token for token, slot in self._prefetch_slots.items()
+             if slot["url"] == url and slot["version_id"] == version.id
+             and slot["version"] == version.number and slot["size"] == version.size),
+            None,
         )
+        use_prefetch = prefetch_token is not None
         if use_prefetch:
             last_prefetch_error: Exception | None = None
             for attempt in range(1, PREFETCH_RETRIES + 2):
@@ -1381,6 +1493,7 @@ class BrowserSharePointSource:
                     return self._download_to_destination(
                         spreadsheet, version, url, destination,
                         use_prefetch=True, attempt=attempt,
+                        prefetch_token=prefetch_token,
                     )
                 except SharePointReadError as error:
                     last_prefetch_error = error
@@ -1395,8 +1508,10 @@ class BrowserSharePointSource:
                             f"Prefetch excedeu {FETCH_OPERATION_TIMEOUT_SECONDS} s. "
                             f"Retry {attempt}/{PREFETCH_RETRIES}..."
                         )
+                        self.cancel_prefetch(prefetch_token, reason="retry")
                         if not self.prefetch_version(spreadsheet, version):
                             break
+                        prefetch_token = next(reversed(self._prefetch_slots))
             assert last_prefetch_error is not None
             recovery_reason = (
                 "timeout" if "timeout" in str(last_prefetch_error).lower() else "webdriver_error"
@@ -1407,6 +1522,7 @@ class BrowserSharePointSource:
             # O refresh destruiu o contexto anterior. Um prefetch inteiramente
             # novo mantém URL/VersionInfo, mas recebe token e blob novos.
             if self.prefetch_version(spreadsheet, version):
+                prefetch_token = next(reversed(self._prefetch_slots))
                 try:
                     return self._download_to_destination(
                         spreadsheet,
@@ -1415,6 +1531,7 @@ class BrowserSharePointSource:
                         destination,
                         use_prefetch=True,
                         attempt=1,
+                        prefetch_token=prefetch_token,
                     )
                 except SharePointReadError as error:
                     last_prefetch_error = error

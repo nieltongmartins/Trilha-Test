@@ -154,6 +154,11 @@ class AuditService:
                 if pair_index + 1 < len(pairs)
                 else None
             )
+            second_next_version = (
+                pairs[pair_index + 2][1]
+                if pair_index + 2 < len(pairs)
+                else None
+            )
             try:
                 self._report_version_progress(
                     current.number, 0, f"Obtendo versão {current.number}..."
@@ -170,13 +175,18 @@ class AuditService:
                 if previous_snapshot is None:
                     previous_started = time.perf_counter()
                     previous_snapshot, _ = self._read_temporary_version(
-                        spreadsheet, previous, prefetch_next=current
+                        spreadsheet, previous,
+                        prefetch_next=tuple(
+                            version for version in (current, next_version)
+                            if version is not None
+                        ),
                     )
                     previous_read_seconds = time.perf_counter() - previous_started
 
                 current_started = time.perf_counter()
                 current_snapshot, current_hash = self._read_temporary_version(
                     spreadsheet, current, prefetch_next=next_version,
+                    prefetch_additional=second_next_version,
                     report_stages=True,
                 )
                 current_read_seconds = time.perf_counter() - current_started
@@ -317,7 +327,8 @@ class AuditService:
         spreadsheet: SpreadsheetInfo,
         version: VersionInfo,
         *,
-        prefetch_next: VersionInfo | None = None,
+        prefetch_next: VersionInfo | tuple[VersionInfo, ...] | None = None,
+        prefetch_additional: VersionInfo | None = None,
         report_stages: bool = False,
     ) -> tuple[Snapshot, str]:
         total_started = time.perf_counter()
@@ -331,8 +342,13 @@ class AuditService:
         # próxima versão em background. Enquanto isso, o Python calcula SHA,
         # lê o XLSX e compara a versão atual. Não há duas comparações paralelas
         # e o checkpoint continua sendo confirmado estritamente em ordem.
-        if prefetch_next is not None:
-            self._start_prefetch(spreadsheet, prefetch_next)
+        candidates = (
+            prefetch_next if isinstance(prefetch_next, tuple)
+            else tuple(version for version in (prefetch_next, prefetch_additional)
+                       if version is not None)
+        )
+        for candidate in candidates:
+            self._start_prefetch(spreadsheet, candidate)
         try:
             # O digest representa exatamente o binário adquirido nesta execução,
             # antes que o XLSX temporário seja descartado pela fonte.
