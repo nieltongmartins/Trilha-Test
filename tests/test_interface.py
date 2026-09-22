@@ -46,6 +46,45 @@ class ButtonFake:
             self.text = kwargs["text"]
 
 
+class ProgressbarFake:
+    def __init__(self) -> None:
+        self.mode = "determinate"
+        self.running = False
+
+    def configure(self, **kwargs: object) -> None:
+        if "mode" in kwargs:
+            self.mode = str(kwargs["mode"])
+
+    def start(self, _interval: int) -> None:
+        self.running = True
+
+    def stop(self) -> None:
+        self.running = False
+
+
+def test_version_discovery_is_indeterminate_and_reports_only_received_items() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application._version_scan_updates = queue.SimpleQueue()
+    application._version_scan_started_at = None
+    application._version_scan_active = False
+    application.progress_bar = ProgressbarFake()
+    application.progress_value = VariableFake()
+    application.progress_text = VariableFake()
+
+    application._begin_version_scan("5.129")
+    assert application.progress_bar.mode == "indeterminate"
+    assert application.progress_bar.running is True
+    assert "checkpoint 5.129" in application.progress_text.value
+    assert "Versões encontradas: 0" in application.progress_text.value
+
+    application._version_scan_updates.put(1000)
+    application._version_scan_updates.put(2000)
+    application._poll_version_scan_updates()
+
+    assert "Versões encontradas: 2,000" in application.progress_text.value
+    assert application.progress_text.set_threads[-1] == threading.get_ident()
+
+
 def test_pause_continue_and_stop_buttons_update_control_events() -> None:
     application = AuditApplication.__new__(AuditApplication)
     application._audit_active = True
