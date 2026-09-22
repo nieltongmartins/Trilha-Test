@@ -1,7 +1,6 @@
 """Ponto de entrada da aplicação desktop."""
 
 import os
-import multiprocessing
 import sys
 import tkinter as tk
 import time
@@ -98,5 +97,4 @@ def main(*, launch_ui: bool | None = None) -> int:
 
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
     raise SystemExit(main())
