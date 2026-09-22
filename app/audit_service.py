@@ -150,16 +150,7 @@ class AuditService:
         audit_perf_started = time.perf_counter()
         for pair_index, (previous, current) in enumerate(pairs):
             pair_started = time.perf_counter()
-            next_version = (
-                pairs[pair_index + 1][1]
-                if pair_index + 1 < len(pairs)
-                else None
-            )
-            second_next_version = (
-                pairs[pair_index + 2][1]
-                if pair_index + 2 < len(pairs)
-                else None
-            )
+            future_versions = tuple(pair[1] for pair in pairs[pair_index:])
             try:
                 self._report_version_progress(
                     current.number, 0, f"Obtendo versão {current.number}..."
@@ -177,17 +168,18 @@ class AuditService:
                     previous_started = time.perf_counter()
                     previous_snapshot, _ = self._read_temporary_version(
                         spreadsheet, previous,
-                        prefetch_next=tuple(
-                            version for version in (current, next_version)
-                            if version is not None
+                        prefetch_versions=self._planned_prefetch_versions(
+                            previous, future_versions
                         ),
                     )
                     previous_read_seconds = time.perf_counter() - previous_started
 
                 current_started = time.perf_counter()
                 current_snapshot, current_hash = self._read_temporary_version(
-                    spreadsheet, current, prefetch_next=next_version,
-                    prefetch_additional=second_next_version,
+                    spreadsheet, current,
+                    prefetch_versions=self._planned_prefetch_versions(
+                        current, future_versions[1:]
+                    ),
                     report_stages=True,
                 )
                 current_read_seconds = time.perf_counter() - current_started
@@ -315,6 +307,27 @@ class AuditService:
                 error,
             )
 
+    def _planned_prefetch_versions(
+        self,
+        current: VersionInfo,
+        candidates: tuple[VersionInfo, ...],
+    ) -> tuple[VersionInfo, ...]:
+        """Seleciona, em ordem, as próximas versões que cabem no buffer."""
+        configured_size = getattr(self.source, "prefetch_buffer_size", 2)
+        buffer_size = configured_size if isinstance(configured_size, int) else 2
+        if buffer_size <= 0:
+            return ()
+        selected: list[VersionInfo] = []
+        seen = {current.id}
+        for candidate in candidates:
+            if candidate.id in seen:
+                continue
+            seen.add(candidate.id)
+            selected.append(candidate)
+            if len(selected) >= buffer_size:
+                break
+        return tuple(selected)
+
     def _cancel_prefetch(self) -> None:
         cancel = getattr(self.source, "cancel_prefetch", None)
         if callable(cancel):
@@ -328,8 +341,7 @@ class AuditService:
         spreadsheet: SpreadsheetInfo,
         version: VersionInfo,
         *,
-        prefetch_next: VersionInfo | tuple[VersionInfo, ...] | None = None,
-        prefetch_additional: VersionInfo | None = None,
+        prefetch_versions: tuple[VersionInfo, ...] = (),
         report_stages: bool = False,
     ) -> tuple[Snapshot, str]:
         total_started = time.perf_counter()
@@ -343,12 +355,13 @@ class AuditService:
         # próxima versão em background. Enquanto isso, o Python calcula SHA,
         # lê o XLSX e compara a versão atual. Não há duas comparações paralelas
         # e o checkpoint continua sendo confirmado estritamente em ordem.
-        candidates = (
-            prefetch_next if isinstance(prefetch_next, tuple)
-            else tuple(version for version in (prefetch_next, prefetch_additional)
-                       if version is not None)
+        logger.info(
+            "PERF prefetch_planejado atual=%s futuras=[%s] quantidade=%d",
+            version.number,
+            ",".join(candidate.number for candidate in prefetch_versions),
+            len(prefetch_versions),
         )
-        for candidate in candidates:
+        for candidate in prefetch_versions:
             self._start_prefetch(spreadsheet, candidate)
         try:
             # O digest representa exatamente o binário adquirido nesta execução,

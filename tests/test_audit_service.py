@@ -1,4 +1,5 @@
 from dataclasses import replace
+import logging
 from pathlib import Path
 import sqlite3
 
@@ -74,6 +75,40 @@ def source(history: list[tuple[VersionInfo, Path]]) -> LocalSource:
 
 def scalar(connection: sqlite3.Connection, query: str) -> int:
     return int(connection.execute(query).fetchone()[0])
+
+
+def test_prefetch_plan_uses_configured_buffer_without_current_or_duplicates(
+    database: Database, local_history: list[tuple[VersionInfo, Path]], caplog,
+) -> None:
+    local_source = source(local_history)
+    local_source.prefetch_buffer_size = 3  # type: ignore[attr-defined]
+    requested: list[str] = []
+    local_source.prefetch_version = (  # type: ignore[attr-defined]
+        lambda _spreadsheet, item: requested.append(item.number)
+    )
+
+    with caplog.at_level(logging.INFO, logger="auditoria_excel.audit"):
+        result = AuditService(database, local_source).audit(SPREADSHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    assert requested[:3] == ["0.85", "0.86", "0.99"]
+    assert "PERF prefetch_planejado atual=0.84 futuras=[0.85,0.86,0.99] quantidade=3" in caplog.text
+
+
+def test_prefetch_plan_is_bounded_ordered_and_deduplicated(
+    database: Database, local_history: list[tuple[VersionInfo, Path]],
+) -> None:
+    local_source = source(local_history)
+    local_source.prefetch_buffer_size = 2  # type: ignore[attr-defined]
+    service = AuditService(database, local_source)
+    current = local_history[0][0]
+    first, second = local_history[1][0], local_history[2][0]
+
+    planned = service._planned_prefetch_versions(
+        current, (current, first, first, second, local_history[3][0])
+    )
+
+    assert planned == (first, second)
 
 
 def test_local_source_lists_identity_versions_and_historical_file(
