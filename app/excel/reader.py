@@ -57,6 +57,23 @@ class _CachedRow:
     key: str
     signature: str
     cells: dict[str, CellValue]
+    shared_string_indices: tuple[int, ...] = ()
+    shared_string_dependencies_supported: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SharedStringsSnapshot:
+    """Assinaturas por posicao; ``None`` nunca autoriza equivalencia.
+
+    A assinatura cobre o ``<si>`` XML normalizado inteiro, e nao apenas o texto
+    exibido. Assim runs de rich text, ``xml:space`` e propriedades foneticas
+    nao sao acidentalmente tratados como equivalentes.
+    """
+
+    signatures: tuple[str | None, ...]
+    values: tuple[str, ...]
+    present: bool
+    hash_seconds: float = 0.0
 
 
 class RowSheetSnapshot(Mapping[str, CellValue]):
@@ -186,22 +203,37 @@ def _parse_row(
     shared_strings: list[str],
     date_styles: set[int],
     epoch: object,
-) -> tuple[dict[str, CellValue], int]:
+) -> tuple[dict[str, CellValue], int, tuple[int, ...], bool]:
     cells: dict[str, CellValue] = {}
     seen = 0
     # Esta função somente é usada quando a planilha não contém fórmula
     # compartilhada, logo o estado de tradução nunca cruza fronteiras de row.
     formulas: dict[str, tuple[str, str]] = {}
+    shared_indices: set[int] = set()
+    dependencies_supported = True
     for cell in element.iter(_tag("c")):
         seen += 1
         coordinate = cell.get("r")
         if coordinate:
+            if cell.get("t") == "s" and cell.find("m:f", _NS) is None:
+                value_element = cell.find("m:v", _NS)
+                try:
+                    if value_element is None or value_element.text is None:
+                        dependencies_supported = False
+                    else:
+                        index = int(value_element.text)
+                        if index < 0:
+                            dependencies_supported = False
+                        else:
+                            shared_indices.add(index)
+                except ValueError:
+                    dependencies_supported = False
             value = _cell_value(
                 cell, coordinate, shared_strings, date_styles, epoch, formulas
             )
             if value is not None:
                 cells[coordinate] = value  # type: ignore[assignment]
-    return cells, seen
+    return cells, seen, tuple(sorted(shared_indices)), dependencies_supported
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +252,25 @@ class ReaderMetrics:
     parsing_seconds: float = 0.0
     snapshot_seconds: float = 0.0
     fallback_reason: str | None = None
+    sharedstrings_total_previous: int = 0
+    sharedstrings_total_current: int = 0
+    sharedstrings_indices_equal: int = 0
+    sharedstrings_indices_changed: int = 0
+    sharedstrings_indices_new: int = 0
+    sharedstrings_indices_removed: int = 0
+    sharedstrings_shadow_rows_candidate: int = 0
+    sharedstrings_shadow_rows_safe: int = 0
+    sharedstrings_shadow_rows_invalidated: int = 0
+    sharedstrings_shadow_indices_checked: int = 0
+    sharedstrings_shadow_indices_changed: int = 0
+    sharedstrings_shadow_indices_new: int = 0
+    rows_dependent_sharedstrings: int = 0
+    rows_reused_sharedstrings: int = 0
+    rows_invalidated_changed_index: int = 0
+    rows_invalidated_global_dependency: int = 0
+    rows_invalidated_unsupported_structure: int = 0
+    sharedstrings_diff_seconds: float = 0.0
+    sharedstrings_hash_seconds: float = 0.0
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -290,6 +341,58 @@ def _shared_strings(archive: zipfile.ZipFile) -> list[str]:
                 result.append(_all_text(element))
                 element.clear()
     return result
+
+
+_SUPPORTED_SHARED_STRING_ELEMENTS = {
+    _tag(name)
+    for name in (
+        "si", "t", "r", "rPr", "rFont", "charset", "family", "b", "i",
+        "strike", "outline", "shadow", "condense", "extend", "color", "sz",
+        "u", "vertAlign", "scheme", "rPh", "phoneticPr",
+    )
+}
+
+
+def _shared_strings_snapshot(payload: bytes | None) -> SharedStringsSnapshot:
+    """Constroi prova conservadora por indice a partir do XML completo."""
+    started = perf_counter()
+    if payload is None:
+        return SharedStringsSnapshot((), (), False, perf_counter() - started)
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as error:
+        raise _FastReaderUnsupported(f"sharedStrings XML invalido: {error}") from error
+    if root.tag != _tag("sst"):
+        raise _FastReaderUnsupported("raiz de sharedStrings nao suportada")
+    signatures: list[str | None] = []
+    values: list[str] = []
+    for entry in root:
+        if entry.tag != _tag("si"):
+            # Metadado no nivel sst nao altera os indices, mas torna a prova
+            # desconhecida; nenhuma entrada e autorizada nesse documento.
+            return SharedStringsSnapshot(
+                tuple(None for _ in root.findall("m:si", _NS)),
+                tuple(_all_text(si) for si in root.findall("m:si", _NS)),
+                True,
+                perf_counter() - started,
+            )
+        values.append(_all_text(entry))
+        supported = all(
+            node.tag in _SUPPORTED_SHARED_STRING_ELEMENTS for node in entry.iter()
+        )
+        if not supported:
+            signatures.append(None)
+            continue
+        # ElementTree ja normaliza entidades/Unicode ao interpretar. Serializar
+        # a arvore inteira preserva tags, atributos, texto e tails relevantes.
+        # Diferencas cosmeticas que ele nao normaliza geram apenas falso
+        # negativo (parse normal), nunca autorizacao indevida. C14N por entrada
+        # mostrou-se mais caro que o parsing que este shadow mode mede.
+        semantic_xml = ET.tostring(entry, encoding="utf-8")
+        signatures.append(hashlib.sha256(semantic_xml).hexdigest())
+    return SharedStringsSnapshot(
+        tuple(signatures), tuple(values), True, perf_counter() - started
+    )
 
 
 def _workbook_epoch(archive: zipfile.ZipFile) -> object:
@@ -421,8 +524,15 @@ def _convert_cell_value(
     if raw is None:
         return None
     if cell_type == "s":
-        index = int(raw)
-        return shared_strings[index]
+        try:
+            index = int(raw)
+            if index < 0:
+                raise IndexError(index)
+            return shared_strings[index]
+        except (ValueError, IndexError) as error:
+            raise _FastReaderUnsupported(
+                f"indice sharedStrings invalido em {coordinate}: {raw!r}"
+            ) from error
     if cell_type == "b":
         return raw == "1"
     if cell_type in {"str", "e"}:
@@ -573,6 +683,7 @@ class ConsecutiveWorkbookReader:
 
     def __init__(self) -> None:
         self._previous: dict[str, _CachedSheet] = {}
+        self._previous_shared = SharedStringsSnapshot((), (), False)
         self.last_metrics = ReaderMetrics(0, 0, 0, False)
 
     def read(self, path: str | Path) -> Snapshot:
@@ -580,11 +691,12 @@ class ConsecutiveWorkbookReader:
         if workbook_path.suffix.lower() != ".xlsx":
             raise ValueError("O leitor aceita somente arquivos .xlsx")
         try:
-            snapshot, cache, metrics = self._read_fast(workbook_path)
+            snapshot, cache, metrics, shared_snapshot = self._read_fast(workbook_path)
         except _FastReaderUnsupported as error:
             # Um fallback é deliberadamente uma barreira de cache: snapshots
             # openpyxl não receberam a prova criptográfica desta classe.
             self._previous = {}
+            self._previous_shared = SharedStringsSnapshot((), (), False)
             logger.info(
                 "Leitor incremental usou fallback openpyxl arquivo=%s motivo=%s",
                 workbook_path.name,
@@ -596,6 +708,7 @@ class ConsecutiveWorkbookReader:
             )
             return snapshot
         self._previous = cache
+        self._previous_shared = shared_snapshot
         self.last_metrics = metrics
         logger.debug(
             "Leitura XLSX incremental arquivo=%s abas=%d reutilizadas=%d celulas_parseadas=%d",
@@ -608,7 +721,9 @@ class ConsecutiveWorkbookReader:
 
     def _read_fast(
         self, path: Path
-    ) -> tuple[Snapshot, dict[str, _CachedSheet], ReaderMetrics]:
+    ) -> tuple[
+        Snapshot, dict[str, _CachedSheet], ReaderMetrics, SharedStringsSnapshot
+    ]:
         with zipfile.ZipFile(path) as archive:
             dependency_started = perf_counter()
             names = set(archive.namelist())
@@ -620,7 +735,8 @@ class ConsecutiveWorkbookReader:
             styles_xml = member("xl/styles.xml")
             relationships_xml = member("xl/_rels/workbook.xml.rels")
             # Estas rotinas conservam exatamente a conversão do leitor oficial.
-            shared = _shared_strings(archive)
+            shared_snapshot = _shared_strings_snapshot(shared_xml)
+            shared = list(shared_snapshot.values)
             date_styles = _date_styles(archive)
             epoch = _workbook_epoch(archive)
             sheets = _sheet_targets(archive)
@@ -631,12 +747,28 @@ class ConsecutiveWorkbookReader:
                 _member_digest(relationships_xml),
             )
             dependency_seconds = perf_counter() - dependency_started
+            diff_started = perf_counter()
+            previous_shared = self._previous_shared
+            common = min(len(previous_shared.signatures), len(shared_snapshot.signatures))
+            shared_equal = sum(
+                1 for index in range(common)
+                if previous_shared.signatures[index] is not None
+                and previous_shared.signatures[index] == shared_snapshot.signatures[index]
+            )
+            shared_changed = common - shared_equal
+            shared_new = max(0, len(shared_snapshot.signatures) - common)
+            shared_removed = max(0, len(previous_shared.signatures) - common)
+            shared_diff_seconds = perf_counter() - diff_started
             snapshot: Snapshot = {}
             new_cache: dict[str, _CachedSheet] = {}
             reused = 0
             parsed = 0
             rows_total = rows_reused = rows_parsed = cells_reused = 0
             hash_seconds = structural_seconds = parsing_seconds = snapshot_seconds = 0.0
+            shadow_candidate = shadow_safe = shadow_invalidated = 0
+            shadow_checked = shadow_changed = shadow_new = 0
+            rows_dependent = rows_reused_shared = invalid_changed = 0
+            invalid_global = invalid_unsupported = 0
             for title, target in sheets:
                 worksheet_xml = archive.read(target)
                 hash_started = perf_counter()
@@ -660,9 +792,16 @@ class ConsecutiveWorkbookReader:
                     dependencies_equal = (
                         cached is not None and cached.signature[1:] == signature[1:]
                     )
+                    dependencies_except_shared_equal = (
+                        cached is not None and cached.signature[2:] == signature[2:]
+                    )
                     previous_rows = {
                         (row.key, row.signature): row
                         for row in (cached.rows if dependencies_equal else ())
+                    }
+                    shadow_previous_rows = {
+                        (row.key, row.signature): row
+                        for row in (cached.rows if dependencies_except_shared_equal else ())
                     }
                     built_rows: list[_CachedRow] = []
                     sheet_rows = sheet_reused = sheet_parsed = sheet_cells_reused = 0
@@ -682,7 +821,7 @@ class ConsecutiveWorkbookReader:
                             sheet_cells_reused += len(old_row.cells)
                             continue
                         parse_started = perf_counter()
-                        row_cells, seen = _parse_row(
+                        row_cells, seen, shared_indices, deps_supported = _parse_row(
                             _row_element(row_xml, namespace_wrapper),
                             shared,
                             date_styles,
@@ -691,7 +830,46 @@ class ConsecutiveWorkbookReader:
                         parsing_seconds += perf_counter() - parse_started
                         parsed += seen
                         sheet_parsed += 1
-                        built_rows.append(_CachedRow(key, row_digest, row_cells))
+                        built_rows.append(_CachedRow(
+                            key, row_digest, row_cells, shared_indices, deps_supported
+                        ))
+                        if shared_indices:
+                            rows_dependent += 1
+                        shadow_old = shadow_previous_rows.get((key, row_digest))
+                        shared_globally_changed = (
+                            cached is not None and cached.signature[1] != signature[1]
+                        )
+                        if shadow_old is not None and shared_globally_changed:
+                            shadow_candidate += 1
+                            if shadow_old.shared_string_indices:
+                                invalid_global += 1
+                            safe = shadow_old.shared_string_dependencies_supported
+                            if not safe:
+                                invalid_unsupported += 1
+                            for index in shadow_old.shared_string_indices:
+                                shadow_checked += 1
+                                if index >= len(shared_snapshot.signatures):
+                                    shadow_new += 1
+                                    safe = False
+                                elif index >= len(previous_shared.signatures):
+                                    shadow_new += 1
+                                    safe = False
+                                elif previous_shared.signatures[index] is None or (
+                                    previous_shared.signatures[index]
+                                    != shared_snapshot.signatures[index]
+                                ):
+                                    shadow_changed += 1
+                                    invalid_changed += 1
+                                    safe = False
+                            # Validacao sombra obrigatoria contra o resultado
+                            # recem-parseado pelo caminho oficial atual.
+                            safe = safe and shadow_old.cells == row_cells
+                            if safe:
+                                shadow_safe += 1
+                                if shadow_old.shared_string_indices:
+                                    rows_reused_shared += 1
+                            else:
+                                shadow_invalidated += 1
                         if (
                             dependencies_equal
                             and sheet_rows == 256
@@ -750,9 +928,16 @@ class ConsecutiveWorkbookReader:
             metrics = ReaderMetrics(
                 len(sheets), reused, parsed, False, rows_total, rows_reused,
                 rows_parsed, cells_reused, hash_seconds, dependency_seconds,
-                structural_seconds, parsing_seconds, snapshot_seconds,
+                structural_seconds, parsing_seconds, snapshot_seconds, None,
+                len(previous_shared.signatures), len(shared_snapshot.signatures),
+                shared_equal, shared_changed, shared_new, shared_removed,
+                shadow_candidate, shadow_safe, shadow_invalidated,
+                shadow_checked, shadow_changed, shadow_new,
+                rows_dependent, rows_reused_shared, invalid_changed,
+                invalid_global, invalid_unsupported, shared_diff_seconds,
+                shared_snapshot.hash_seconds,
             )
-            return snapshot, new_cache, metrics
+            return snapshot, new_cache, metrics, shared_snapshot
 
 
 def read_workbook(path: str | Path) -> Snapshot:
