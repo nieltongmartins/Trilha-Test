@@ -1,8 +1,11 @@
 from pathlib import Path
+import shutil
 
 import pytest
+from openpyxl import Workbook, load_workbook
 
 from app.excel.reader import ConsecutiveWorkbookReader, read_workbook
+from app.excel.comparator import compare_snapshots
 
 
 def test_reader_preserves_formulas_values_and_sheets(
@@ -65,3 +68,56 @@ def test_incremental_reader_invalidates_changed_worksheet(
     assert current == read_workbook(cql028_versions / "0.85.xlsx")
     assert incremental.last_metrics.worksheets_reused == 0
     assert previous["Resumo"] is not current["Resumo"]
+
+
+def test_incremental_reader_reuses_cryptographically_equal_rows(tmp_path: Path) -> None:
+    previous_path = tmp_path / "previous.xlsx"
+    current_path = tmp_path / "current.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in range(1, 101):
+        for column in range(1, 6):
+            sheet.cell(row, column, row * column)
+    workbook.save(previous_path)
+    workbook.close()
+    shutil.copyfile(previous_path, current_path)
+    changed = load_workbook(current_path)
+    changed.active["C50"] = 999_999
+    changed.save(current_path)
+    changed.close()
+
+    incremental = ConsecutiveWorkbookReader()
+    previous = incremental.read(previous_path)
+    current = incremental.read(current_path)
+    metrics = incremental.last_metrics
+
+    assert current == read_workbook(current_path)
+    assert metrics.rows_total == 100
+    assert metrics.rows_reused == 99
+    assert metrics.rows_parsed == 1
+    assert metrics.cells_reused == 495
+    assert metrics.cells_parsed == 5
+    assert len(compare_snapshots(previous, current)) == 1
+
+
+def test_dependency_change_conservatively_invalidates_every_row(tmp_path: Path) -> None:
+    previous_path = tmp_path / "previous.xlsx"
+    current_path = tmp_path / "current.xlsx"
+    workbook = Workbook()
+    for row in range(1, 11):
+        workbook.active.cell(row, 1, row)
+    workbook.save(previous_path)
+    workbook.close()
+    shutil.copyfile(previous_path, current_path)
+    changed = load_workbook(current_path)
+    changed.active["A1"].number_format = "0.0000"
+    changed.save(current_path)
+    changed.close()
+
+    incremental = ConsecutiveWorkbookReader()
+    incremental.read(previous_path)
+    current = incremental.read(current_path)
+
+    assert current == read_workbook(current_path)
+    assert incremental.last_metrics.rows_reused == 0
+    assert incremental.last_metrics.rows_parsed == 10
