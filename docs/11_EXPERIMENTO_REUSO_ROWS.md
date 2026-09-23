@@ -76,7 +76,7 @@ célula alterada e invalidação total quando `styles.xml` muda. ZIP corrompido,
 membro ausente e XML inválido continuam propagando falha, sem aceitar snapshot
 parcial.
 
-A suíte completa obteve 192 testes aprovados. Não foi executado teste A/B de
+A suíte completa obteve 195 testes aprovados. Não foi executado teste A/B de
 banco com versões reais; o código de transação, checkpoint, hash global,
 prefetch e fonte SharePoint não foi alterado.
 
@@ -87,8 +87,10 @@ prefetch e fonte SharePoint não foi alterado.
 * Shared formulas desativam reuso parcial da worksheet inteira.
 * Mudanças globais de styles/shared strings invalidam conservadoramente todas as
   rows, mesmo se poucos índices forem usados.
-* O scanner incremental aceita somente o formato SpreadsheetML padrão com row
-  sem prefixo; qualquer dúvida causa parsing integral/fallback.
+* O scanner incremental aceita rows SpreadsheetML sem prefixo e preserva no
+  fragmento todas as declarações de namespace da raiz da worksheet. Rows
+  prefixadas ou estruturas que ainda não possam ser isoladas com segurança
+  causam fallback explícito, com motivo na telemetria.
 * A medição real de 30–100 versões e o banco A/B dependem dos XLSX e credenciais
   que não estão no repositório.
 
@@ -96,3 +98,30 @@ Recomendação: **continuar/refinar**, condicionada ao ensaio real. Manter somen
 se a equivalência oficial e banco A/B forem 100%, a mediana real cair ao menos
 50% e o pior caso ficar dentro de 10%. Caso qualquer condição falhe, abandonar
 o caminho por row sem alterar o leitor oficial.
+
+## Correção de compatibilidade com namespaces reais
+
+Arquivos reais do SharePoint expuseram `ParseError: unbound prefix` porque a
+primeira implementação parseava cada `<row>` em um wrapper que declarava apenas
+o namespace default. A worksheet real declarava na raiz prefixos usados dentro
+da row (`r`, `mc`, `x14`, `x14ac`, `xr` e extensões do produtor), portanto o
+fragmento isolado perdia parte do contexto XML.
+
+O leitor agora captura com o próprio parser XML todas as declarações `xmlns` da
+raiz e as aplica, sem alterar o fragmento, somente ao wrapper temporário usado
+para interpretação. O SHA-256 continua sendo calculado sobre os bytes originais
+da row. Prefixos não são removidos, renomeados ou ignorados. Erros de parsing do
+fragmento são convertidos em incompatibilidade incremental: o cache é limpo, o
+leitor openpyxl oficial assume o workbook e `fallback=True` registra também o
+motivo.
+
+O teste de regressão combina namespace default, `r`, `mc`, `x14`, `x14ac`,
+`xr`, um namespace desconhecido válido, atributos prefixados e elementos
+prefixados na mesma worksheet. Ele comprova equivalência integral com o leitor
+oficial, reutilização da row idêntica e parsing exclusivo da row alterada.
+
+Depois da correção, uma repetição do benchmark de 50.000 células obteve
+medianas de 0,4494 s no leitor oficial e 0,1067 s no incremental (redução de
+76,26%). Foram novamente reutilizadas 9.999 rows/49.995 células e parseadas uma
+row/cinco células. A captura de namespaces da raiz não apresentou regressão
+mensurável nesse ensaio sintético.

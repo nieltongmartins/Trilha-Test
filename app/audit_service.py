@@ -30,6 +30,7 @@ class AuditResult:
     changes: int
     initial_checkpoint: str | None
     final_version: str | None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,7 +479,7 @@ class AuditService:
                 "celulas_reutilizadas=%s celulas_parseadas=%s "
                 "tempo_hashes=%.3fs tempo_dependencias=%.3fs "
                 "tempo_diff_estrutural=%.3fs tempo_parsing=%.3fs "
-                "tempo_snapshot=%.3fs fallback=%s",
+                "tempo_snapshot=%.3fs fallback=%s motivo_fallback=%s",
                 spreadsheet.name,
                 version.number,
                 file_size,
@@ -499,6 +500,7 @@ class AuditService:
                 metrics.parsing_seconds if metrics else 0.0,
                 metrics.snapshot_seconds if metrics else 0.0,
                 metrics.fallback_used if metrics else "n/a",
+                metrics.fallback_reason if metrics and metrics.fallback_reason else "nenhum",
             )
             return snapshot, digest
         finally:
@@ -691,5 +693,5 @@ class AuditService:
         )
         return AuditResult(
             execution_code, AuditExecutionStatus.FAILED, processed, changes,
-            initial_checkpoint, final,
+            initial_checkpoint, final, message,
         )

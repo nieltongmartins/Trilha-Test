@@ -654,5 +654,6 @@ def test_failed_version_never_reports_one_hundred_percent(
     result = service.audit(SPREADSHEET)
 
     assert result.status is AuditExecutionStatus.FAILED
+    assert result.error_message == "falha"
     assert events
     assert all(event.percent < 100 for event in events)

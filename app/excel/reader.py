@@ -17,6 +17,7 @@ import re
 from time import perf_counter
 from typing import Callable, TypeAlias
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import quoteattr
 import zipfile
 
 from openpyxl import load_workbook
@@ -94,17 +95,50 @@ _RAW_ROW_START = re.compile(br"<row(?:\s|>)")
 _RAW_ROW_NUMBER = re.compile(br"\br=[\"']([^\"']+)[\"']")
 
 
-def _row_element(payload: bytes) -> ET.Element:
-    wrapped = b'<root xmlns="' + _MAIN_NS.encode() + b'">' + payload + b"</root>"
-    return ET.fromstring(wrapped)[0]
+def _namespace_wrapper(xml: bytes) -> bytes:
+    """Reproduz no wrapper todos os namespaces em escopo na worksheet.
+
+    O digest continua cobrindo exclusivamente os bytes originais da row. O
+    wrapper existe apenas para dar ao parser do fragmento o mesmo contexto de
+    namespaces que ele teria no documento completo.
+    """
+    declarations: dict[str, str] = {}
+    try:
+        for event, value in ET.iterparse(
+            BytesIO(xml), events=("start-ns", "start")
+        ):
+            if event == "start-ns":
+                prefix, uri = value
+                declarations[prefix] = uri
+                continue
+            break
+    except ET.ParseError as error:
+        raise _FastReaderUnsupported(f"XML da worksheet inválido: {error}") from error
+    declarations.setdefault("", _MAIN_NS)
+    attributes = "".join(
+        f" xmlns{':' + prefix if prefix else ''}={quoteattr(uri)}"
+        for prefix, uri in declarations.items()
+    )
+    return f"<root{attributes}>".encode("utf-8")
 
 
-def _iter_row_parts(xml: bytes) -> Iterator[tuple[str, str, bytes, bool]]:
+def _row_element(payload: bytes, namespace_wrapper: bytes) -> ET.Element:
+    try:
+        return ET.fromstring(namespace_wrapper + payload + b"</root>")[0]
+    except ET.ParseError as error:
+        raise _FastReaderUnsupported(
+            f"fragmento row incompatível com parser incremental: {error}"
+        ) from error
+
+
+def _iter_row_parts(
+    xml: bytes, namespace_wrapper: bytes
+) -> Iterator[tuple[str, str, bytes, bool]]:
     """Extrai rows e digests fortes sem converter valores de célula.
 
-    ``ElementTree`` normaliza apenas a serialização XML; igualdade do SHA-256
-    ainda prova igualdade byte a byte da representação normalizada completa
-    da row (atributos, células, fórmulas e valores incluídos).
+    O SHA-256 cobre os bytes originais completos da row (atributos, células,
+    fórmulas e valores incluídos); o wrapper de namespaces nunca participa do
+    digest.
     """
     # SpreadsheetML emitido por Excel/openpyxl usa namespace default e rows
     # não prefixadas. Fora desse formato conservador o chamador abandona o
@@ -134,7 +168,7 @@ def _iter_row_parts(xml: bytes) -> Iterator[tuple[str, str, bytes, bool]]:
         digest = hashlib.sha256(payload).hexdigest()
         has_shared_formula = False
         if b"<f" in payload:
-            element = _row_element(payload)
+            element = _row_element(payload, namespace_wrapper)
             for formula in element.iter(_FORMULA_TAG):
                 formula_type = formula.get("t")
                 if formula_type in {"array", "dataTable"}:
@@ -185,6 +219,7 @@ class ReaderMetrics:
     structural_diff_seconds: float = 0.0
     parsing_seconds: float = 0.0
     snapshot_seconds: float = 0.0
+    fallback_reason: str | None = None
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -556,7 +591,9 @@ class ConsecutiveWorkbookReader:
                 error,
             )
             snapshot = _read_openpyxl(workbook_path)
-            self.last_metrics = ReaderMetrics(len(snapshot), 0, 0, True)
+            self.last_metrics = ReaderMetrics(
+                len(snapshot), 0, 0, True, fallback_reason=str(error)
+            )
             return snapshot
         self._previous = cache
         self.last_metrics = metrics
@@ -619,6 +656,7 @@ class ConsecutiveWorkbookReader:
                 else:
                     diff_started = perf_counter()
                     parsing_before_diff = parsing_seconds
+                    namespace_wrapper = _namespace_wrapper(worksheet_xml)
                     dependencies_equal = (
                         cached is not None and cached.signature[1:] == signature[1:]
                     )
@@ -631,7 +669,7 @@ class ConsecutiveWorkbookReader:
                     has_shared_formula = False
                     force_full_parse = False
                     for key, row_digest, row_xml, row_has_shared in _iter_row_parts(
-                        worksheet_xml
+                        worksheet_xml, namespace_wrapper
                     ):
                         sheet_rows += 1
                         has_shared_formula = has_shared_formula or row_has_shared
@@ -645,7 +683,10 @@ class ConsecutiveWorkbookReader:
                             continue
                         parse_started = perf_counter()
                         row_cells, seen = _parse_row(
-                            _row_element(row_xml), shared, date_styles, epoch
+                            _row_element(row_xml, namespace_wrapper),
+                            shared,
+                            date_styles,
+                            epoch,
                         )
                         parsing_seconds += perf_counter() - parse_started
                         parsed += seen
