@@ -703,6 +703,16 @@ class AuditApplication(ttk.Frame):
         self._set_action_state()
         if result.status is AuditExecutionStatus.FAILED:
             self._finish_progress(failed=True)
+            self._finish_version_with_error(result.error_message)
+            self.status.set(
+                "Auditoria interrompida por erro: "
+                f"{self._summarize_error(result.error_message)}"
+            )
+            self.audit_button.configure(
+                text="Continuar auditoria" if result.final_version else "Auditar histórico"
+            )
+            self.refresh_stored()
+            return
         elif result.status is AuditExecutionStatus.STOPPED:
             self._finish_progress(failed=True)
             self.status.set(
@@ -849,7 +859,26 @@ class AuditApplication(ttk.Frame):
                 f"Auditoria interrompida | Tempo total: {self._format_duration(elapsed)}"
             )
             self._audit_started_at = None
-        self.status.set(f"Falha na operação: {error}")
+            self._finish_version_with_error(str(error))
+            self.status.set(
+                f"Auditoria interrompida por erro: {self._summarize_error(str(error))}"
+            )
+        else:
+            self.status.set(f"Falha na operação: {error}")
+
+    @staticmethod
+    def _summarize_error(message: str | None) -> str:
+        summary = " ".join((message or "erro técnico sem detalhes").split())
+        return summary if len(summary) <= 300 else summary[:297] + "..."
+
+    def _finish_version_with_error(self, message: str | None) -> None:
+        """Encerra animação da versão sem simular checkpoint concluído."""
+        self._current_version_started_at = None
+        self.version_progress_value.set(100)
+        self.version_stage_text.set(
+            "Auditoria interrompida por erro: " + self._summarize_error(message)
+        )
+        self._update_version_timing()
 
     def _poll_control_updates(self) -> None:
         if not hasattr(self, "_control_updates"):
@@ -1078,7 +1107,7 @@ class AuditApplication(ttk.Frame):
         elapsed = time.monotonic() - self._audit_started_at
         if failed:
             self.progress_text.set(
-                "Auditoria interrompida | "
+                "Auditoria interrompida por erro | "
                 f"Tempo total: {self._format_duration(elapsed)}"
             )
         else:

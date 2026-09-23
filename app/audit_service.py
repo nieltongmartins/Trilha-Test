@@ -30,6 +30,7 @@ class AuditResult:
     changes: int
     initial_checkpoint: str | None
     final_version: str | None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,7 +475,11 @@ class AuditService:
             logger.info(
                 "PERF versao planilha=%s versao=%s bytes=%d download=%.3fs sha256=%.3fs "
                 "leitura_xlsx=%.3fs total=%.3fs abas=%s abas_reutilizadas=%s "
-                "celulas_parseadas=%s fallback=%s",
+                "rows_total=%s rows_reutilizadas=%s rows_parseadas=%s "
+                "celulas_reutilizadas=%s celulas_parseadas=%s "
+                "tempo_hashes=%.3fs tempo_dependencias=%.3fs "
+                "tempo_diff_estrutural=%.3fs tempo_parsing=%.3fs "
+                "tempo_snapshot=%.3fs fallback=%s motivo_fallback=%s",
                 spreadsheet.name,
                 version.number,
                 file_size,
@@ -484,8 +489,18 @@ class AuditService:
                 total_seconds,
                 metrics.worksheets if metrics else "n/a",
                 metrics.worksheets_reused if metrics else "n/a",
+                metrics.rows_total if metrics else "n/a",
+                metrics.rows_reused if metrics else "n/a",
+                metrics.rows_parsed if metrics else "n/a",
+                metrics.cells_reused if metrics else "n/a",
                 metrics.cells_parsed if metrics else "n/a",
+                metrics.hash_seconds if metrics else 0.0,
+                metrics.dependency_seconds if metrics else 0.0,
+                metrics.structural_diff_seconds if metrics else 0.0,
+                metrics.parsing_seconds if metrics else 0.0,
+                metrics.snapshot_seconds if metrics else 0.0,
                 metrics.fallback_used if metrics else "n/a",
+                metrics.fallback_reason if metrics and metrics.fallback_reason else "nenhum",
             )
             return snapshot, digest
         finally:
@@ -678,5 +693,5 @@ class AuditService:
         )
         return AuditResult(
             execution_code, AuditExecutionStatus.FAILED, processed, changes,
-            initial_checkpoint, final,
+            initial_checkpoint, final, message,
         )

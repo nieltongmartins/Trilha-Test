@@ -616,6 +616,24 @@ def test_version_progress_from_worker_only_touches_tk_during_main_poll(monkeypat
     assert set(application.version_stage_text.set_threads) == {main_thread}
 
 
+def test_version_progress_is_finalized_with_a_concise_technical_error(monkeypatch) -> None:
+    application = _application_for_version_progress()
+    application._current_version = "1.1"
+    application._current_version_started_at = 5.0
+    monkeypatch.setattr("app.interface.time.monotonic", lambda: 10.0)
+
+    application._finish_version_with_error(
+        "unbound prefix:\nline 1, column 72" + " x" * 400
+    )
+
+    assert application._current_version_started_at is None
+    assert application.version_progress_value.value == 100
+    assert application.version_stage_text.value.startswith(
+        "Auditoria interrompida por erro: unbound prefix: line 1, column 72"
+    )
+    assert len(application.version_stage_text.value) < 340
+
+
 def test_timeout_and_retry_message_keep_current_version(monkeypatch) -> None:
     application = _application_for_version_progress()
     application._current_version = "2.18"

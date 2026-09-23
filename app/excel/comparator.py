@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import re
 
-from app.excel.reader import CellValue, Snapshot
+from app.excel.reader import CellValue, RowSheetSnapshot, Snapshot
 from app.models import ChangeType
 
 
@@ -58,6 +58,32 @@ def _values_equal(previous: CellValue, current: CellValue) -> bool:
     return previous == current
 
 
+def _compare_cells(
+    sheet: str,
+    previous_cells: dict[str, CellValue],
+    current_cells: dict[str, CellValue],
+) -> list[CellChange]:
+    """Compara uma unidade já limitada (aba comum ou row alterada)."""
+    changes: list[CellChange] = []
+    for address, previous_value in previous_cells.items():
+        existed = previous_value is not None
+        exists = _has_content(current_cells, address)
+        if existed and not exists:
+            changes.append(CellChange(sheet, address, ChangeType.DEL, previous_value, None))
+            continue
+        if not existed or not exists:
+            continue
+        new_value = current_cells[address]
+        if not _values_equal(previous_value, new_value):
+            changes.append(
+                CellChange(sheet, address, ChangeType.MOD, previous_value, new_value)
+            )
+    for address, new_value in current_cells.items():
+        if new_value is not None and not _has_content(previous_cells, address):
+            changes.append(CellChange(sheet, address, ChangeType.ADD, None, new_value))
+    return changes
+
+
 def compare_snapshots(previous: Snapshot, current: Snapshot) -> list[CellChange]:
     """Retorna ADD, DEL e MOD em ordem estável de aba, linha e coluna."""
 
@@ -71,35 +97,20 @@ def compare_snapshots(previous: Snapshot, current: Snapshot) -> list[CellChange]
         if previous_cells is current_cells:
             continue
         sheet_changes: list[CellChange] = []
-
-        # Detecte primeiro em O(n), sem ordenar centenas de milhares de
-        # endereços que permaneceram iguais. Somente o conjunto normalmente
-        # pequeno de diferenças precisa da ordenação determinística final.
-        for address, previous_value in previous_cells.items():
-            existed = previous_value is not None
-            exists = _has_content(current_cells, address)
-            if existed and not exists:
-                sheet_changes.append(
-                    CellChange(
-                        sheet, address, ChangeType.DEL, previous_value, None
-                    )
-                )
-                continue
-            if not existed or not exists:
-                continue
-            new_value = current_cells[address]
-            if not _values_equal(previous_value, new_value):
-                sheet_changes.append(
-                    CellChange(
-                        sheet, address, ChangeType.MOD, previous_value, new_value
-                    )
-                )
-
-        for address, new_value in current_cells.items():
-            if new_value is not None and not _has_content(previous_cells, address):
-                sheet_changes.append(
-                    CellChange(sheet, address, ChangeType.ADD, None, new_value)
-                )
+        if isinstance(previous_cells, RowSheetSnapshot) and isinstance(
+            current_cells, RowSheetSnapshot
+        ):
+            previous_rows = {row.key: row.cells for row in previous_cells.rows}
+            current_rows = {row.key: row.cells for row in current_cells.rows}
+            for row_key in previous_rows.keys() | current_rows.keys():
+                old = previous_rows.get(row_key, {})
+                new = current_rows.get(row_key, {})
+                if old is new:
+                    continue
+                sheet_changes.extend(_compare_cells(sheet, old, new))
+        else:
+            # Somente o conjunto normalmente pequeno de diferenças é ordenado.
+            sheet_changes.extend(_compare_cells(sheet, previous_cells, current_cells))  # type: ignore[arg-type]
 
         sheet_changes.sort(key=lambda change: _address_key(change.address))
         changes.extend(sheet_changes)
