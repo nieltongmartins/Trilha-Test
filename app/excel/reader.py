@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from io import BytesIO
 from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
 import hashlib
 import logging
 from pathlib import Path, PurePosixPath
+import re
+from time import perf_counter
 from typing import Callable, TypeAlias
 import xml.etree.ElementTree as ET
 import zipfile
@@ -30,7 +33,7 @@ from openpyxl.utils.datetime import (
 logger = logging.getLogger("auditoria_excel.reader")
 
 CellValue: TypeAlias = str | int | float | bool | None
-SheetSnapshot: TypeAlias = dict[str, CellValue]
+SheetSnapshot: TypeAlias = Mapping[str, CellValue]
 Snapshot: TypeAlias = dict[str, SheetSnapshot]
 
 
@@ -45,6 +48,126 @@ def _member_digest(payload: bytes | None) -> str:
 class _CachedSheet:
     signature: tuple[str, ...]
     snapshot: SheetSnapshot
+    rows: tuple["_CachedRow", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedRow:
+    key: str
+    signature: str
+    cells: dict[str, CellValue]
+
+
+class RowSheetSnapshot(Mapping[str, CellValue]):
+    """Visão imutável de uma aba composta por mapas imutáveis por row.
+
+    O mapa plano deixa de ser reconstruído a cada versão. Rows cuja identidade
+    XML foi provada por SHA-256 compartilham exatamente o mesmo ``dict``.
+    """
+
+    __slots__ = ("rows", "_length")
+
+    def __init__(self, rows: tuple[_CachedRow, ...]) -> None:
+        self.rows = rows
+        self._length = sum(len(row.cells) for row in rows)
+
+    def __getitem__(self, key: str) -> CellValue:
+        # Endereços regulares carregam sua row; a busca linear é reservada a
+        # acessos pontuais e não participa do comparador incremental.
+        for row in self.rows:
+            if key in row.cells:
+                return row.cells[key]
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        for row in self.rows:
+            yield from row.cells
+
+    def __len__(self) -> int:
+        return self._length
+
+    def row_maps(self) -> tuple[dict[str, CellValue], ...]:
+        return tuple(row.cells for row in self.rows)
+
+
+_RAW_ROW_START = re.compile(br"<row(?:\s|>)")
+_RAW_ROW_NUMBER = re.compile(br"\br=[\"']([^\"']+)[\"']")
+
+
+def _row_element(payload: bytes) -> ET.Element:
+    wrapped = b'<root xmlns="' + _MAIN_NS.encode() + b'">' + payload + b"</root>"
+    return ET.fromstring(wrapped)[0]
+
+
+def _iter_row_parts(xml: bytes) -> Iterator[tuple[str, str, bytes, bool]]:
+    """Extrai rows e digests fortes sem converter valores de célula.
+
+    ``ElementTree`` normaliza apenas a serialização XML; igualdade do SHA-256
+    ainda prova igualdade byte a byte da representação normalizada completa
+    da row (atributos, células, fórmulas e valores incluídos).
+    """
+    # SpreadsheetML emitido por Excel/openpyxl usa namespace default e rows
+    # não prefixadas. Fora desse formato conservador o chamador abandona o
+    # caminho incremental. O digest cobre os bytes XML exatos, não offsets.
+    if b"<sheetData" not in xml or re.search(br"<[A-Za-z_][\w.-]*:row(?:\s|>)", xml):
+        raise _FastReaderUnsupported("worksheet com rows XML prefixadas")
+    occurrence: dict[str, int] = {}
+    cursor = 0
+    while match := _RAW_ROW_START.search(xml, cursor):
+        start = match.start()
+        tag_end = xml.find(b">", start)
+        if tag_end < 0:
+            raise _FastReaderUnsupported("row XML truncada")
+        if xml[tag_end - 1:tag_end] == b"/":
+            end = tag_end + 1
+        else:
+            close = xml.find(b"</row>", tag_end + 1)
+            if close < 0:
+                raise _FastReaderUnsupported("row XML sem fechamento")
+            end = close + len(b"</row>")
+        payload = xml[start:end]
+        number_match = _RAW_ROW_NUMBER.search(payload[: tag_end - start + 1])
+        row_number = number_match.group(1).decode("utf-8") if number_match else ""
+        ordinal = occurrence.get(row_number, 0)
+        occurrence[row_number] = ordinal + 1
+        key = f"{row_number}#{ordinal}"
+        digest = hashlib.sha256(payload).hexdigest()
+        has_shared_formula = False
+        if b"<f" in payload:
+            element = _row_element(payload)
+            for formula in element.iter(_FORMULA_TAG):
+                formula_type = formula.get("t")
+                if formula_type in {"array", "dataTable"}:
+                    raise _FastReaderUnsupported(
+                        f"fórmula {formula_type} em row {row_number}"
+                    )
+                if formula_type == "shared":
+                    has_shared_formula = True
+        yield key, digest, payload, has_shared_formula
+        cursor = end
+
+
+def _parse_row(
+    element: ET.Element,
+    shared_strings: list[str],
+    date_styles: set[int],
+    epoch: object,
+) -> tuple[dict[str, CellValue], int]:
+    cells: dict[str, CellValue] = {}
+    seen = 0
+    # Esta função somente é usada quando a planilha não contém fórmula
+    # compartilhada, logo o estado de tradução nunca cruza fronteiras de row.
+    formulas: dict[str, tuple[str, str]] = {}
+    for cell in element.iter(_tag("c")):
+        seen += 1
+        coordinate = cell.get("r")
+        if coordinate:
+            value = _cell_value(
+                cell, coordinate, shared_strings, date_styles, epoch, formulas
+            )
+            if value is not None:
+                cells[coordinate] = value  # type: ignore[assignment]
+    return cells, seen
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +176,15 @@ class ReaderMetrics:
     worksheets_reused: int
     cells_parsed: int
     fallback_used: bool
+    rows_total: int = 0
+    rows_reused: int = 0
+    rows_parsed: int = 0
+    cells_reused: int = 0
+    hash_seconds: float = 0.0
+    dependency_seconds: float = 0.0
+    structural_diff_seconds: float = 0.0
+    parsing_seconds: float = 0.0
+    snapshot_seconds: float = 0.0
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -441,6 +573,7 @@ class ConsecutiveWorkbookReader:
         self, path: Path
     ) -> tuple[Snapshot, dict[str, _CachedSheet], ReaderMetrics]:
         with zipfile.ZipFile(path) as archive:
+            dependency_started = perf_counter()
             names = set(archive.namelist())
 
             def member(name: str) -> bytes | None:
@@ -460,40 +593,125 @@ class ConsecutiveWorkbookReader:
                 "1904" if epoch == CALENDAR_MAC_1904 else "1900",
                 _member_digest(relationships_xml),
             )
+            dependency_seconds = perf_counter() - dependency_started
             snapshot: Snapshot = {}
             new_cache: dict[str, _CachedSheet] = {}
             reused = 0
             parsed = 0
+            rows_total = rows_reused = rows_parsed = cells_reused = 0
+            hash_seconds = structural_seconds = parsing_seconds = snapshot_seconds = 0.0
             for title, target in sheets:
                 worksheet_xml = archive.read(target)
+                hash_started = perf_counter()
                 signature = (
                     _member_digest(worksheet_xml),
                     *dependency_signature,
                     target,
                 )
+                hash_seconds += perf_counter() - hash_started
                 cached = self._previous.get(target)
                 if cached is not None and cached.signature == signature:
                     cells = cached.snapshot
                     reused += 1
+                    rows_total += len(cached.rows)
+                    rows_reused += len(cached.rows)
+                    cells_reused += len(cells)
                 else:
-                    cells = {}
-                    shared_formulas: dict[str, tuple[str, str]] = {}
-                    for _, element in ET.iterparse(BytesIO(worksheet_xml), events=("end",)):
-                        if element.tag != _tag("c"):
+                    diff_started = perf_counter()
+                    parsing_before_diff = parsing_seconds
+                    dependencies_equal = (
+                        cached is not None and cached.signature[1:] == signature[1:]
+                    )
+                    previous_rows = {
+                        (row.key, row.signature): row
+                        for row in (cached.rows if dependencies_equal else ())
+                    }
+                    built_rows: list[_CachedRow] = []
+                    sheet_rows = sheet_reused = sheet_parsed = sheet_cells_reused = 0
+                    has_shared_formula = False
+                    force_full_parse = False
+                    for key, row_digest, row_xml, row_has_shared in _iter_row_parts(
+                        worksheet_xml
+                    ):
+                        sheet_rows += 1
+                        has_shared_formula = has_shared_formula or row_has_shared
+                        if has_shared_formula:
                             continue
-                        parsed += 1
-                        coordinate = element.get("r")
-                        if coordinate:
-                            value = _cell_value(
-                                element, coordinate, shared, date_styles, epoch,
-                                shared_formulas,
-                            )
-                            if value is not None:
-                                cells[coordinate] = value  # type: ignore[assignment]
-                        element.clear()
+                        old_row = previous_rows.get((key, row_digest))
+                        if old_row is not None:
+                            built_rows.append(old_row)
+                            sheet_reused += 1
+                            sheet_cells_reused += len(old_row.cells)
+                            continue
+                        parse_started = perf_counter()
+                        row_cells, seen = _parse_row(
+                            _row_element(row_xml), shared, date_styles, epoch
+                        )
+                        parsing_seconds += perf_counter() - parse_started
+                        parsed += seen
+                        sheet_parsed += 1
+                        built_rows.append(_CachedRow(key, row_digest, row_cells))
+                        if (
+                            dependencies_equal
+                            and sheet_rows == 256
+                            and sheet_reused < 26
+                        ):
+                            force_full_parse = True
+                            break
+                    structural_seconds += max(
+                        0.0,
+                        perf_counter() - diff_started
+                        - (parsing_seconds - parsing_before_diff),
+                    )
+                    if force_full_parse:
+                        sheet_rows = sum(1 for _ in _RAW_ROW_START.finditer(worksheet_xml))
+                    rows_total += sheet_rows
+                    # Shared formulas carry a master/follower state across rows.
+                    # Until that dependency is indexed explicitly, retain the
+                    # proven full-sheet parser rather than risk stale formulas.
+                    if has_shared_formula or force_full_parse:
+                        parse_started = perf_counter()
+                        plain: dict[str, CellValue] = {}
+                        shared_formulas: dict[str, tuple[str, str]] = {}
+                        for _, element in ET.iterparse(
+                            BytesIO(worksheet_xml), events=("end",)
+                        ):
+                            if element.tag != _tag("c"):
+                                continue
+                            parsed += 1
+                            coordinate = element.get("r")
+                            if coordinate:
+                                value = _cell_value(
+                                    element, coordinate, shared, date_styles, epoch,
+                                    shared_formulas,
+                                )
+                                if value is not None:
+                                    plain[coordinate] = value  # type: ignore[assignment]
+                            element.clear()
+                        parsing_seconds += perf_counter() - parse_started
+                        rows_parsed += sheet_rows
+                        cells = plain
+                        cached_rows: tuple[_CachedRow, ...] = ()
+                    else:
+                        rows_reused += sheet_reused
+                        rows_parsed += sheet_parsed
+                        cells_reused += sheet_cells_reused
+                        snapshot_started = perf_counter()
+                        cached_rows = tuple(built_rows)
+                        cells = RowSheetSnapshot(cached_rows)
+                        snapshot_seconds += perf_counter() - snapshot_started
                 snapshot[title] = cells
-                new_cache[target] = _CachedSheet(signature, cells)
-            return snapshot, new_cache, ReaderMetrics(len(sheets), reused, parsed, False)
+                new_cache[target] = _CachedSheet(
+                    signature, cells,
+                    cached.rows if cached is not None and cached.signature == signature
+                    else cached_rows,
+                )
+            metrics = ReaderMetrics(
+                len(sheets), reused, parsed, False, rows_total, rows_reused,
+                rows_parsed, cells_reused, hash_seconds, dependency_seconds,
+                structural_seconds, parsing_seconds, snapshot_seconds,
+            )
+            return snapshot, new_cache, metrics
 
 
 def read_workbook(path: str | Path) -> Snapshot:
