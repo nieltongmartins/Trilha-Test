@@ -65,6 +65,11 @@ def compare_snapshots(previous: Snapshot, current: Snapshot) -> list[CellChange]
     for sheet in sorted(set(previous) | set(current)):
         previous_cells = previous.get(sheet, {})
         current_cells = current.get(sheet, {})
+        # Esta identidade só economiza trabalho quando o leitor incremental
+        # compartilhou o objeto após prova SHA-256. Para snapshots comuns ela é
+        # apenas um atalho correto (um objeto não pode diferir de si mesmo).
+        if previous_cells is current_cells:
+            continue
         sheet_changes: list[CellChange] = []
 
         # Detecte primeiro em O(n), sem ordenar centenas de milhares de

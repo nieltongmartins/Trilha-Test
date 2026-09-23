@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.excel.reader import read_workbook
+from app.excel.reader import ConsecutiveWorkbookReader, read_workbook
 
 
 def test_reader_preserves_formulas_values_and_sheets(
@@ -38,3 +38,30 @@ def test_reader_rejects_non_xlsx_file(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="somente arquivos .xlsx"):
         read_workbook(path)
+
+
+def test_incremental_reader_reuses_only_cryptographically_equal_sheets(
+    cql028_versions: Path,
+) -> None:
+    incremental = ConsecutiveWorkbookReader()
+    previous = incremental.read(cql028_versions / "0.86.xlsx")
+    assert incremental.last_metrics.worksheets_reused == 0
+
+    current = incremental.read(cql028_versions / "0.87.xlsx")
+
+    assert current == read_workbook(cql028_versions / "0.87.xlsx")
+    assert incremental.last_metrics.worksheets_reused == 3
+    assert incremental.last_metrics.cells_parsed == 0
+    assert all(previous[name] is current[name] for name in previous)
+
+
+def test_incremental_reader_invalidates_changed_worksheet(
+    cql028_versions: Path,
+) -> None:
+    incremental = ConsecutiveWorkbookReader()
+    previous = incremental.read(cql028_versions / "0.84.xlsx")
+    current = incremental.read(cql028_versions / "0.85.xlsx")
+
+    assert current == read_workbook(cql028_versions / "0.85.xlsx")
+    assert incremental.last_metrics.worksheets_reused == 0
+    assert previous["Resumo"] is not current["Resumo"]
