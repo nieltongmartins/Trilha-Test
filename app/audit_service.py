@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from app.database import Database
 from app.excel.comparator import CellChange, compare_snapshots
-from app.excel.reader import CellValue, Snapshot, read_workbook
+from app.excel.reader import CellValue, ConsecutiveWorkbookReader, Snapshot, read_workbook
 from app.integrity import sha256_file
 from app.models import AuditExecutionStatus, ProcessedVersionStatus
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
@@ -167,6 +167,8 @@ class AuditService:
         total_changes = 0
         final = initial_checkpoint
         previous_snapshot = None
+        workbook_reader = ConsecutiveWorkbookReader()
+        self._workbook_reader = workbook_reader
         audit_perf_started = time.perf_counter()
         if self._wait_at_safe_point(initial_checkpoint):
             return self._stop_execution(
@@ -454,7 +456,12 @@ class AuditService:
                 self._report_version_progress(version.number, 70, "Lendo XLSX...")
 
             read_started = time.perf_counter()
-            snapshot = read_workbook(path)
+            workbook_reader = getattr(self, "_workbook_reader", None)
+            snapshot = (
+                workbook_reader.read(path)
+                if workbook_reader is not None
+                else read_workbook(path)
+            )
             read_seconds = time.perf_counter() - read_started
             if report_stages:
                 self._report_version_progress(version.number, 90, "Comparando...")
@@ -463,9 +470,11 @@ class AuditService:
                 file_size = path.stat().st_size
             except OSError:
                 file_size = -1
+            metrics = getattr(workbook_reader, "last_metrics", None)
             logger.info(
                 "PERF versao planilha=%s versao=%s bytes=%d download=%.3fs sha256=%.3fs "
-                "leitura_xlsx=%.3fs total=%.3fs",
+                "leitura_xlsx=%.3fs total=%.3fs abas=%s abas_reutilizadas=%s "
+                "celulas_parseadas=%s fallback=%s",
                 spreadsheet.name,
                 version.number,
                 file_size,
@@ -473,6 +482,10 @@ class AuditService:
                 hash_seconds,
                 read_seconds,
                 total_seconds,
+                metrics.worksheets if metrics else "n/a",
+                metrics.worksheets_reused if metrics else "n/a",
+                metrics.cells_parsed if metrics else "n/a",
+                metrics.fallback_used if metrics else "n/a",
             )
             return snapshot, digest
         finally:

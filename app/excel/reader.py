@@ -8,6 +8,8 @@ leitor direto, há fallback automático para o leitor openpyxl original.
 from __future__ import annotations
 
 from io import BytesIO
+from dataclasses import dataclass
+import hashlib
 import logging
 from pathlib import Path, PurePosixPath
 from typing import Callable, TypeAlias
@@ -30,6 +32,27 @@ logger = logging.getLogger("auditoria_excel.reader")
 CellValue: TypeAlias = str | int | float | bool | None
 SheetSnapshot: TypeAlias = dict[str, CellValue]
 Snapshot: TypeAlias = dict[str, SheetSnapshot]
+
+
+def _member_digest(payload: bytes | None) -> str:
+    """SHA-256 que diferencia explicitamente membro ausente de membro vazio."""
+    if payload is None:
+        return "missing"
+    return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedSheet:
+    signature: tuple[str, ...]
+    snapshot: SheetSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class ReaderMetrics:
+    worksheets: int
+    worksheets_reused: int
+    cells_parsed: int
+    fallback_used: bool
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -371,6 +394,106 @@ def _read_fast(path: Path) -> Snapshot:
 def _read_fast_repeated_find(path: Path) -> Snapshot:
     """Executa o leitor anterior para testes e benchmarks, nunca em produção."""
     return _read_fast_with(path, _cell_value_repeated_find)
+
+
+class ConsecutiveWorkbookReader:
+    """Lê versões consecutivas reutilizando somente abas provadas idênticas.
+
+    A identidade compartilhada de ``SheetSnapshot`` é concedida apenas quando
+    SHA-256 da worksheet e de todas as dependências usadas na interpretação
+    coincide. O cache contém exclusivamente a última versão, limitando memória.
+    """
+
+    def __init__(self) -> None:
+        self._previous: dict[str, _CachedSheet] = {}
+        self.last_metrics = ReaderMetrics(0, 0, 0, False)
+
+    def read(self, path: str | Path) -> Snapshot:
+        workbook_path = Path(path)
+        if workbook_path.suffix.lower() != ".xlsx":
+            raise ValueError("O leitor aceita somente arquivos .xlsx")
+        try:
+            snapshot, cache, metrics = self._read_fast(workbook_path)
+        except _FastReaderUnsupported as error:
+            # Um fallback é deliberadamente uma barreira de cache: snapshots
+            # openpyxl não receberam a prova criptográfica desta classe.
+            self._previous = {}
+            logger.info(
+                "Leitor incremental usou fallback openpyxl arquivo=%s motivo=%s",
+                workbook_path.name,
+                error,
+            )
+            snapshot = _read_openpyxl(workbook_path)
+            self.last_metrics = ReaderMetrics(len(snapshot), 0, 0, True)
+            return snapshot
+        self._previous = cache
+        self.last_metrics = metrics
+        logger.debug(
+            "Leitura XLSX incremental arquivo=%s abas=%d reutilizadas=%d celulas_parseadas=%d",
+            workbook_path.name,
+            metrics.worksheets,
+            metrics.worksheets_reused,
+            metrics.cells_parsed,
+        )
+        return snapshot
+
+    def _read_fast(
+        self, path: Path
+    ) -> tuple[Snapshot, dict[str, _CachedSheet], ReaderMetrics]:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+
+            def member(name: str) -> bytes | None:
+                return archive.read(name) if name in names else None
+
+            shared_xml = member("xl/sharedStrings.xml")
+            styles_xml = member("xl/styles.xml")
+            relationships_xml = member("xl/_rels/workbook.xml.rels")
+            # Estas rotinas conservam exatamente a conversão do leitor oficial.
+            shared = _shared_strings(archive)
+            date_styles = _date_styles(archive)
+            epoch = _workbook_epoch(archive)
+            sheets = _sheet_targets(archive)
+            dependency_signature = (
+                _member_digest(shared_xml),
+                _member_digest(styles_xml),
+                "1904" if epoch == CALENDAR_MAC_1904 else "1900",
+                _member_digest(relationships_xml),
+            )
+            snapshot: Snapshot = {}
+            new_cache: dict[str, _CachedSheet] = {}
+            reused = 0
+            parsed = 0
+            for title, target in sheets:
+                worksheet_xml = archive.read(target)
+                signature = (
+                    _member_digest(worksheet_xml),
+                    *dependency_signature,
+                    target,
+                )
+                cached = self._previous.get(target)
+                if cached is not None and cached.signature == signature:
+                    cells = cached.snapshot
+                    reused += 1
+                else:
+                    cells = {}
+                    shared_formulas: dict[str, tuple[str, str]] = {}
+                    for _, element in ET.iterparse(BytesIO(worksheet_xml), events=("end",)):
+                        if element.tag != _tag("c"):
+                            continue
+                        parsed += 1
+                        coordinate = element.get("r")
+                        if coordinate:
+                            value = _cell_value(
+                                element, coordinate, shared, date_styles, epoch,
+                                shared_formulas,
+                            )
+                            if value is not None:
+                                cells[coordinate] = value  # type: ignore[assignment]
+                        element.clear()
+                snapshot[title] = cells
+                new_cache[target] = _CachedSheet(signature, cells)
+            return snapshot, new_cache, ReaderMetrics(len(sheets), reused, parsed, False)
 
 
 def read_workbook(path: str | Path) -> Snapshot:
