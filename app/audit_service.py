@@ -479,7 +479,19 @@ class AuditService:
                 "celulas_reutilizadas=%s celulas_parseadas=%s "
                 "tempo_hashes=%.3fs tempo_dependencias=%.3fs "
                 "tempo_diff_estrutural=%.3fs tempo_parsing=%.3fs "
-                "tempo_snapshot=%.3fs fallback=%s motivo_fallback=%s",
+                "tempo_snapshot=%.3fs fallback=%s motivo_fallback=%s "
+                "sharedstrings_total_anterior=%s sharedstrings_total_atual=%s "
+                "sharedstrings_indices_iguais=%s sharedstrings_indices_alterados=%s "
+                "sharedstrings_indices_novos=%s sharedstrings_indices_removidos=%s "
+                "sharedstrings_shadow_rows_candidate=%s sharedstrings_shadow_rows_safe=%s "
+                "sharedstrings_shadow_rows_invalidated=%s "
+                "sharedstrings_shadow_indices_checked=%s "
+                "sharedstrings_shadow_indices_changed=%s sharedstrings_shadow_indices_new=%s "
+                "rows_dependentes_sharedstrings=%s rows_reutilizadas_sharedstrings=%s "
+                "rows_invalidada_indice_alterado=%s "
+                "rows_invalidada_dependencia_global=%s "
+                "rows_invalidada_estrutura_nao_suportada=%s "
+                "tempo_sharedstrings_diff=%.6fs tempo_sharedstrings_hash=%.6fs",
                 spreadsheet.name,
                 version.number,
                 file_size,
@@ -501,6 +513,25 @@ class AuditService:
                 metrics.snapshot_seconds if metrics else 0.0,
                 metrics.fallback_used if metrics else "n/a",
                 metrics.fallback_reason if metrics and metrics.fallback_reason else "nenhum",
+                metrics.sharedstrings_total_previous if metrics else "n/a",
+                metrics.sharedstrings_total_current if metrics else "n/a",
+                metrics.sharedstrings_indices_equal if metrics else "n/a",
+                metrics.sharedstrings_indices_changed if metrics else "n/a",
+                metrics.sharedstrings_indices_new if metrics else "n/a",
+                metrics.sharedstrings_indices_removed if metrics else "n/a",
+                metrics.sharedstrings_shadow_rows_candidate if metrics else "n/a",
+                metrics.sharedstrings_shadow_rows_safe if metrics else "n/a",
+                metrics.sharedstrings_shadow_rows_invalidated if metrics else "n/a",
+                metrics.sharedstrings_shadow_indices_checked if metrics else "n/a",
+                metrics.sharedstrings_shadow_indices_changed if metrics else "n/a",
+                metrics.sharedstrings_shadow_indices_new if metrics else "n/a",
+                metrics.rows_dependent_sharedstrings if metrics else "n/a",
+                metrics.rows_reused_sharedstrings if metrics else "n/a",
+                metrics.rows_invalidated_changed_index if metrics else "n/a",
+                metrics.rows_invalidated_global_dependency if metrics else "n/a",
+                metrics.rows_invalidated_unsupported_structure if metrics else "n/a",
+                metrics.sharedstrings_diff_seconds if metrics else 0.0,
+                metrics.sharedstrings_hash_seconds if metrics else 0.0,
             )
             return snapshot, digest
         finally:
