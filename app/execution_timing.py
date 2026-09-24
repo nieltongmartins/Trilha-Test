@@ -64,6 +64,80 @@ class TimingEstimate:
     learned: bool
 
 
+class GlobalTimingStats:
+    """Presentation-only statistics based on ordered, official commits.
+
+    The last 20 commits form the moving throughput window.  Rate and ETA are
+    displayed through EWMAs, while their raw values remain available for
+    diagnostics.  All timestamps use the pause-aware clock supplied by the
+    execution model.
+    """
+
+    def __init__(self, window_size: int = 20, rate_alpha: float = .25,
+                 eta_alpha: float = .20, minimum_commits: int = 5) -> None:
+        if window_size < 2 or not 0 < rate_alpha <= 1 or not 0 < eta_alpha <= 1:
+            raise ValueError("configuração temporal inválida")
+        self.recent_commit_timestamps: deque[float] = deque(maxlen=window_size)
+        self.rate_alpha = rate_alpha
+        self.eta_alpha = eta_alpha
+        self.minimum_commits = minimum_commits
+        self.recent_throughput: float | None = None
+        self.recent_average: float | None = None
+        self.last_valid_eta: float | None = None
+        self.smoothed_eta: float | None = None
+
+    def record_commit(self, timestamp: float) -> None:
+        self.recent_commit_timestamps.append(timestamp)
+        values = self.recent_commit_timestamps
+        if len(values) < 2 or values[-1] <= values[0]:
+            return
+        raw_rate = (len(values) - 1) * 60.0 / (values[-1] - values[0])
+        self.recent_throughput = (raw_rate if self.recent_throughput is None else
+                                  self.rate_alpha * raw_rate +
+                                  (1 - self.rate_alpha) * self.recent_throughput)
+        self.recent_average = 60.0 / self.recent_throughput
+
+    def update_eta(self, remaining_versions: int) -> float | None:
+        if remaining_versions <= 0:
+            self.last_valid_eta = self.smoothed_eta = 0.0
+        elif (len(self.recent_commit_timestamps) >= self.minimum_commits and
+              self.recent_throughput is not None and self.recent_throughput > 0):
+            raw_eta = remaining_versions * 60.0 / self.recent_throughput
+            self.smoothed_eta = (raw_eta if self.smoothed_eta is None else
+                                 self.eta_alpha * raw_eta +
+                                 (1 - self.eta_alpha) * self.smoothed_eta)
+            self.last_valid_eta = self.smoothed_eta
+        return self.last_valid_eta
+
+
+class SlotTimingStats:
+    """Robust moving average of the latest completed tasks for one slot."""
+
+    def __init__(self, window_size: int = 15) -> None:
+        self.completed_tasks = 0
+        self.recent_durations: deque[float] = deque(maxlen=window_size)
+        self.average_duration: float | None = None
+        self.last_duration: float | None = None
+
+    def complete(self, duration: float) -> None:
+        if not math.isfinite(duration) or duration < 0:
+            return
+        self.completed_tasks += 1
+        self.last_duration = duration
+        self.recent_durations.append(duration)
+        values = tuple(self.recent_durations)
+        if len(values) < 3:
+            self.average_duration = statistics.fmean(values)
+            return
+        median = statistics.median(values)
+        deviations = tuple(abs(value - median) for value in values)
+        mad = statistics.median(deviations)
+        spread = max(1.0, 3.0 * 1.4826 * mad)
+        self.average_duration = statistics.fmean(
+            min(max(value, median - spread), median + spread) for value in values
+        )
+
+
 class SharedExecutionTimingModel:
     """Thread-safe rolling model shared by every slot.
 
@@ -80,6 +154,8 @@ class SharedExecutionTimingModel:
         self._samples = {stage: deque(maxlen=window_size) for stage in TimedStage}
         self.raw_observations: list[tuple[TimedStage, float, int | None]] = []
         self._commit_times: deque[float] = deque(maxlen=commit_window)
+        self.global_stats = GlobalTimingStats(window_size=commit_window)
+        self.slot_stats: defaultdict[int, SlotTimingStats] = defaultdict(SlotTimingStats)
         self._lock = threading.RLock()
         self._paused_at: float | None = None
         self._paused_total = 0.0
@@ -130,6 +206,8 @@ class SharedExecutionTimingModel:
         with self._lock:
             self.raw_observations.append((stage, value, slot_id))
             self._samples[stage].append(value)
+            if stage is TimedStage.WORKER_TASK_DURATION and slot_id is not None:
+                self.slot_stats[slot_id].complete(value)
             values = tuple(self._samples[stage])
             now = time.monotonic()
             should_log = stage not in self._last_telemetry or now - self._last_telemetry[stage] >= 2.0
@@ -202,7 +280,9 @@ class SharedExecutionTimingModel:
         with self._lock:
             # Use the model's pause-aware clock.  Commit intervals therefore do
             # not include time spent at a safe paused boundary.
-            self._commit_times.append(self.active_now(now))
+            timestamp = self.active_now(now)
+            self._commit_times.append(timestamp)
+            self.global_stats.record_commit(timestamp)
 
     def sample_count(self, stage: TimedStage | str = TimedStage.TOTAL_TASK) -> int:
         """Return the rolling sample count without exposing mutable storage."""
