@@ -1,6 +1,10 @@
 from pathlib import Path
 import queue
 import threading
+import tkinter as tk
+from tkinter import ttk
+
+import pytest
 
 from app.interface import AuditApplication
 from app.sources import SharePointReadError, SpreadsheetInfo
@@ -358,7 +362,7 @@ def test_versions_read_error_is_presented_without_closing_interface() -> None:
     assert application.status.value == "Falha na operação: resposta REST incompatível"
 
 
-def test_audit_progress_displays_percentage_estimate_and_elapsed(monkeypatch) -> None:
+def test_audit_progress_displays_percentage_and_elapsed_without_duplicate_eta(monkeypatch) -> None:
     application = AuditApplication.__new__(AuditApplication)
     application._audit_started_at = 90.0
     application._progress_completed = 0
@@ -370,9 +374,7 @@ def test_audit_progress_displays_percentage_estimate_and_elapsed(monkeypatch) ->
     application._update_progress(1, 4)
 
     assert application.progress_value.value == 25
-    assert application.progress_text.value == (
-        "1 / 4 (25%) | Estimativa: 00:30 | Tempo total: 00:10"
-    )
+    assert application.progress_text.value == "1 / 4 (25%) | Tempo total: 00:00:10"
 
 
 def test_confirmed_checkpoints_update_details_only_when_polled_on_main_thread() -> None:
@@ -425,6 +427,43 @@ def test_eight_slots_use_four_rows_and_two_columns() -> None:
         (0, 0), (0, 1), (1, 0), (1, 1),
         (2, 0), (2, 1), (3, 0), (3, 1),
     ]
+
+
+@pytest.mark.parametrize("slot_count", [1, 2, 5, 8])
+def test_slot_cards_keep_fixed_geometry_for_every_state(slot_count: int) -> None:
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("servidor gráfico indisponível")
+    root.geometry("1366x768")
+    application = AuditApplication.__new__(AuditApplication)
+    application._audit_active = False
+    application.worker_count = tk.IntVar(root, value=slot_count)
+    application.slots_container = ttk.Frame(root, width=960)
+    application.slots_container.pack(fill="x")
+    application.slots_container.columnconfigure(0, weight=1, uniform="slots")
+    application.slots_container.columnconfigure(1, weight=1, uniform="slots")
+    application.global_timing_text = tk.StringVar(root)
+    application._last_global_mean = None
+    application._last_global_throughput = None
+    application._last_global_eta = None
+    application._rebuild_slot_frames()
+    root.update_idletasks()
+    baseline = [(frame.winfo_width(), frame.winfo_height()) for frame in application.slot_frames]
+    assert {height for _width, height in baseline} == {82}
+    if slot_count > 1:
+        assert max(width for width, _height in baseline) - min(width for width, _height in baseline) <= 8
+    for state in (
+        "AGUARDANDO", "BAIXANDO", "VALIDANDO", "LENDO XLSX", "COMPARANDO",
+        "STAGED", "CHECKPOINT CONFIRMADO", "PAUSADO", "ERRO " + "técnico " * 30,
+    ):
+        for index, frame in enumerate(application.slot_frames):
+            frame.configure(text=f"SLOT {index + 1} — 5.{120 + index}")
+            application.slot_stage_texts[index].set(application._compact_text(state, 42))
+            application.slot_timing_texts[index].set("Decorrido: 01:02:03")
+        root.update_idletasks()
+        assert [(frame.winfo_width(), frame.winfo_height()) for frame in application.slot_frames] == baseline
+    root.destroy()
 
 
 def test_complete_deletion_cancellation_does_not_touch_local_database(monkeypatch) -> None:
@@ -588,7 +627,7 @@ def test_version_bar_starts_at_zero_advances_and_resets(monkeypatch) -> None:
     assert application._current_version == "2.19"
 
 
-def test_recent_average_keeps_only_twenty_and_eta_uses_it(monkeypatch) -> None:
+def test_individual_slot_shows_only_elapsed_time(monkeypatch) -> None:
     application = _application_for_version_progress()
     application._smooth_version_progress.total_history.extend(range(1, 22))
     application._progress_completed = 25
@@ -598,8 +637,36 @@ def test_recent_average_keeps_only_twenty_and_eta_uses_it(monkeypatch) -> None:
     application._update_version_timing()
 
     assert list(application._smooth_version_progress.total_history) == list(range(2, 22))
-    assert "Média recente: 00:12" in application.version_timing_text.value
-    assert "Estimativa restante: 00:58" in application.version_timing_text.value
+    assert application.version_timing_text.value == "Decorrido: 00:00:00"
+    assert "Média" not in application.version_timing_text.value
+    assert "Estimativa" not in application.version_timing_text.value
+
+
+def test_global_timing_preserves_last_valid_values_and_final_eta() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application._last_global_mean = 9.0
+    application._last_global_throughput = 28.4
+    application._last_global_eta = 631.0
+    message = application._global_timing_message(8, 8)
+    assert "Média recente: 00:00:09" in message
+    assert "Taxa recente: 28,4 versões/min" in message
+    assert "Estimativa restante: 00:10:31" in message
+    assert "Slots ativos: 8/8" in message
+    application._last_global_eta = 0.0
+    assert "Estimativa restante: 00:00:00" in application._global_timing_message(0, 8)
+
+
+def test_global_timing_bootstrap_fields_never_disappear() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    application._last_global_mean = None
+    application._last_global_throughput = None
+    application._last_global_eta = None
+    assert application._global_timing_message(0, 5).splitlines() == [
+        "Média recente: calculando...",
+        "Taxa recente: calculando...",
+        "Estimativa restante: calculando...",
+        "Slots ativos: 0/5",
+    ]
 
 
 def test_version_progress_from_worker_only_touches_tk_during_main_poll(monkeypatch) -> None:

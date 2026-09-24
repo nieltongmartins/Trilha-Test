@@ -117,6 +117,8 @@ class ParallelMetrics:
     download_starvation_time: float = 0.0
     cpu_coordinator_percent: float = 0.0
     cpu_workers_percent: float = 0.0
+    mean_task: float | None = None
+    timing_samples: int = 0
 
 
 def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, float]]:
@@ -449,6 +451,9 @@ class ParallelAuditService(AuditService):
             return self._record_failure(connection, execution_id, spreadsheet_id, code,
                                         initial, 0, 0, None, None, error)
         finally:
+            # Freeze only the execution clock.  Samples and recent official
+            # commits remain available if this spreadsheet is continued.
+            self.timing_model.stop()
             if staging is not None:
                 staging.close()
             for path in acquired.values():
@@ -551,6 +556,9 @@ class ParallelAuditService(AuditService):
                                          max(active, self.slots)),
             staging.count() + active, workers_by_pid, rss + worker_rss + edge_rss,
             utilization, self._download_starvation_time, cpu_coordinator, cpu_workers,
+            (self.timing_model.task_average()
+             if self.timing_model.sample_count(TimedStage.TOTAL_TASK) else None),
+            self.timing_model.sample_count(TimedStage.TOTAL_TASK),
         ))
 
     @staticmethod

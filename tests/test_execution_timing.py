@@ -73,6 +73,21 @@ def test_pause_and_stop_freeze_visual_clock():
     assert model.active_now(170) == pytest.approx(110)
     model.stop(180)
     assert model.active_now(999) == pytest.approx(120)
+    samples_before = model.samples(TimedStage.READ_XLSX)
+    model.continue_execution(200)
+    assert model.active_now(210) == pytest.approx(130)
+    assert model.samples(TimedStage.READ_XLSX) == samples_before
+
+
+def test_throughput_excludes_pause_and_samples_survive_pause():
+    model = SharedExecutionTimingModel()
+    model.observe(TimedStage.TOTAL_TASK, 10, slot_id=1)
+    model.record_commit(100)
+    model.pause(105)
+    model.resume(165)
+    model.record_commit(170)
+    assert model.throughput_per_minute() == pytest.approx(6)
+    assert model.task_average() == 10
 
 
 @pytest.mark.parametrize("fast,slow", [(0.01, 100.0), (0.1, 1000.0)])

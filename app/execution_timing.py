@@ -99,7 +99,19 @@ class SharedExecutionTimingModel:
     def stop(self, now: float | None = None) -> None:
         with self._lock:
             instant = time.monotonic() if now is None else now
-            self._stopped_at = self._paused_at if self._paused_at is not None else instant
+            if self._stopped_at is None:
+                self._stopped_at = self._paused_at if self._paused_at is not None else instant
+
+    def continue_execution(self, now: float | None = None) -> None:
+        """Restart the pause-aware clock while retaining all learned samples."""
+        instant = time.monotonic() if now is None else now
+        with self._lock:
+            if self._stopped_at is not None:
+                self._paused_total += max(0.0, instant - self._stopped_at)
+                self._stopped_at = None
+            if self._paused_at is not None:
+                self._paused_total += max(0.0, instant - self._paused_at)
+                self._paused_at = None
 
     def observe(self, stage: TimedStage | str, seconds: float, slot_id: int | None = None) -> None:
         stage = TimedStage(stage)
@@ -179,7 +191,14 @@ class SharedExecutionTimingModel:
 
     def record_commit(self, now: float | None = None) -> None:
         with self._lock:
-            self._commit_times.append(time.monotonic() if now is None else now)
+            # Use the model's pause-aware clock.  Commit intervals therefore do
+            # not include time spent at a safe paused boundary.
+            self._commit_times.append(self.active_now(now))
+
+    def sample_count(self, stage: TimedStage | str = TimedStage.TOTAL_TASK) -> int:
+        """Return the rolling sample count without exposing mutable storage."""
+        with self._lock:
+            return len(self._samples[TimedStage(stage)])
 
     def throughput_per_minute(self) -> float | None:
         with self._lock:
