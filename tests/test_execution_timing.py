@@ -43,6 +43,7 @@ def test_progress_is_continuous_asymptotic_and_only_finishes_on_fact():
     assert parsing.progress > late.progress
     assert model.estimate_task(TimedStage.COMPARE, 200).progress < 100
     assert model.estimate_task(TimedStage.COMPARE, 200, finished=True).progress == 100
+    assert model.estimate_task(TimedStage.STAGING, 200).progress <= 99
 
 
 def test_individual_eta_excludes_completed_stages():

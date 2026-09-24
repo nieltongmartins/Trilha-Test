@@ -49,6 +49,12 @@ def test_buffer_starts_empty_and_has_named_limit(tmp_path: Path) -> None:
     assert source._prefetch_slots == {}
 
 
+def test_runtime_buffer_accepts_eight_slot_target(tmp_path: Path) -> None:
+    source, _, _ = make_source(tmp_path)
+    source.configure_prefetch_buffer(16)
+    assert source.prefetch_buffer_size == 16
+
+
 def test_buffer_accepts_one_then_two_independent_versions(tmp_path: Path) -> None:
     source, browser, spreadsheet = make_source(tmp_path)
     versions = [VersionInfo(str(number), f"1.{number}", size=100 + number) for number in (1, 2)]

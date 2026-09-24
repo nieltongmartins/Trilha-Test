@@ -291,9 +291,21 @@ class BrowserSharePointSource:
 
     def configure_prefetch_buffer(self, size: int) -> None:
         """Configura o limite do ator sem criar outro proprietário do driver."""
-        if not 1 <= size <= 4:
-            raise ValueError("buffer de prefetch deve estar entre 1 e 4")
+        if not 1 <= size <= 16:
+            raise ValueError("buffer de prefetch deve estar entre 1 e 16")
         self._prefetch_buffer_size = size
+
+    def prefetch_resource_metrics(self) -> dict[str, int]:
+        """Return bounded-buffer footprint without issuing a WebDriver command."""
+        return {
+            "bytes": sum(
+                int(slot["size"]) for slot in self._prefetch_slots.values()
+                if isinstance(slot.get("size"), int)
+            ),
+            # Fetch response blobs live in Edge; Python only retains metadata.
+            "memory_files": len(self._prefetch_slots),
+            "temporary_files": sum(1 for path in self._workspace.path.glob("*.part")),
+        }
 
     def __init__(
         self,
@@ -1146,7 +1158,7 @@ class BrowserSharePointSource:
     ) -> bool:
         """Inicia o download da próxima versão no Edge sem bloquear o Python.
 
-        Até dois prefetches ficam ativos. Os ``fetches`` continuam no próprio Edge
+        Até o alvo configurado fica ativo. Os ``fetches`` continuam no próprio Edge
         enquanto o Python calcula hash, lê o XLSX e compara a versão atual.
         """
         url = self._version_download_url(spreadsheet, version)
