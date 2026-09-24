@@ -10,7 +10,8 @@ import pytest
 
 from app.database import Database
 from app.models import AuditExecutionStatus
-from app.parallel_audit import ParallelAuditService, StagingStore, TaskState
+from app.parallel_audit import (PREFETCH_TARGET_BY_SLOTS, ParallelAuditService,
+                                StagingStore, TaskState)
 from app.sources.base import SpreadsheetInfo, VersionInfo
 from app.sources.local import LocalSource
 
@@ -75,6 +76,43 @@ def test_worker_count_is_limited_to_one_through_eight(tmp_path: Path, slots: int
         database.initialize()
         with pytest.raises(ValueError, match="entre 1 e 8"):
             ParallelAuditService(database, source([]), slots=slots)
+
+
+def test_prefetch_target_is_bounded_benchmark_configuration():
+    assert PREFETCH_TARGET_BY_SLOTS == {
+        1: 2, 2: 2, 3: 3, 4: 3, 5: 4, 6: 4, 7: 4, 8: 4,
+    }
+    assert max(PREFETCH_TARGET_BY_SLOTS.values()) == 4
+
+
+def test_parallel_scheduler_prefetches_once_by_technical_id(tmp_path: Path):
+    items = history(tmp_path, 5)
+
+    class PrefetchLocal(LocalSource):
+        def __init__(self):
+            super().__init__([SHEET], {(SHEET.site_id, SHEET.drive_id, SHEET.drive_item_id): items})
+            self.planned = []
+            self.limit = None
+
+        def configure_prefetch_buffer(self, size):
+            self.limit = size
+
+        def prefetch_version(self, spreadsheet, version):
+            self.planned.append(version.id)
+            return True
+
+    fake = PrefetchLocal()
+    with Database(tmp_path / "prefetch-parallel.db") as database:
+        database.initialize()
+        service = ParallelAuditService(
+            database, fake, slots=3, backend="thread",
+            staging_directory=tmp_path / "stage-prefetch",
+        )
+        result = service.audit(SHEET)
+    assert result.status is AuditExecutionStatus.COMPLETED
+    assert fake.limit == 3
+    assert len(fake.planned) == len(set(fake.planned))
+    assert service._prefetch_hits > 0
 
 
 def test_out_of_order_staging_never_advances_checkpoint(monkeypatch, tmp_path: Path):

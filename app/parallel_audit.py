@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import pickle
 import sqlite3
+import statistics
 import tempfile
 import threading
 import time
@@ -46,6 +47,27 @@ class TaskState(StrEnum):
     COMPLETED = "CONCLUIDO"
     PAUSED = "PAUSADO"
     ERROR = "ERRO"
+
+
+class AcquisitionState(StrEnum):
+    NOT_REQUESTED = "NOT_REQUESTED"
+    PREFETCH_PENDING = "PREFETCH_PENDING"
+    PREFETCH_READY = "PREFETCH_READY"
+    CONSUMING = "CONSUMING"
+    CONSUMED = "CONSUMED"
+    FAILED = "FAILED"
+
+
+PREFETCH_TARGET_BY_SLOTS = {1: 2, 2: 2, 3: 3, 4: 3, 5: 4, 6: 4, 7: 4, 8: 4}
+
+
+@dataclass(slots=True)
+class AcquisitionRecord:
+    version: VersionInfo
+    state: AcquisitionState = AcquisitionState.NOT_REQUESTED
+    planned_at: float | None = None
+    acquisition_duration: float | None = None
+    residual_wait: float = 0.0
 
 
 @dataclass(slots=True)
@@ -95,6 +117,10 @@ class SlotProgress:
     estimated_remaining: float | None = None
     learned: bool = False
     occurred_at: float = field(default_factory=time.monotonic)
+    timed_stage: TimedStage | None = None
+    completed_stages: tuple[TimedStage, ...] = ()
+    stage_started_active: float | None = None
+    task_started_active: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +145,11 @@ class ParallelMetrics:
     cpu_workers_percent: float = 0.0
     mean_task: float | None = None
     timing_samples: int = 0
+    prefetch_target: int = 0
+    prefetch_ready: int = 0
+    prefetch_pending: int = 0
+    prefetch_hit_rate: float = 0.0
+    worker_starvation_count: int = 0
 
 
 def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, float]]:
@@ -270,6 +301,18 @@ class ParallelAuditService(AuditService):
         self._worker_pids: set[int] = set()
         self._slot_busy: dict[int, float] = {slot: 0.0 for slot in range(1, slots + 1)}
         self._download_starvation_time = 0.0
+        self.prefetch_target = PREFETCH_TARGET_BY_SLOTS[slots]
+        self._acquisitions: dict[str, AcquisitionRecord] = {}
+        self._prefetch_hits = 0
+        self._prefetch_misses = 0
+        self._prefetch_ages: list[float] = []
+        self._residual_waits: list[float] = []
+        self._download_normal: list[float] = []
+        self._download_prefetch: list[float] = []
+        self._worker_starvation_count = 0
+        configure = getattr(source, "configure_prefetch_buffer", None)
+        if callable(configure):
+            configure(self.prefetch_target)
 
     def _slot(self, task: VersionTask, state: TaskState, percent: float, stage: str,
               started: float = 0.0, timed_stage: TimedStage | None = None,
@@ -303,7 +346,94 @@ class ParallelAuditService(AuditService):
                 estimate.task_average if estimate else None,
                 estimate.remaining if estimate else None,
                 estimate.learned if estimate else False,
+                timed_stage=timed_stage,
+                completed_stages=self._task_stages.get(task.sequence, ()),
+                stage_started_active=(self.timing_model.active_now() - max(0.0, time.perf_counter() - (stage_started or started)))
+                if timed_stage is not None else None,
+                task_started_active=(self.timing_model.active_now() - duration) if started else None,
             ))
+
+    def _prefetch_counts(self) -> tuple[int, int]:
+        ready = sum(r.state is AcquisitionState.PREFETCH_READY for r in self._acquisitions.values())
+        pending = sum(r.state is AcquisitionState.PREFETCH_PENDING for r in self._acquisitions.values())
+        return ready, pending
+
+    def _refill_prefetch(self, spreadsheet: SpreadsheetInfo,
+                         candidates: list[VersionInfo]) -> None:
+        """Reabastece somente dentro da janela entregue pelo scheduler.
+
+        Este método roda exclusivamente no coordenador/proprietário do WebDriver.
+        O mapa por ID técnico torna o agendamento idempotente.
+        """
+        prefetch = getattr(self.source, "prefetch_version", None)
+        if not callable(prefetch):
+            return
+        ready, pending = self._prefetch_counts()
+        for version in candidates:
+            if ready + pending >= self.prefetch_target:
+                break
+            record = self._acquisitions.setdefault(version.id, AcquisitionRecord(version))
+            if record.state is not AcquisitionState.NOT_REQUESTED:
+                continue
+            logger.info("PREFETCH_PLANEJADO technical_version_id=%s VersionLabel=%s", version.id, version.number)
+            try:
+                if not prefetch(spreadsheet, version):
+                    continue
+            except Exception:
+                record.state = AcquisitionState.FAILED
+                logger.warning("PREFETCH_FAILED technical_version_id=%s VersionLabel=%s", version.id, version.number, exc_info=True)
+                continue
+            record.state = AcquisitionState.PREFETCH_PENDING
+            record.planned_at = time.perf_counter()
+            pending += 1
+            logger.info(
+                "PREFETCH_STARTED technical_version_id=%s VersionLabel=%s buffer_occupied=%d buffer_ready=%d buffer_pending=%d",
+                version.id, version.number, ready + pending, ready, pending,
+            )
+
+    def _acquire(self, spreadsheet: SpreadsheetInfo, version: VersionInfo,
+                 slot: int) -> tuple[Path, float, bool]:
+        record = self._acquisitions.setdefault(version.id, AcquisitionRecord(version))
+        prefetched = record.state in (AcquisitionState.PREFETCH_PENDING, AcquisitionState.PREFETCH_READY)
+        if record.state is AcquisitionState.CONSUMING:
+            raise RuntimeError(f"aquisição duplicada: technical_version_id={version.id}")
+        record.state = AcquisitionState.CONSUMING
+        started = time.perf_counter()
+        try:
+            path = self.source.get_version(spreadsheet, version)
+        except Exception:
+            record.state = AcquisitionState.FAILED
+            raise
+        duration = time.perf_counter() - started
+        consume_metrics = getattr(self.source, "consume_download_metrics", None)
+        source_metrics = consume_metrics(version.id) if callable(consume_metrics) else {}
+        record.state = AcquisitionState.CONSUMED
+        record.acquisition_duration = duration
+        residual = float(source_metrics.get("residual_wait", duration if prefetched else 0.0))
+        record.residual_wait = residual
+        if prefetched:
+            self._prefetch_hits += 1
+            age = float(source_metrics.get(
+                "prefetch_age", time.perf_counter() - (record.planned_at or started)
+            ))
+            was_ready = bool(source_metrics.get("was_ready", duration < .1))
+            self._prefetch_ages.append(age)
+            self._residual_waits.append(residual)
+            self._download_prefetch.append(duration)
+            logger.info(
+                "PREFETCH_READY technical_version_id=%s VersionLabel=%s age=%.3f bytes=%s buffer_occupied=%d",
+                version.id, version.number, age, source_metrics.get("bytes", 0), sum(self._prefetch_counts()),
+            )
+            logger.info(
+                "PREFETCH_CONSUMIDO technical_version_id=%s VersionLabel=%s age=%.3f wait_residual=%.3f prefetch_pronto=%s",
+                version.id, version.number, age, residual, was_ready,
+            )
+            logger.info("PREFETCH_HIT technical_version_id=%s VersionLabel=%s", version.id, version.number)
+        else:
+            self._prefetch_misses += 1
+            self._download_normal.append(duration)
+            logger.info("PREFETCH_MISS technical_version_id=%s VersionLabel=%s wait_residual=%.3f", version.id, version.number, duration)
+        return path, duration, prefetched
 
     def audit(self, spreadsheet: SpreadsheetInfo,
               versions: list[VersionInfo] | tuple[VersionInfo, ...] | None = None) -> AuditResult:
@@ -369,6 +499,14 @@ class ParallelAuditService(AuditService):
                         continue
 
                     limit = min(len(tasks), coordinator.committed + 2 * self.slots)
+                    window_versions: list[VersionInfo] = []
+                    seen_window: set[str] = set()
+                    for previous, current in pairs[coordinator.committed:limit]:
+                        for candidate in (previous, current):
+                            if candidate.id not in acquired and candidate.id not in seen_window:
+                                seen_window.add(candidate.id)
+                                window_versions.append(candidate)
+                    self._refill_prefetch(spreadsheet, window_versions)
                     reserved = {item[0].sequence for item in running.values()}
                     available_slots = [slot for slot in range(1, self.slots + 1)
                                        if slot not in {item[0].slot_id for item in running.values()}]
@@ -395,10 +533,13 @@ class ParallelAuditService(AuditService):
                                 download_started = time.perf_counter()
                                 self._slot(task, TaskState.DOWNLOAD, 15, "Download pelo ator WebDriver",
                                            task_started, TimedStage.DOWNLOAD_TRANSFER, download_started)
-                                acquired[version.id] = self.source.get_version(spreadsheet, version)
-                                download_seconds = time.perf_counter() - download_started
+                                acquired[version.id], download_seconds, was_prefetched = self._acquire(
+                                    spreadsheet, version, slot
+                                )
                                 # Downloader serial: outros slots livres ficaram sem arquivo nesse intervalo.
                                 idle_slots = max(0, self.slots - len(running) - 1)
+                                if idle_slots and download_seconds > 0:
+                                    self._worker_starvation_count += 1
                                 self._download_starvation_time += download_seconds * idle_slots
                                 self.timing_model.observe(TimedStage.DOWNLOAD_TRANSFER, download_seconds, slot)
                                 self._task_stages[task.sequence] = (*self._task_stages[task.sequence], TimedStage.DOWNLOAD_TRANSFER)
@@ -417,6 +558,8 @@ class ParallelAuditService(AuditService):
                                     "technical_version_id": version.id,
                                     "sequence": task.sequence, "stage": "DOWNLOAD",
                                     "download_transfer": download_seconds, "sha": sha_seconds,
+                                    "download_mode": "prefetch" if was_prefetched else "normal",
+                                    "slot_download_wait": download_seconds,
                                     "worker_pid": os.getpid(),
                                     "worker_thread_id": threading.get_ident(),
                                     "coordinator_pid": os.getpid(),
@@ -451,6 +594,23 @@ class ParallelAuditService(AuditService):
             return self._record_failure(connection, execution_id, spreadsheet_id, code,
                                         initial, 0, 0, None, None, error)
         finally:
+            total_requests = self._prefetch_hits + self._prefetch_misses
+            ready, pending = self._prefetch_counts()
+            logger.info(
+                "PREFETCH_SUMMARY slots_selected=%d prefetch_target=%d prefetch_ready=%d "
+                "prefetch_pending=%d prefetch_occupancy=%d prefetch_hit_rate=%.4f "
+                "prefetch_miss_rate=%.4f average_prefetch_age=%.3f average_residual_wait=%.3f "
+                "download_normal_mean=%.3f download_prefetch_mean=%.3f "
+                "worker_starvation_count=%d worker_starvation_time=%.3f",
+                self.slots, self.prefetch_target, ready, pending, ready + pending,
+                self._prefetch_hits / total_requests if total_requests else 0.0,
+                self._prefetch_misses / total_requests if total_requests else 0.0,
+                statistics.fmean(self._prefetch_ages) if self._prefetch_ages else 0.0,
+                statistics.fmean(self._residual_waits) if self._residual_waits else 0.0,
+                statistics.fmean(self._download_normal) if self._download_normal else 0.0,
+                statistics.fmean(self._download_prefetch) if self._download_prefetch else 0.0,
+                self._worker_starvation_count, self._download_starvation_time,
+            )
             # Freeze only the execution clock.  Samples and recent official
             # commits remain available if this spreadsheet is continued.
             self.timing_model.stop()
@@ -559,6 +719,10 @@ class ParallelAuditService(AuditService):
             (self.timing_model.task_average()
              if self.timing_model.sample_count(TimedStage.TOTAL_TASK) else None),
             self.timing_model.sample_count(TimedStage.TOTAL_TASK),
+            self.prefetch_target, *self._prefetch_counts(),
+            (self._prefetch_hits / (self._prefetch_hits + self._prefetch_misses)
+             if self._prefetch_hits + self._prefetch_misses else 0.0),
+            self._worker_starvation_count,
         ))
 
     @staticmethod

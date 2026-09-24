@@ -287,7 +287,13 @@ class BrowserSharePointSource:
     @property
     def prefetch_buffer_size(self) -> int:
         """Quantidade de versões futuras admitidas pelo buffer do Edge."""
-        return PREFETCH_BUFFER_SIZE
+        return self._prefetch_buffer_size
+
+    def configure_prefetch_buffer(self, size: int) -> None:
+        """Configura o limite do ator sem criar outro proprietário do driver."""
+        if not 1 <= size <= 4:
+            raise ValueError("buffer de prefetch deve estar entre 1 e 4")
+        self._prefetch_buffer_size = size
 
     def __init__(
         self,
@@ -319,8 +325,14 @@ class BrowserSharePointSource:
         self._owns_browser = owns_browser
         self._workspace = TemporaryWorkspace(temp_directory)
         self._prefetch_slots: dict[str, dict[str, object]] = {}
+        self._prefetch_buffer_size = PREFETCH_BUFFER_SIZE
         self._status_callback = status_callback
         self._incremental_digests: dict[Path, str] = {}
+        self._download_metrics: dict[str, dict[str, object]] = {}
+
+    def consume_download_metrics(self, technical_version_id: str) -> dict[str, object]:
+        """Entrega a telemetria da aquisição sem expor/mover o WebDriver."""
+        return self._download_metrics.pop(technical_version_id, {})
 
     @classmethod
     def open_edge(
@@ -1145,7 +1157,7 @@ class BrowserSharePointSource:
         )
         if existing is not None:
             return True
-        if len(self._prefetch_slots) >= PREFETCH_BUFFER_SIZE:
+        if len(self._prefetch_slots) >= self._prefetch_buffer_size:
             self._log_prefetch_buffer()
             return False
         started = time.perf_counter()
@@ -1474,6 +1486,17 @@ class BrowserSharePointSource:
             and isinstance(result.get("waitMs", begin_seconds * 1000.0), (int, float))
             else 0.0,
         )
+        self._download_metrics[version.id] = {
+            "mode": "prefetch" if use_prefetch else "normal",
+            "was_ready": bool(result.get("wasReady")) if use_prefetch else False,
+            "prefetch_age": prefetch_age,
+            "residual_wait": (
+                float(result.get("waitMs", begin_seconds * 1000.0)) / 1000.0
+                if use_prefetch and isinstance(result.get("waitMs", begin_seconds * 1000.0), (int, float))
+                else begin_seconds
+            ),
+            "bytes": size,
+        }
         if use_prefetch:
             logger.info(
                 "PERF prefetch_slot_ready versao=%s idade=%.3fs bytes=%d",
