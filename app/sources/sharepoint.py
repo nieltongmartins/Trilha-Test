@@ -1519,6 +1519,19 @@ class BrowserSharePointSource:
             detail = result.get("error") if isinstance(result, Mapping) else "resposta inválida"
             timed_out = bool(isinstance(result, Mapping) and result.get("timeout"))
             if timed_out:
+                queue_age = (
+                    float(result.get("queueAgeMs", prefetch_age * 1000.0)) / 1000.0
+                    if isinstance(result, Mapping) else prefetch_age
+                )
+                active_fetch_elapsed = (
+                    float(result.get("activeFetchMs", begin_seconds * 1000.0)) / 1000.0
+                    if isinstance(result, Mapping) else begin_seconds
+                )
+                logger.warning(
+                    "FETCH_TIMEOUT_DECISION queue_age=%.3f active_fetch_elapsed=%.3f "
+                    "timeout_threshold=%.3f reason=active_fetch_timeout",
+                    queue_age, active_fetch_elapsed, FETCH_OPERATION_TIMEOUT_SECONDS,
+                )
                 logger.warning(
                     "PERF fetch_timeout planilha=%s versao=%s modo=%s tentativa=%d "
                     "timeout=%.3fs prefetch_idade=%.3fs url=%s",

@@ -38,6 +38,7 @@ MEMORY_MIN_AVAILABLE_BYTES = 512 * 1024 * 1024
 
 class TaskState(StrEnum):
     WAITING = "AGUARDANDO"
+    WAITING_DOWNLOAD = "AGUARDANDO_DOWNLOAD"
     RESERVED = "RESERVANDO"
     DOWNLOAD = "BAIXANDO"
     SHA = "VALIDANDO"
@@ -108,6 +109,18 @@ class VersionTask:
     slot_id: int | None = None
     reservation_token: str | None = None
     retry_count: int = 0
+
+
+@dataclass(slots=True)
+class TaskLifecycle:
+    """Monotonic timestamps used only to explain pipeline latency."""
+
+    reserved_at: float
+    download_ready_at: float | None = None
+    worker_started_at: float | None = None
+    worker_finished_at: float | None = None
+    staged_at: float | None = None
+    promoted_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +369,8 @@ class ParallelAuditService(AuditService):
         self.timing_model = timing_model or SharedExecutionTimingModel()
         self._task_stages: dict[int, tuple[TimedStage, ...]] = {}
         self._last_slot_log: dict[int, tuple[float, TaskState]] = {}
+        self._last_metrics_emit = 0.0
+        self._last_metrics_log = 0.0
         self._worker_pids: set[int] = set()
         self._created_worker_pids: set[int] = set()
         self._initialized_worker_pids: set[int] = set()
@@ -618,6 +633,51 @@ class ParallelAuditService(AuditService):
         self._review_prefetch_target()
         return path, duration, prefetched
 
+    def _prepare_pair(
+        self,
+        spreadsheet: SpreadsheetInfo,
+        pair: tuple[VersionInfo, VersionInfo],
+        task: VersionTask,
+        acquired: dict[str, Path],
+        prefetch_candidates: list[VersionInfo],
+    ) -> ComparisonTask:
+        """Run all WebDriver operations on its sole owner thread.
+
+        This method deliberately does not reserve a worker slot.  The scheduler
+        receives the returned immutable task only after both local files are
+        ready, so a slow Selenium fetch cannot masquerade as worker runtime.
+        """
+        self._refill_prefetch(spreadsheet, prefetch_candidates)
+        for version in pair:
+            if version.id in acquired:
+                continue
+            download_started = time.perf_counter()
+            acquired[version.id], download_seconds, was_prefetched = self._acquire(
+                spreadsheet, version, 0
+            )
+            self.timing_model.observe(TimedStage.DOWNLOAD_TRANSFER, download_seconds)
+            sha_started = time.perf_counter()
+            digest = sha256_file(acquired[version.id])
+            sha_seconds = time.perf_counter() - sha_started
+            self.timing_model.observe(TimedStage.SHA, sha_seconds)
+            verify = getattr(self.source, "verify_download_digest", None)
+            if callable(verify):
+                verify(acquired[version.id], digest)
+            self.telemetry.append({
+                "slot_id": 0, "task_id": "", "technical_version_id": version.id,
+                "sequence": task.sequence, "stage": "DOWNLOAD",
+                "download_transfer": download_seconds, "sha": sha_seconds,
+                "download_mode": "prefetch" if was_prefetched else "normal",
+                "slot_download_wait": self._acquisitions[version.id].residual_wait,
+                "worker_pid": os.getpid(), "worker_thread_id": threading.get_ident(),
+                "coordinator_pid": os.getpid(),
+            })
+        current_hash = sha256_file(acquired[pair[1].id])
+        return ComparisonTask(
+            task.sequence, pair[0], pair[1], str(acquired[pair[0].id]),
+            str(acquired[pair[1].id]), current_hash, "",
+        )
+
     def audit(self, spreadsheet: SpreadsheetInfo,
               versions: list[VersionInfo] | tuple[VersionInfo, ...] | None = None) -> AuditResult:
         connection = self.database.connection
@@ -679,125 +739,102 @@ class ParallelAuditService(AuditService):
             tasks = [VersionTask(cur.id, cur.number, prev.id, index, execution_id)
                      for index, (prev, cur) in enumerate(pairs, 1)]
             executor_type = ProcessPoolExecutor if self.backend == "process" else ThreadPoolExecutor
-            with executor_type(max_workers=configured_workers, initializer=_initialize_worker) as executor:
+            # Selenium has exactly one owner.  Acquisition runs independently from
+            # the coordinator so completed workers are staged/promoted while Edge waits.
+            with (executor_type(max_workers=configured_workers, initializer=_initialize_worker) as executor,
+                  ThreadPoolExecutor(max_workers=1, thread_name_prefix="webdriver-owner") as downloader):
                 running: dict[Future, tuple[VersionTask, ComparisonTask, float, float]] = {}
+                ready: list[tuple[VersionTask, ComparisonTask]] = []
+                lifecycles: dict[int, TaskLifecycle] = {}
+                acquisition: Future | None = None
+                acquisition_task: VersionTask | None = None
+                next_acquisition = 0
                 while coordinator.committed < len(pairs):
                     if self.stop_event.is_set():
                         break
+
+                    # Result consumption and ordered commit are always serviced before
+                    # polling/submitting WebDriver work.
+                    self._collect_done(running, staging, block=False, lifecycles=lifecycles)
+                    self._promote(coordinator, tasks, len(pairs), lifecycles=lifecycles)
+
+                    if acquisition is not None and acquisition.done():
+                        assert acquisition_task is not None
+                        try:
+                            comparison = acquisition.result()
+                        except Exception:
+                            acquisition_task.state = TaskState.ERROR
+                            raise
+                        lifecycle = lifecycles[acquisition_task.sequence]
+                        lifecycle.download_ready_at = time.perf_counter()
+                        ready.append((acquisition_task, comparison))
+                        acquisition = None
+                        acquisition_task = None
+
                     if self.pause_event.is_set():
                         self.timing_model.pause()
-                        if not running:
-                            for slot in range(1, self.slots + 1):
-                                paused = VersionTask("", "", "", 0, execution_id, slot_id=slot)
-                                self._slot(paused, TaskState.PAUSED, 0, "Pausado em boundary seguro")
+                        if not running and acquisition is None:
                             self._report_control("paused", coordinator.final or initial)
                             while self.pause_event.is_set() and not self.stop_event.wait(.05):
                                 pass
                             self.timing_model.resume()
                             self._report_control("resumed", coordinator.final or initial)
                         else:
-                            self._collect_done(running, staging, block=True)
-                            self._promote(coordinator, tasks, len(pairs))
+                            self.stop_event.wait(.01)
                         continue
 
-                    # The bounded window contains the active slots plus a full
-                    # 2x look-ahead buffer.  Refill runs on every scheduler turn,
-                    # rather than waiting for the buffer to drain.
-                    limit = min(len(tasks), coordinator.committed + self.scheduler_window)
-                    window_versions: list[VersionInfo] = []
-                    seen_window: set[str] = set()
-                    for previous, current in pairs[coordinator.committed:limit]:
-                        for candidate in (previous, current):
-                            if candidate.id not in acquired and candidate.id not in seen_window:
-                                seen_window.add(candidate.id)
-                                window_versions.append(candidate)
-                    self._refill_prefetch(spreadsheet, window_versions)
-                    reserved = {item[0].sequence for item in running.values()}
-                    available_slots = [slot for slot in range(1, self.slots + 1)
-                                       if slot not in {item[0].slot_id for item in running.values()}]
-                    for task in tasks[coordinator.committed:limit]:
-                        if not available_slots or task.sequence in reserved or task.state in (TaskState.STAGED, TaskState.COMPLETED):
-                            continue
-                        slot = available_slots.pop(0)
-                        while self._memory_pressure() and not self.stop_event.is_set():
-                            logger.warning("MEMORY_BACKPRESSURE slots=%d action=hold_reservations", self.slots)
-                            self._metrics(started, coordinator, staging, len(running))
-                            if running:
-                                break
-                            time.sleep(.25)
-                        if self._memory_pressure() and running:
-                            break
-                        task.slot_id = slot
-                        wait = self._slot_wait_started.pop(slot, None)
-                        if wait is not None:
-                            wait_seconds = max(0.0, time.monotonic() - wait[0])
-                            self._slot_wait_durations.append(wait_seconds)
-                            logger.info(
-                                "SLOT_WAIT_END slot_id=%d previous_sequence=%d "
-                                "next_sequence=%d wait_reason=WAIT_SCHEDULER wait_seconds=%.3f",
-                                slot, wait[1], task.sequence, wait_seconds,
+                    # Queue one pair at a time on the sole WebDriver owner.  No worker
+                    # slot is reserved until this future publishes local READY files.
+                    if acquisition is None and next_acquisition < len(tasks):
+                        candidate_task = tasks[next_acquisition]
+                        if candidate_task.state is TaskState.WAITING:
+                            candidate_task.state = TaskState.WAITING_DOWNLOAD
+                            lifecycles[candidate_task.sequence] = TaskLifecycle(time.perf_counter())
+                            window_end = min(len(pairs), next_acquisition + self.scheduler_window)
+                            candidates: list[VersionInfo] = []
+                            seen: set[str] = set()
+                            for previous, current in pairs[next_acquisition:window_end]:
+                                for version in (previous, current):
+                                    if version.id not in acquired and version.id not in seen:
+                                        seen.add(version.id)
+                                        candidates.append(version)
+                            acquisition_task = candidate_task
+                            acquisition = downloader.submit(
+                                self._prepare_pair, spreadsheet, pairs[next_acquisition],
+                                candidate_task, acquired, candidates,
                             )
+                            next_acquisition += 1
+
+                    available_slots = [
+                        slot for slot in range(1, self.slots + 1)
+                        if slot not in {item[0].slot_id for item in running.values()}
+                    ]
+                    while ready and available_slots and not self._memory_pressure():
+                        task, prepared = ready.pop(0)
+                        slot = available_slots.pop(0)
+                        task.slot_id = slot
                         task.reservation_token = uuid4().hex
-                        pair = pairs[task.sequence - 1]
-                        task_started = time.perf_counter()
-                        self._task_stages[task.sequence] = ()
-                        self._slot(task, TaskState.RESERVED, 2, "Reserva exclusiva", task_started)
-                        for version in pair:
-                            if version.id not in acquired:
-                                download_started = time.perf_counter()
-                                self._slot(task, TaskState.DOWNLOAD, 15, "Download pelo ator WebDriver",
-                                           task_started, TimedStage.DOWNLOAD_TRANSFER, download_started)
-                                acquired[version.id], download_seconds, was_prefetched = self._acquire(
-                                    spreadsheet, version, slot
-                                )
-                                # Downloader serial: outros slots livres ficaram sem arquivo nesse intervalo.
-                                idle_slots = max(0, self.slots - len(running) - 1)
-                                if idle_slots and download_seconds > 0:
-                                    self._worker_starvation_count += 1
-                                self._download_starvation_time += download_seconds * idle_slots
-                                self.timing_model.observe(TimedStage.DOWNLOAD_TRANSFER, download_seconds, slot)
-                                self._task_stages[task.sequence] = (*self._task_stages[task.sequence], TimedStage.DOWNLOAD_TRANSFER)
-                                sha_started = time.perf_counter()
-                                self._slot(task, TaskState.SHA, 35, "Validando SHA-256", task_started,
-                                           TimedStage.SHA, sha_started)
-                                digest = sha256_file(acquired[version.id])
-                                sha_seconds = time.perf_counter() - sha_started
-                                self.timing_model.observe(TimedStage.SHA, sha_seconds, slot)
-                                self._task_stages[task.sequence] = (*self._task_stages[task.sequence], TimedStage.SHA)
-                                verify = getattr(self.source, "verify_download_digest", None)
-                                if callable(verify):
-                                    verify(acquired[version.id], digest)
-                                self.telemetry.append({
-                                    "slot_id": slot, "task_id": task.reservation_token,
-                                    "technical_version_id": version.id,
-                                    "sequence": task.sequence, "stage": "DOWNLOAD",
-                                    "download_transfer": download_seconds, "sha": sha_seconds,
-                                    "download_mode": "prefetch" if was_prefetched else "normal",
-                                    # Acquisition cost remains end-to-end even when
-                                    # Edge prepared the blob in advance; perceived
-                                    # slot starvation is only the residual fetch wait.
-                                    "slot_download_wait": (
-                                        self._acquisitions[version.id].residual_wait
-                                        if was_prefetched else download_seconds
-                                    ),
-                                    "worker_pid": os.getpid(),
-                                    "worker_thread_id": threading.get_ident(),
-                                    "coordinator_pid": os.getpid(),
-                                })
-                        current_hash = sha256_file(acquired[pair[1].id])
                         comparison = ComparisonTask(
-                            task.sequence, pair[0], pair[1], str(acquired[pair[0].id]),
-                            str(acquired[pair[1].id]), current_hash, task.reservation_token,
+                            prepared.sequence, prepared.previous, prepared.current,
+                            prepared.previous_path, prepared.current_path,
+                            prepared.current_hash, task.reservation_token,
                         )
+                        task_started = time.perf_counter()
+                        lifecycle = lifecycles[task.sequence]
+                        lifecycle.worker_started_at = task_started
+                        self._task_stages[task.sequence] = ()
+                        self._slot(task, TaskState.RESERVED, 2, "Arquivo local pronto", task_started)
                         stage_started = time.perf_counter()
-                        self._slot(task, TaskState.PARSE, 50, "Leitura XLSX independente", task_started,
-                                   TimedStage.READ_XLSX, stage_started)
+                        self._slot(task, TaskState.PARSE, 50, "Leitura XLSX independente",
+                                   task_started, TimedStage.READ_XLSX, stage_started)
                         future = executor.submit(_compare_pair, comparison)
                         running[future] = (task, comparison, task_started, stage_started)
 
-                    self._collect_done(running, staging, block=not any(f.done() for f in running))
-                    self._promote(coordinator, tasks, len(pairs))
                     self._metrics(started, coordinator, staging, len(running))
+                    if running or acquisition is not None or ready:
+                        self.stop_event.wait(.01)
+                    elif coordinator.committed < len(pairs):
+                        raise RuntimeError("pipeline sem trabalho antes do checkpoint final")
 
             if self.stop_event.is_set():
                 self.timing_model.stop()
@@ -898,7 +935,8 @@ class ParallelAuditService(AuditService):
                 except Exception:
                     logger.warning("Falha ao liberar download %s", path, exc_info=True)
 
-    def _collect_done(self, running, staging: StagingStore, *, block: bool) -> None:
+    def _collect_done(self, running, staging: StagingStore, *, block: bool,
+                      lifecycles: dict[int, TaskLifecycle] | None = None) -> None:
         if block and running:
             while not any(future.done() for future in running):
                 for task, _comparison, task_started, stage_started in running.values():
@@ -909,6 +947,10 @@ class ParallelAuditService(AuditService):
             task, comparison, started, _stage_started = running.pop(future)
             try:
                 changes, metrics = future.result()
+                worker_finished_at = time.perf_counter()
+                lifecycle = lifecycles.get(task.sequence) if lifecycles else None
+                if lifecycle is not None:
+                    lifecycle.worker_finished_at = worker_finished_at
                 compare_started = time.perf_counter() - float(metrics["compare"])
                 self._task_stages[task.sequence] = tuple(dict.fromkeys((
                     *self._task_stages.get(task.sequence, ()), TimedStage.READ_XLSX,
@@ -922,7 +964,13 @@ class ParallelAuditService(AuditService):
                 self._slot(task, TaskState.STAGED, 0, "Preparando staging", started,
                            TimedStage.STAGING, staging_started)
                 staging.put(comparison, changes, metrics)
-                metrics.update({"staging": time.perf_counter() - staging_started, "queue_wait": 0.0})
+                staged_at = time.perf_counter()
+                if lifecycle is not None:
+                    lifecycle.staged_at = staged_at
+                metrics.update({
+                    "staging": staged_at - staging_started,
+                    "queue_wait": max(0.0, staging_started - worker_finished_at),
+                })
                 self.timing_model.observe(TimedStage.READ_XLSX, metrics["read_xlsx"], task.slot_id)
                 self.timing_model.observe(TimedStage.COMPARE, metrics["compare"], task.slot_id)
                 self.timing_model.observe(TimedStage.STAGING, metrics["staging"], task.slot_id)
@@ -952,6 +1000,20 @@ class ParallelAuditService(AuditService):
                     "coordinator_pid": os.getpid(),
                     "worker_task_duration": worker_duration,
                     "pipeline_latency": pipeline_latency,
+                    "task_reserved_at": lifecycle.reserved_at if lifecycle else started,
+                    "download_ready_at": lifecycle.download_ready_at if lifecycle else started,
+                    "worker_started_at": lifecycle.worker_started_at if lifecycle else started,
+                    "worker_finished_at": worker_finished_at,
+                    "staged_at": staged_at,
+                    "reserve_to_download": (
+                        (lifecycle.download_ready_at or started) - lifecycle.reserved_at
+                        if lifecycle else 0.0
+                    ),
+                    "download_to_worker": (
+                        (lifecycle.worker_started_at or started) - (lifecycle.download_ready_at or started)
+                        if lifecycle else 0.0
+                    ),
+                    "worker_to_staging": staged_at - worker_finished_at,
                     **metrics,
                 })
                 self._slot(task, TaskState.STAGED, 0,
@@ -981,9 +1043,23 @@ class ParallelAuditService(AuditService):
                     ) from error
 
     def _promote(self, coordinator: OrderedCommitCoordinator,
-                 tasks: list[VersionTask], total: int) -> None:
+                 tasks: list[VersionTask], total: int,
+                 lifecycles: dict[int, TaskLifecycle] | None = None) -> None:
         for sequence in coordinator.promote_available():
             task = tasks[sequence - 1]
+            promoted_at = time.perf_counter()
+            lifecycle = lifecycles.get(sequence) if lifecycles else None
+            if lifecycle is not None:
+                lifecycle.promoted_at = promoted_at
+                staged_at = lifecycle.staged_at or promoted_at
+                for item in reversed(self.telemetry):
+                    if item.get("stage") == "STAGED" and item.get("sequence") == sequence:
+                        item["promoted_at"] = promoted_at
+                        item["staging_to_promotion"] = max(0.0, promoted_at - staged_at)
+                        item["pipeline_latency"] = max(
+                            0.0, promoted_at - (lifecycle.worker_started_at or promoted_at)
+                        )
+                        break
             self._slot(task, TaskState.COMPLETED, 100, "Checkpoint confirmado")
             logger.info(
                 "SLOT_RELEASED slot_id=%d previous_sequence=%d next_sequence=%s",
@@ -1005,6 +1081,12 @@ class ParallelAuditService(AuditService):
                  staging: StagingStore, active: int) -> None:
         if not self.metrics_callback:
             return
+        sampled_at = time.monotonic()
+        # Metrics are observational.  Expensive process/RSS inspection is bounded
+        # to five snapshots/s regardless of scheduler speed.
+        if sampled_at - self._last_metrics_emit < .2:
+            return
+        self._last_metrics_emit = sampled_at
         rss = self._process_rss(os.getpid())
         elapsed = time.perf_counter() - started
         recent_window = min(60.0, elapsed)
@@ -1034,21 +1116,24 @@ class ParallelAuditService(AuditService):
             state in {TaskState.WAITING, TaskState.RESERVED, TaskState.COMPLETED}
             for state in self._slot_states.values()
         )
-        logger.info(
-            "TELEMETRIA_MEMORIA slots=%d rss_coordinator=%d rss_workers_total=%d "
-            "rss_edge=%d rss_total=%d staged_count=%d window_occupancy=%d "
-            "prefetch_bytes=%d prefetch_memory_files=%d prefetch_temporary_files=%d",
-            self.slots, rss, worker_rss, edge_rss, rss + worker_rss + edge_rss,
-            staging.count(), staging.count() + active,
-            prefetch_metrics["bytes"], prefetch_metrics["memory_files"],
-            prefetch_metrics["temporary_files"],
-        )
+        staged_count = staging.count()
+        if sampled_at - self._last_metrics_log >= 1.0:
+            self._last_metrics_log = sampled_at
+            logger.info(
+                "TELEMETRIA_MEMORIA slots=%d rss_coordinator=%d rss_workers_total=%d "
+                "rss_edge=%d rss_total=%d staged_count=%d window_occupancy=%d "
+                "prefetch_bytes=%d prefetch_memory_files=%d prefetch_temporary_files=%d",
+                self.slots, rss, worker_rss, edge_rss, rss + worker_rss + edge_rss,
+                staged_count, staged_count + active,
+                prefetch_metrics["bytes"], prefetch_metrics["memory_files"],
+                prefetch_metrics["temporary_files"],
+            )
         self.metrics_callback(ParallelMetrics(
-            elapsed, coordinator.committed, float(recent), staging.count(), active,
+            elapsed, coordinator.committed, float(recent), staged_count, active,
             coordinator.committed, self.scheduler_window, rss, worker_rss, edge_rss,
             self.timing_model.global_eta(max(len(coordinator.pairs) - coordinator.committed, 0),
                                          max(active, self.slots)),
-            staging.count() + active, workers_by_pid, rss + worker_rss + edge_rss,
+            staged_count + active, workers_by_pid, rss + worker_rss + edge_rss,
             utilization, self._download_starvation_time, cpu_coordinator, cpu_workers,
             (self.timing_model.task_average()
              if self.timing_model.sample_count(TimedStage.TOTAL_TASK) else None),
