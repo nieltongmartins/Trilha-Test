@@ -11,7 +11,7 @@ import pytest
 from app.database import Database
 from app.models import AuditExecutionStatus
 from app.parallel_audit import (PREFETCH_TARGET_BY_SLOTS, ParallelAuditService,
-                                StagingStore, TaskState)
+                                StagingStore, TaskState, scheduler_window_for_slots)
 from app.sources.base import SpreadsheetInfo, VersionInfo
 from app.sources.local import LocalSource
 
@@ -80,9 +80,11 @@ def test_worker_count_is_limited_to_one_through_eight(tmp_path: Path, slots: int
 
 def test_prefetch_target_is_bounded_benchmark_configuration():
     assert PREFETCH_TARGET_BY_SLOTS == {
-        1: 2, 2: 2, 3: 3, 4: 3, 5: 4, 6: 4, 7: 4, 8: 4,
+        1: 2, 2: 4, 3: 6, 4: 8, 5: 10, 6: 12, 7: 14, 8: 16,
     }
-    assert max(PREFETCH_TARGET_BY_SLOTS.values()) == 4
+    assert [scheduler_window_for_slots(slots) for slots in range(1, 9)] == [
+        3, 6, 9, 12, 15, 18, 21, 24,
+    ]
 
 
 def test_parallel_scheduler_prefetches_once_by_technical_id(tmp_path: Path):
@@ -110,9 +112,26 @@ def test_parallel_scheduler_prefetches_once_by_technical_id(tmp_path: Path):
         )
         result = service.audit(SHEET)
     assert result.status is AuditExecutionStatus.COMPLETED
-    assert fake.limit == 3
+    assert fake.limit == 6
     assert len(fake.planned) == len(set(fake.planned))
     assert service._prefetch_hits > 0
+
+
+def test_slot_phase_events_use_timing_model_instead_of_fixed_percentages(tmp_path: Path):
+    events = []
+    with Database(tmp_path / "phase-progress.db") as database:
+        database.initialize()
+        result = ParallelAuditService(
+            database, source(history(tmp_path, 3)), slots=1, backend="thread",
+            slot_callback=events.append, staging_directory=tmp_path / "stage-progress",
+        ).audit(SHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    compare = [event for event in events if event.state is TaskState.COMPARE]
+    staging = [event for event in events if event.state is TaskState.STAGED]
+    assert compare and all(event.timed_stage is not None for event in compare)
+    assert staging and all(event.percent <= 99 for event in staging)
+    assert all(event.percent < 100 for event in events if event.state is not TaskState.COMPLETED)
 
 
 def test_out_of_order_staging_never_advances_checkpoint(monkeypatch, tmp_path: Path):

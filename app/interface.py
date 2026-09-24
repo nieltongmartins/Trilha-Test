@@ -1164,7 +1164,7 @@ class AuditApplication(ttk.Frame):
             )
             # Mudanças na média compartilhada só alteram a velocidade futura.
             current = float(self.slot_progress_values[index].get())
-            self.slot_progress_values[index].set(max(current, min(99.9, estimate.progress)))
+            self.slot_progress_values[index].set(max(current, min(99.0, estimate.progress)))
             if event.task_started_active is not None:
                 elapsed = max(0.0, now - event.task_started_active)
                 self.slot_timing_texts[index].set(

@@ -58,7 +58,12 @@ class AcquisitionState(StrEnum):
     FAILED = "FAILED"
 
 
-PREFETCH_TARGET_BY_SLOTS = {1: 2, 2: 2, 3: 3, 4: 3, 5: 4, 6: 4, 7: 4, 8: 4}
+PREFETCH_TARGET_BY_SLOTS = {slots: 2 * slots for slots in range(MIN_WORKERS, MAX_WORKERS + 1)}
+
+
+def scheduler_window_for_slots(slots: int) -> int:
+    """Reserve room for active comparisons and their complete look-ahead buffer."""
+    return slots + PREFETCH_TARGET_BY_SLOTS[slots]
 
 
 @dataclass(slots=True)
@@ -150,6 +155,16 @@ class ParallelMetrics:
     prefetch_pending: int = 0
     prefetch_hit_rate: float = 0.0
     worker_starvation_count: int = 0
+    configured_workers: int = 0
+    distinct_worker_count: int = 0
+    worker_busy_time: float = 0.0
+    worker_idle_time: float = 0.0
+    worker_utilization: float = 0.0
+    slot_busy_time: float = 0.0
+    slot_idle_time: float = 0.0
+    prefetch_bytes: int = 0
+    prefetch_memory_files: int = 0
+    prefetch_temporary_files: int = 0
 
 
 def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, float]]:
@@ -299,9 +314,11 @@ class ParallelAuditService(AuditService):
         self._task_stages: dict[int, tuple[TimedStage, ...]] = {}
         self._last_slot_log: dict[int, tuple[float, TaskState]] = {}
         self._worker_pids: set[int] = set()
+        self._worker_busy: dict[int, float] = {}
         self._slot_busy: dict[int, float] = {slot: 0.0 for slot in range(1, slots + 1)}
         self._download_starvation_time = 0.0
         self.prefetch_target = PREFETCH_TARGET_BY_SLOTS[slots]
+        self.scheduler_window = scheduler_window_for_slots(slots)
         self._acquisitions: dict[str, AcquisitionRecord] = {}
         self._prefetch_hits = 0
         self._prefetch_misses = 0
@@ -367,6 +384,12 @@ class ParallelAuditService(AuditService):
         """
         prefetch = getattr(self.source, "prefetch_version", None)
         if not callable(prefetch):
+            return
+        if self._memory_pressure():
+            logger.warning(
+                "MEMORY_BACKPRESSURE slots=%d action=hold_prefetch buffer_occupied=%d",
+                self.slots, sum(self._prefetch_counts()),
+            )
             return
         ready, pending = self._prefetch_counts()
         for version in candidates:
@@ -453,6 +476,7 @@ class ParallelAuditService(AuditService):
         staging: StagingStore | None = None
         acquired: dict[str, Path] = {}
         started = time.perf_counter()
+        configured_workers = self.slots if self.backend != "sync" else 1
         try:
             if versions is None:
                 try:
@@ -476,8 +500,7 @@ class ParallelAuditService(AuditService):
             tasks = [VersionTask(cur.id, cur.number, prev.id, index, execution_id)
                      for index, (prev, cur) in enumerate(pairs, 1)]
             executor_type = ProcessPoolExecutor if self.backend == "process" else ThreadPoolExecutor
-            workers = self.slots if self.backend != "sync" else 1
-            with executor_type(max_workers=workers) as executor:
+            with executor_type(max_workers=configured_workers) as executor:
                 running: dict[Future, tuple[VersionTask, ComparisonTask, float, float]] = {}
                 while coordinator.committed < len(pairs):
                     if self.stop_event.is_set():
@@ -498,7 +521,10 @@ class ParallelAuditService(AuditService):
                             self._promote(coordinator, tasks, len(pairs))
                         continue
 
-                    limit = min(len(tasks), coordinator.committed + 2 * self.slots)
+                    # The bounded window contains the active slots plus a full
+                    # 2x look-ahead buffer.  Refill runs on every scheduler turn,
+                    # rather than waiting for the buffer to drain.
+                    limit = min(len(tasks), coordinator.committed + self.scheduler_window)
                     window_versions: list[VersionInfo] = []
                     seen_window: set[str] = set()
                     for previous, current in pairs[coordinator.committed:limit]:
@@ -559,7 +585,13 @@ class ParallelAuditService(AuditService):
                                     "sequence": task.sequence, "stage": "DOWNLOAD",
                                     "download_transfer": download_seconds, "sha": sha_seconds,
                                     "download_mode": "prefetch" if was_prefetched else "normal",
-                                    "slot_download_wait": download_seconds,
+                                    # Acquisition cost remains end-to-end even when
+                                    # Edge prepared the blob in advance; perceived
+                                    # slot starvation is only the residual fetch wait.
+                                    "slot_download_wait": (
+                                        self._acquisitions[version.id].residual_wait
+                                        if was_prefetched else download_seconds
+                                    ),
                                     "worker_pid": os.getpid(),
                                     "worker_thread_id": threading.get_ident(),
                                     "coordinator_pid": os.getpid(),
@@ -611,6 +643,20 @@ class ParallelAuditService(AuditService):
                 statistics.fmean(self._download_prefetch) if self._download_prefetch else 0.0,
                 self._worker_starvation_count, self._download_starvation_time,
             )
+            elapsed = max(time.perf_counter() - started, .001)
+            worker_busy = sum(self._worker_busy.values())
+            worker_capacity = elapsed * configured_workers
+            slot_busy = sum(self._slot_busy.values())
+            logger.info(
+                "WORKER_POOL_SUMMARY slots_selected=%d configured_workers=%d "
+                "effective_worker_pids=%s distinct_worker_count=%d "
+                "worker_busy_time=%.3f worker_idle_time=%.3f worker_utilization=%.4f "
+                "slot_busy_time=%.3f slot_idle_time=%.3f scheduler_window=%d",
+                self.slots, configured_workers, sorted(self._worker_pids), len(self._worker_pids),
+                worker_busy, max(0.0, worker_capacity - worker_busy),
+                worker_busy / worker_capacity, slot_busy,
+                max(0.0, elapsed * self.slots - slot_busy), self.scheduler_window,
+            )
             # Freeze only the execution clock.  Samples and recent official
             # commits remain available if this spreadsheet is continued.
             self.timing_model.stop()
@@ -633,8 +679,18 @@ class ParallelAuditService(AuditService):
             task, comparison, started, _stage_started = running.pop(future)
             try:
                 changes, metrics = future.result()
-                self._slot(task, TaskState.COMPARE, 90, "Comparando snapshots", started)
+                compare_started = time.perf_counter() - float(metrics["compare"])
+                self._task_stages[task.sequence] = tuple(dict.fromkeys((
+                    *self._task_stages.get(task.sequence, ()), TimedStage.READ_XLSX,
+                )))
+                self._slot(task, TaskState.COMPARE, 0, "Comparando snapshots", started,
+                           TimedStage.COMPARE, compare_started)
                 staging_started = time.perf_counter()
+                self._task_stages[task.sequence] = tuple(dict.fromkeys((
+                    *self._task_stages[task.sequence], TimedStage.COMPARE,
+                )))
+                self._slot(task, TaskState.STAGED, 0, "Preparando staging", started,
+                           TimedStage.STAGING, staging_started)
                 staging.put(comparison, changes, metrics)
                 metrics.update({"staging": time.perf_counter() - staging_started, "queue_wait": 0.0})
                 self.timing_model.observe(TimedStage.READ_XLSX, metrics["read_xlsx"], task.slot_id)
@@ -645,6 +701,10 @@ class ParallelAuditService(AuditService):
                     time.perf_counter() - started
                 )
                 self._worker_pids.add(int(metrics["worker_pid"]))
+                worker_pid = int(metrics["worker_pid"])
+                self._worker_busy[worker_pid] = self._worker_busy.get(worker_pid, 0.0) + float(
+                    metrics["duration"]
+                )
                 self.telemetry.append({
                     "slot_id": task.slot_id or 0,
                     "task_id": task.reservation_token or "",
@@ -653,7 +713,12 @@ class ParallelAuditService(AuditService):
                     "coordinator_pid": os.getpid(),
                     **metrics,
                 })
-                self._slot(task, TaskState.STAGED, 99, "Staging concluído — aguardando promoção", started)
+                self._slot(task, TaskState.STAGED, 0,
+                           "Staging concluído — aguardando promoção", started,
+                           TimedStage.STAGING, staging_started)
+                self._task_stages[task.sequence] = tuple(dict.fromkeys((
+                    *self._task_stages[task.sequence], TimedStage.STAGING,
+                )))
                 logger.info(
                     "TELEMETRIA_SLOT slot_id=%d task_id=%s technical_version_id=%s sequence=%d "
                     "stage=STAGED duration=%.3f read_xlsx=%.3f compare=%.3f worker_pid=%d "
@@ -703,15 +768,22 @@ class ParallelAuditService(AuditService):
             (slot, min(100.0, busy / max(elapsed, .001) * 100.0))
             for slot, busy in sorted(self._slot_busy.items())
         )
+        prefetch_metrics = self._prefetch_resource_metrics()
+        worker_busy = sum(self._worker_busy.values())
+        worker_capacity = elapsed * (self.slots if self.backend != "sync" else 1)
+        slot_busy = sum(self._slot_busy.values())
         logger.info(
             "TELEMETRIA_MEMORIA slots=%d rss_coordinator=%d rss_workers_total=%d "
-            "rss_edge=%d rss_total=%d staged_count=%d window_occupancy=%d",
+            "rss_edge=%d rss_total=%d staged_count=%d window_occupancy=%d "
+            "prefetch_bytes=%d prefetch_memory_files=%d prefetch_temporary_files=%d",
             self.slots, rss, worker_rss, edge_rss, rss + worker_rss + edge_rss,
             staging.count(), staging.count() + active,
+            prefetch_metrics["bytes"], prefetch_metrics["memory_files"],
+            prefetch_metrics["temporary_files"],
         )
         self.metrics_callback(ParallelMetrics(
             elapsed, coordinator.committed, float(recent), staging.count(), active,
-            coordinator.committed, 2 * self.slots, rss, worker_rss, edge_rss,
+            coordinator.committed, self.scheduler_window, rss, worker_rss, edge_rss,
             self.timing_model.global_eta(max(len(coordinator.pairs) - coordinator.committed, 0),
                                          max(active, self.slots)),
             staging.count() + active, workers_by_pid, rss + worker_rss + edge_rss,
@@ -723,7 +795,24 @@ class ParallelAuditService(AuditService):
             (self._prefetch_hits / (self._prefetch_hits + self._prefetch_misses)
              if self._prefetch_hits + self._prefetch_misses else 0.0),
             self._worker_starvation_count,
+            self.slots if self.backend != "sync" else 1, len(self._worker_pids),
+            worker_busy, max(0.0, worker_capacity - worker_busy),
+            worker_busy / max(worker_capacity, .001), slot_busy,
+            max(0.0, elapsed * self.slots - slot_busy),
+            prefetch_metrics["bytes"], prefetch_metrics["memory_files"],
+            prefetch_metrics["temporary_files"],
         ))
+
+    def _prefetch_resource_metrics(self) -> dict[str, int]:
+        report = getattr(self.source, "prefetch_resource_metrics", None)
+        if callable(report):
+            values = report()
+            return {
+                "bytes": int(values.get("bytes", 0)),
+                "memory_files": int(values.get("memory_files", 0)),
+                "temporary_files": int(values.get("temporary_files", 0)),
+            }
+        return {"bytes": 0, "memory_files": 0, "temporary_files": 0}
 
     @staticmethod
     def _process_rss(pid: int) -> int:

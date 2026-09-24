@@ -28,8 +28,11 @@ class TimedStage(StrEnum):
 
 
 OPERATIONAL_STAGES = (
-    TimedStage.DOWNLOAD_FETCH, TimedStage.DOWNLOAD_TRANSFER, TimedStage.SHA,
-    TimedStage.READ_XLSX, TimedStage.COMPARE, TimedStage.STAGING,
+    # DOWNLOAD_TRANSFER is the slot-visible end-to-end acquisition.  The
+    # lower-level browser fetch remains separately observable telemetry, but
+    # must not create a second visual phase that the scheduler cannot close.
+    TimedStage.DOWNLOAD_TRANSFER, TimedStage.SHA, TimedStage.READ_XLSX,
+    TimedStage.COMPARE, TimedStage.STAGING,
 )
 
 # Baseline visual conservador usado somente até a primeira observação compartilhada.
@@ -179,7 +182,7 @@ class SharedExecutionTimingModel:
         # 90% da fatia no tempo esperado; cauda assintótica nunca confirma a etapa.
         fraction = .9 * ratio if ratio <= 1 else .9 + .1 * (1 - math.exp(-(ratio - 1)))
         fraction = min(fraction, .999)
-        progress = 100.0 if finished else min(99.9, 100 * (completed_weight + expected * fraction) / total)
+        progress = 100.0 if finished else min(99.0, 100 * (completed_weight + expected * fraction) / total)
         remaining_current = expected * max(0.0, 1.0 - fraction)
         try:
             index = OPERATIONAL_STAGES.index(stage)
