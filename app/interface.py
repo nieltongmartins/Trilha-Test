@@ -33,6 +33,13 @@ ConfigurationSaver = Callable[[str, tuple[str, ...]], None]
 class AuditApplication(ttk.Frame):
     """Tela operacional; todo trabalho demorado ocorre fora da thread Tk."""
 
+    @staticmethod
+    def slot_grid_position(slot_id: int) -> tuple[int, int]:
+        """Retorna linha/coluna responsivas para um slot numerado a partir de um."""
+        if not 1 <= slot_id <= 8:
+            raise ValueError("slot_id deve estar entre 1 e 8")
+        return (slot_id - 1) // 2, (slot_id - 1) % 2
+
     def __init__(
         self,
         master: tk.Misc,
@@ -187,9 +194,10 @@ class AuditApplication(ttk.Frame):
         buttons = ttk.Frame(audit_tab)
         buttons.grid(row=4, column=0, sticky="w", pady=10)
         ttk.Label(buttons, text="Processamentos simultâneos:").pack(side="left", padx=(0, 4))
-        self.worker_count = tk.IntVar(value=2)
+        # Três foi o melhor ponto no workload pesado controlado da Fase 4.
+        self.worker_count = tk.IntVar(value=3)
         self.worker_selector = ttk.Combobox(
-            buttons, textvariable=self.worker_count, values=(1, 2, 3, 4, 5),
+            buttons, textvariable=self.worker_count, values=tuple(range(1, 9)),
             state="readonly", width=3,
         )
         self.worker_selector.pack(side="left", padx=(0, 10))
@@ -230,6 +238,7 @@ class AuditApplication(ttk.Frame):
         self.slots_container = ttk.Frame(audit_tab)
         self.slots_container.grid(row=7, column=0, sticky="ew")
         self.slots_container.columnconfigure(0, weight=1)
+        self.slots_container.columnconfigure(1, weight=1)
         self.slot_frames = []
         self.slot_progress_values = []
         self.slot_stage_texts = []
@@ -258,17 +267,19 @@ class AuditApplication(ttk.Frame):
         self.slot_progress_values = []
         self.slot_stage_texts = []
         self.slot_timing_texts = []
-        count = max(1, min(5, int(self.worker_count.get())))
+        count = max(1, min(8, int(self.worker_count.get())))
         for slot_id in range(1, count + 1):
-            current = ttk.LabelFrame(self.slots_container, text=f"SLOT {slot_id} — AGUARDANDO", padding=8)
-            current.grid(row=slot_id - 1, column=0, sticky="ew", pady=(4, 0))
+            row, column = self.slot_grid_position(slot_id)
+            current = ttk.LabelFrame(self.slots_container, text=f"SLOT {slot_id} — AGUARDANDO", padding=5)
+            current.grid(row=row, column=column,
+                         sticky="nsew", padx=(0, 4) if slot_id % 2 else (4, 0), pady=(3, 0))
             current.columnconfigure(0, weight=1)
             value = tk.DoubleVar(value=0)
             ttk.Progressbar(current, variable=value, maximum=100, mode="determinate").grid(
                 row=0, column=0, sticky="ew"
             )
             stage = tk.StringVar(value="Aguardando.")
-            timing = tk.StringVar(value="ID técnico: — | Tempo da tarefa: 00:00")
+            timing = tk.StringVar(value="Decorrido 00:00 | Restante ~calculando")
             ttk.Label(current, textvariable=stage).grid(row=1, column=0, sticky="w")
             ttk.Label(current, textvariable=timing).grid(row=2, column=0, sticky="w")
             self.slot_frames.append(current)
@@ -732,7 +743,7 @@ class AuditApplication(ttk.Frame):
             lambda: ParallelAuditService(
                 self.database,
                 source,
-                slots=max(1, min(5, int(self.worker_count.get()))),
+                slots=max(1, min(8, int(self.worker_count.get()))),
                 backend="process",
                 slot_callback=report_slot,
                 metrics_callback=report_metrics,
@@ -1059,16 +1070,13 @@ class AuditApplication(ttk.Frame):
             if not 0 <= index < len(self.slot_frames):
                 continue
             self.slot_frames[index].configure(
-                text=f"SLOT {event.slot_id} — {event.state.value} — Versão {event.version or '—'}"
+                text=f"SLOT {event.slot_id} — {event.version or '—'}"
             )
             self.slot_progress_values[index].set(event.percent)
             self.slot_stage_texts[index].set(event.stage)
             self.slot_timing_texts[index].set(
-                f"ID técnico: {event.technical_version_id or '—'} | "
-                f"Decorrido: {self._format_duration(event.duration)} | Média da etapa: "
-                f"{self._format_duration(event.stage_average) if event.learned else 'Calculando...'} | "
-                f"Estimativa da tarefa: {self._format_duration(event.task_average or 0)} | "
-                f"Restante: {self._format_duration(event.estimated_remaining or 0)}"
+                f"Decorrido {self._format_duration(event.duration)} | Restante ~"
+                f"{self._format_duration(event.estimated_remaining) if event.estimated_remaining is not None else 'calculando'}"
             )
         latest = None
         while True:

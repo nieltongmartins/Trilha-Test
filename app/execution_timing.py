@@ -6,9 +6,13 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import StrEnum
 import math
+import logging
 import statistics
 import threading
 import time
+
+
+logger = logging.getLogger("auditoria_excel.timing")
 
 
 class TimedStage(StrEnum):
@@ -71,6 +75,7 @@ class SharedExecutionTimingModel:
         self._paused_at: float | None = None
         self._paused_total = 0.0
         self._stopped_at: float | None = None
+        self._last_telemetry: dict[TimedStage, float] = {}
 
     def active_now(self, now: float | None = None) -> float:
         now = time.monotonic() if now is None else now
@@ -104,6 +109,17 @@ class SharedExecutionTimingModel:
         with self._lock:
             self.raw_observations.append((stage, value, slot_id))
             self._samples[stage].append(value)
+            values = tuple(self._samples[stage])
+            now = time.monotonic()
+            should_log = stage not in self._last_telemetry or now - self._last_telemetry[stage] >= 2.0
+            if should_log:
+                self._last_telemetry[stage] = now
+        if should_log:
+            logger.info(
+                "TIMING_MODEL stage=%s samples=%d mean=%.3f median=%.3f estimate=%.3f",
+                stage.value, len(values), statistics.fmean(values), statistics.median(values),
+                self.average(stage),
+            )
 
     def samples(self, stage: TimedStage | str) -> tuple[float, ...]:
         with self._lock:
