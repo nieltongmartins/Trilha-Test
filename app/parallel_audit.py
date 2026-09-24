@@ -58,6 +58,12 @@ class AcquisitionState(StrEnum):
     FAILED = "FAILED"
 
 
+MIB = 1024 * 1024
+DEFAULT_MAX_PREFETCH_BYTES = 64 * MIB
+PREFETCH_MIN_TARGET = 2
+PREFETCH_MAX_TARGET = 16
+# Public compatibility table for UI/benchmark callers.  The scheduler no longer
+# uses it as its target; ``prefetch_base_target`` owns that decision.
 PREFETCH_TARGET_BY_SLOTS = {slots: 2 * slots for slots in range(MIN_WORKERS, MAX_WORKERS + 1)}
 
 
@@ -66,13 +72,27 @@ def scheduler_window_for_slots(slots: int) -> int:
     return slots + PREFETCH_TARGET_BY_SLOTS[slots]
 
 
+def prefetch_base_target(slots: int, avg_file_bytes: float) -> int:
+    """Return the conservative size-aware starting target."""
+    if avg_file_bytes < MIB:
+        target = min(2 * slots, PREFETCH_MAX_TARGET)
+    elif avg_file_bytes < 4 * MIB:
+        target = min(slots, 8)
+    else:
+        target = max(PREFETCH_MIN_TARGET, (slots + 1) // 2)
+    return max(PREFETCH_MIN_TARGET, min(PREFETCH_MAX_TARGET, target))
+
+
 @dataclass(slots=True)
 class AcquisitionRecord:
     version: VersionInfo
     state: AcquisitionState = AcquisitionState.NOT_REQUESTED
     planned_at: float | None = None
+    fetch_started_at: float | None = None
+    fetch_finished_at: float | None = None
     acquisition_duration: float | None = None
     residual_wait: float = 0.0
+    estimated_bytes: int = 0
 
 
 @dataclass(slots=True)
@@ -165,6 +185,13 @@ class ParallelMetrics:
     prefetch_bytes: int = 0
     prefetch_memory_files: int = 0
     prefetch_temporary_files: int = 0
+    prefetch_ready_hit_rate: float = 0.0
+    prefetch_pending_hit_rate: float = 0.0
+    prefetch_miss_rate: float = 0.0
+    ready_ratio: float = 0.0
+    pending_ratio: float = 0.0
+    prefetch_bytes_pending: int = 0
+    prefetch_bytes_ready: int = 0
 
 
 def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, float]]:
@@ -182,6 +209,13 @@ def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, flo
         "worker_pid": os.getpid(),
         "worker_thread_id": threading.get_ident(),
     }
+
+
+def _initialize_worker() -> None:
+    """Emit lifecycle evidence from each executor worker itself."""
+    pid = os.getpid()
+    logger.info("WORKER_CREATED pid=%d", pid)
+    logger.info("WORKER_READY pid=%d", pid)
 
 
 class StagingStore:
@@ -294,6 +328,7 @@ class ParallelAuditService(AuditService):
                  slot_callback: Callable[[SlotProgress], None] | None = None,
                  metrics_callback: Callable[[ParallelMetrics], None] | None = None,
                  staging_directory: str | Path | None = None, max_retries: int = 1,
+                 max_prefetch_bytes: int = DEFAULT_MAX_PREFETCH_BYTES,
                  timing_model: SharedExecutionTimingModel | None = None,
                  **kwargs) -> None:
         if not MIN_WORKERS <= slots <= MAX_WORKERS:
@@ -314,15 +349,29 @@ class ParallelAuditService(AuditService):
         self._task_stages: dict[int, tuple[TimedStage, ...]] = {}
         self._last_slot_log: dict[int, tuple[float, TaskState]] = {}
         self._worker_pids: set[int] = set()
+        self._created_worker_pids: set[int] = set()
+        self._initialized_worker_pids: set[int] = set()
+        self._completed_worker_pids: set[int] = set()
         self._worker_busy: dict[int, float] = {}
         self._slot_busy: dict[int, float] = {slot: 0.0 for slot in range(1, slots + 1)}
         self._download_starvation_time = 0.0
-        self.prefetch_target = PREFETCH_TARGET_BY_SLOTS[slots]
+        self.max_prefetch_bytes = max_prefetch_bytes
+        self._avg_file_bytes = 0.0
+        self.prefetch_target = prefetch_base_target(slots, self._avg_file_bytes)
+        self.prefetch_target_initial = self.prefetch_target
+        self.prefetch_target_min = self.prefetch_target
+        self.prefetch_target_max = self.prefetch_target
+        self._target_calibrated = False
+        self._last_target_review = time.monotonic()
+        self._target_observations = 0
+        self._pending_pressure_samples = 0
         self.scheduler_window = scheduler_window_for_slots(slots)
         self._acquisitions: dict[str, AcquisitionRecord] = {}
-        self._prefetch_hits = 0
+        self._prefetch_ready_hits = 0
+        self._prefetch_pending_hits = 0
         self._prefetch_misses = 0
-        self._prefetch_ages: list[float] = []
+        self._queue_ages: list[float] = []
+        self._active_fetch_times: list[float] = []
         self._residual_waits: list[float] = []
         self._download_normal: list[float] = []
         self._download_prefetch: list[float] = []
@@ -370,10 +419,60 @@ class ParallelAuditService(AuditService):
                 task_started_active=(self.timing_model.active_now() - duration) if started else None,
             ))
 
+    @property
+    def _prefetch_hits(self) -> int:
+        """Compatibility aggregate; telemetry always exposes qualified hits."""
+        return self._prefetch_ready_hits + self._prefetch_pending_hits
+
     def _prefetch_counts(self) -> tuple[int, int]:
         ready = sum(r.state is AcquisitionState.PREFETCH_READY for r in self._acquisitions.values())
         pending = sum(r.state is AcquisitionState.PREFETCH_PENDING for r in self._acquisitions.values())
         return ready, pending
+
+    def _buffer_bytes(self) -> tuple[int, int]:
+        pending = sum(
+            record.estimated_bytes for record in self._acquisitions.values()
+            if record.state is AcquisitionState.PREFETCH_PENDING
+        )
+        ready = sum(
+            record.estimated_bytes for record in self._acquisitions.values()
+            if record.state is AcquisitionState.PREFETCH_READY
+        )
+        return pending, ready
+
+    def _set_prefetch_target(self, target: int, reason: str) -> None:
+        target = max(PREFETCH_MIN_TARGET, min(PREFETCH_MAX_TARGET, target))
+        if target == self.prefetch_target:
+            return
+        old = self.prefetch_target
+        self.prefetch_target = target
+        self.prefetch_target_min = min(self.prefetch_target_min, target)
+        self.prefetch_target_max = max(self.prefetch_target_max, target)
+        configure = getattr(self.source, "configure_prefetch_buffer", None)
+        if callable(configure):
+            configure(target)
+        logger.info("PREFETCH_TARGET_CHANGED old=%d new=%d reason=%s", old, target, reason)
+
+    def _review_prefetch_target(self) -> None:
+        """Apply a slow controller, rather than reacting to every acquisition."""
+        self._target_observations += 1
+        now = time.monotonic()
+        if self._target_observations < 10 and now - self._last_target_review < 30.0:
+            return
+        self._target_observations = 0
+        self._last_target_review = now
+        ready, pending = self._prefetch_counts()
+        avg_queue = statistics.fmean(self._queue_ages[-20:]) if self._queue_ages else 0.0
+        avg_residual = statistics.fmean(self._residual_waits[-20:]) if self._residual_waits else 0.0
+        avg_fetch = statistics.fmean(self._active_fetch_times[-20:]) if self._active_fetch_times else 0.0
+        pressured = pending > ready * 2 or avg_queue > 30.0 or avg_residual > 10.0 or avg_fetch > 30.0
+        self._pending_pressure_samples = self._pending_pressure_samples + 1 if pressured else 0
+        if self._pending_pressure_samples >= 2:
+            self._set_prefetch_target(self.prefetch_target - 1, "pending_or_latency_pressure")
+            self._pending_pressure_samples = 0
+        elif (ready == 0 and self._worker_starvation_count and avg_fetch and avg_fetch < 5.0
+              and sum(self._buffer_bytes()) < self.max_prefetch_bytes // 2):
+            self._set_prefetch_target(self.prefetch_target + 1, "ready_empty_fast_download")
 
     def _refill_prefetch(self, spreadsheet: SpreadsheetInfo,
                          candidates: list[VersionInfo]) -> None:
@@ -392,8 +491,26 @@ class ParallelAuditService(AuditService):
             )
             return
         ready, pending = self._prefetch_counts()
+        known_sizes = [int(item.size) for item in candidates if isinstance(item.size, int) and item.size > 0]
+        if known_sizes:
+            self._avg_file_bytes = statistics.fmean(known_sizes)
+            base = prefetch_base_target(self.slots, self._avg_file_bytes)
+            if not self._target_calibrated:
+                self._set_prefetch_target(base, "average_file_size")
+                self.prefetch_target_initial = base
+                self.prefetch_target_min = base
+                self.prefetch_target_max = base
+                self._target_calibrated = True
+        pending_bytes, ready_bytes = self._buffer_bytes()
         for version in candidates:
             if ready + pending >= self.prefetch_target:
+                break
+            estimate = int(version.size or self._avg_file_bytes or 0)
+            if pending_bytes + ready_bytes + estimate > self.max_prefetch_bytes:
+                logger.info(
+                    "PREFETCH_BYTES_LIMIT bytes_total=%d candidate_bytes=%d max_prefetch_bytes=%d",
+                    pending_bytes + ready_bytes, estimate, self.max_prefetch_bytes,
+                )
                 break
             record = self._acquisitions.setdefault(version.id, AcquisitionRecord(version))
             if record.state is not AcquisitionState.NOT_REQUESTED:
@@ -408,7 +525,10 @@ class ParallelAuditService(AuditService):
                 continue
             record.state = AcquisitionState.PREFETCH_PENDING
             record.planned_at = time.perf_counter()
+            record.fetch_started_at = record.planned_at
+            record.estimated_bytes = estimate
             pending += 1
+            pending_bytes += estimate
             logger.info(
                 "PREFETCH_STARTED technical_version_id=%s VersionLabel=%s buffer_occupied=%d buffer_ready=%d buffer_pending=%d",
                 version.id, version.number, ready + pending, ready, pending,
@@ -431,16 +551,20 @@ class ParallelAuditService(AuditService):
         consume_metrics = getattr(self.source, "consume_download_metrics", None)
         source_metrics = consume_metrics(version.id) if callable(consume_metrics) else {}
         record.state = AcquisitionState.CONSUMED
+        record.fetch_started_at = float(source_metrics.get("fetch_started_at", record.fetch_started_at or started))
+        record.fetch_finished_at = float(source_metrics.get("fetch_finished_at", time.perf_counter()))
         record.acquisition_duration = duration
         residual = float(source_metrics.get("residual_wait", duration if prefetched else 0.0))
         record.residual_wait = residual
         if prefetched:
-            self._prefetch_hits += 1
             age = float(source_metrics.get(
                 "prefetch_age", time.perf_counter() - (record.planned_at or started)
             ))
             was_ready = bool(source_metrics.get("was_ready", duration < .1))
-            self._prefetch_ages.append(age)
+            queue_age = float(source_metrics.get("queue_age", age))
+            active_fetch = float(source_metrics.get("active_fetch_elapsed", duration))
+            self._queue_ages.append(queue_age)
+            self._active_fetch_times.append(active_fetch)
             self._residual_waits.append(residual)
             self._download_prefetch.append(duration)
             logger.info(
@@ -451,11 +575,17 @@ class ParallelAuditService(AuditService):
                 "PREFETCH_CONSUMIDO technical_version_id=%s VersionLabel=%s age=%.3f wait_residual=%.3f prefetch_pronto=%s",
                 version.id, version.number, age, residual, was_ready,
             )
-            logger.info("PREFETCH_HIT technical_version_id=%s VersionLabel=%s", version.id, version.number)
+            if was_ready:
+                self._prefetch_ready_hits += 1
+                logger.info("PREFETCH_READY_HIT technical_version_id=%s VersionLabel=%s", version.id, version.number)
+            else:
+                self._prefetch_pending_hits += 1
+                logger.info("PREFETCH_PENDING_HIT technical_version_id=%s VersionLabel=%s", version.id, version.number)
         else:
             self._prefetch_misses += 1
             self._download_normal.append(duration)
             logger.info("PREFETCH_MISS technical_version_id=%s VersionLabel=%s wait_residual=%.3f", version.id, version.number, duration)
+        self._review_prefetch_target()
         return path, duration, prefetched
 
     def audit(self, spreadsheet: SpreadsheetInfo,
@@ -500,7 +630,7 @@ class ParallelAuditService(AuditService):
             tasks = [VersionTask(cur.id, cur.number, prev.id, index, execution_id)
                      for index, (prev, cur) in enumerate(pairs, 1)]
             executor_type = ProcessPoolExecutor if self.backend == "process" else ThreadPoolExecutor
-            with executor_type(max_workers=configured_workers) as executor:
+            with executor_type(max_workers=configured_workers, initializer=_initialize_worker) as executor:
                 running: dict[Future, tuple[VersionTask, ComparisonTask, float, float]] = {}
                 while coordinator.committed < len(pairs):
                     if self.stop_event.is_set():
@@ -626,18 +756,27 @@ class ParallelAuditService(AuditService):
             return self._record_failure(connection, execution_id, spreadsheet_id, code,
                                         initial, 0, 0, None, None, error)
         finally:
-            total_requests = self._prefetch_hits + self._prefetch_misses
+            total_requests = self._prefetch_ready_hits + self._prefetch_pending_hits + self._prefetch_misses
             ready, pending = self._prefetch_counts()
             logger.info(
-                "PREFETCH_SUMMARY slots_selected=%d prefetch_target=%d prefetch_ready=%d "
-                "prefetch_pending=%d prefetch_occupancy=%d prefetch_hit_rate=%.4f "
-                "prefetch_miss_rate=%.4f average_prefetch_age=%.3f average_residual_wait=%.3f "
+                "PREFETCH_SUMMARY slots_selected=%d target_initial=%d target_min=%d target_max=%d "
+                "target_final=%d avg_file_bytes=%.0f max_prefetch_bytes=%d prefetch_ready=%d "
+                "prefetch_pending=%d ready_hit_rate=%.4f pending_hit_rate=%.4f miss_rate=%.4f "
+                "ready_ratio=%.4f pending_ratio=%.4f avg_queue_age=%.3f max_queue_age=%.3f "
+                "avg_active_fetch=%.3f max_active_fetch=%.3f average_residual_wait=%.3f "
                 "download_normal_mean=%.3f download_prefetch_mean=%.3f "
                 "worker_starvation_count=%d worker_starvation_time=%.3f",
-                self.slots, self.prefetch_target, ready, pending, ready + pending,
-                self._prefetch_hits / total_requests if total_requests else 0.0,
+                self.slots, self.prefetch_target_initial, self.prefetch_target_min,
+                self.prefetch_target_max, self.prefetch_target, self._avg_file_bytes,
+                self.max_prefetch_bytes, ready, pending,
+                self._prefetch_ready_hits / total_requests if total_requests else 0.0,
+                self._prefetch_pending_hits / total_requests if total_requests else 0.0,
                 self._prefetch_misses / total_requests if total_requests else 0.0,
-                statistics.fmean(self._prefetch_ages) if self._prefetch_ages else 0.0,
+                ready / max(1, ready + pending), pending / max(1, ready + pending),
+                statistics.fmean(self._queue_ages) if self._queue_ages else 0.0,
+                max(self._queue_ages, default=0.0),
+                statistics.fmean(self._active_fetch_times) if self._active_fetch_times else 0.0,
+                max(self._active_fetch_times, default=0.0),
                 statistics.fmean(self._residual_waits) if self._residual_waits else 0.0,
                 statistics.fmean(self._download_normal) if self._download_normal else 0.0,
                 statistics.fmean(self._download_prefetch) if self._download_prefetch else 0.0,
@@ -649,10 +788,13 @@ class ParallelAuditService(AuditService):
             slot_busy = sum(self._slot_busy.values())
             logger.info(
                 "WORKER_POOL_SUMMARY slots_selected=%d configured_workers=%d "
-                "effective_worker_pids=%s distinct_worker_count=%d "
+                "created_worker_pids=%s initialized_worker_pids=%s workers_that_received_tasks=%s "
+                "workers_that_completed_tasks=%s distinct_active_worker_count=%d "
                 "worker_busy_time=%.3f worker_idle_time=%.3f worker_utilization=%.4f "
                 "slot_busy_time=%.3f slot_idle_time=%.3f scheduler_window=%d",
-                self.slots, configured_workers, sorted(self._worker_pids), len(self._worker_pids),
+                self.slots, configured_workers, sorted(self._created_worker_pids),
+                sorted(self._initialized_worker_pids), sorted(self._worker_pids),
+                sorted(self._completed_worker_pids), len(self._worker_pids),
                 worker_busy, max(0.0, worker_capacity - worker_busy),
                 worker_busy / worker_capacity, slot_busy,
                 max(0.0, elapsed * self.slots - slot_busy), self.scheduler_window,
@@ -696,12 +838,21 @@ class ParallelAuditService(AuditService):
                 self.timing_model.observe(TimedStage.READ_XLSX, metrics["read_xlsx"], task.slot_id)
                 self.timing_model.observe(TimedStage.COMPARE, metrics["compare"], task.slot_id)
                 self.timing_model.observe(TimedStage.STAGING, metrics["staging"], task.slot_id)
-                self.timing_model.observe(TimedStage.TOTAL_TASK, time.perf_counter() - started, task.slot_id)
+                worker_duration = float(metrics["duration"]) + float(metrics["staging"])
+                pipeline_latency = time.perf_counter() - started
+                # TOTAL_TASK remains a compatibility series, but is deliberately
+                # worker-only so old ETA consumers are no longer polluted by acquisition wait.
+                self.timing_model.observe(TimedStage.WORKER_TASK_DURATION, worker_duration, task.slot_id)
+                self.timing_model.observe(TimedStage.PIPELINE_LATENCY, pipeline_latency, task.slot_id)
+                self.timing_model.observe(TimedStage.TOTAL_TASK, worker_duration, task.slot_id)
                 self._slot_busy[task.slot_id or 0] = self._slot_busy.get(task.slot_id or 0, 0.0) + (
                     time.perf_counter() - started
                 )
                 self._worker_pids.add(int(metrics["worker_pid"]))
                 worker_pid = int(metrics["worker_pid"])
+                self._created_worker_pids.add(worker_pid)
+                self._initialized_worker_pids.add(worker_pid)
+                self._completed_worker_pids.add(worker_pid)
                 self._worker_busy[worker_pid] = self._worker_busy.get(worker_pid, 0.0) + float(
                     metrics["duration"]
                 )
@@ -711,6 +862,8 @@ class ParallelAuditService(AuditService):
                     "technical_version_id": task.technical_version_id,
                     "sequence": task.sequence, "stage": "STAGED",
                     "coordinator_pid": os.getpid(),
+                    "worker_task_duration": worker_duration,
+                    "pipeline_latency": pipeline_latency,
                     **metrics,
                 })
                 self._slot(task, TaskState.STAGED, 0,
@@ -792,8 +945,8 @@ class ParallelAuditService(AuditService):
              if self.timing_model.sample_count(TimedStage.TOTAL_TASK) else None),
             self.timing_model.sample_count(TimedStage.TOTAL_TASK),
             self.prefetch_target, *self._prefetch_counts(),
-            (self._prefetch_hits / (self._prefetch_hits + self._prefetch_misses)
-             if self._prefetch_hits + self._prefetch_misses else 0.0),
+            ((self._prefetch_ready_hits + self._prefetch_pending_hits) /
+             max(1, self._prefetch_ready_hits + self._prefetch_pending_hits + self._prefetch_misses)),
             self._worker_starvation_count,
             self.slots if self.backend != "sync" else 1, len(self._worker_pids),
             worker_busy, max(0.0, worker_capacity - worker_busy),
@@ -801,6 +954,12 @@ class ParallelAuditService(AuditService):
             max(0.0, elapsed * self.slots - slot_busy),
             prefetch_metrics["bytes"], prefetch_metrics["memory_files"],
             prefetch_metrics["temporary_files"],
+            self._prefetch_ready_hits / max(1, self._prefetch_ready_hits + self._prefetch_pending_hits + self._prefetch_misses),
+            self._prefetch_pending_hits / max(1, self._prefetch_ready_hits + self._prefetch_pending_hits + self._prefetch_misses),
+            self._prefetch_misses / max(1, self._prefetch_ready_hits + self._prefetch_pending_hits + self._prefetch_misses),
+            self._prefetch_counts()[0] / max(1, sum(self._prefetch_counts())),
+            self._prefetch_counts()[1] / max(1, sum(self._prefetch_counts())),
+            self._buffer_bytes()[0], self._buffer_bytes()[1],
         ))
 
     def _prefetch_resource_metrics(self) -> dict[str, int]:

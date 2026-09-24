@@ -123,8 +123,10 @@ if (existing && (existing.state === 'pending' || existing.state === 'ready')) {
   const controller = new AbortController();
   const slot = {url, token, version, versionId, expectedSize, state: 'pending',
                 blob: null, size: 0, error: null, timedOut: false,
-                startedAt: performance.now(), controller};
+                plannedAt: performance.now(), startedAt: performance.now(), fetchStartedAt: null,
+                fetchFinishedAt: null, controller};
   slots[token] = slot;
+  slot.fetchStartedAt = performance.now();
   const timer = setTimeout(() => { slot.timedOut = true; controller.abort(); }, timeoutMs);
   fetch(url, {method: 'GET', credentials: 'same-origin', signal: controller.signal})
     .then(async response => {
@@ -136,6 +138,7 @@ if (existing && (existing.state === 'pending' || existing.state === 'ready')) {
         slot.blob = blob;
         slot.size = blob.size;
         slot.state = 'ready';
+        slot.fetchFinishedAt = performance.now();
       }
     })
     .catch(error => {
@@ -143,7 +146,7 @@ if (existing && (existing.state === 'pending' || existing.state === 'ready')) {
         slot.error = String(error);
         slot.state = error && error.name === 'AbortError' ? 'aborted' : 'error';
       }
-    }).finally(() => clearTimeout(timer));
+    }).finally(() => { slot.fetchFinishedAt = slot.fetchFinishedAt || performance.now(); clearTimeout(timer); });
   done({ok: true, state: 'started'});
 }
 """
@@ -167,7 +170,9 @@ function poll() {
   }
   if (slot.state === 'ready' && slot.blob instanceof Blob) {
     done({ok: true, size: slot.size, wasReady,
-          waitMs: performance.now() - waitStarted});
+          waitMs: performance.now() - waitStarted,
+          queueAgeMs: Math.max(0, slot.fetchStartedAt - slot.plannedAt),
+          activeFetchMs: Math.max(0, slot.fetchFinishedAt - slot.fetchStartedAt)});
     return;
   }
   if (slot.state === 'error' || slot.state === 'aborted') {
@@ -1161,6 +1166,7 @@ class BrowserSharePointSource:
         Até o alvo configurado fica ativo. Os ``fetches`` continuam no próprio Edge
         enquanto o Python calcula hash, lê o XLSX e compara a versão atual.
         """
+        self._validate_webdriver_context()
         url = self._version_download_url(spreadsheet, version)
         existing = next(
             (slot for slot in self._prefetch_slots.values()
@@ -1207,6 +1213,38 @@ class BrowserSharePointSource:
         )
         self._log_prefetch_buffer()
         return True
+
+    def _validate_webdriver_context(self) -> None:
+        """Fail closed before fetches when a real Selenium window disappeared.
+
+        Lightweight protocol test doubles intentionally do not expose Selenium's
+        ``session_id``/``window_handles`` attributes and are left untouched.
+        Every check and every subsequent command still runs on the owner thread.
+        """
+        browser = self._browser
+        if not hasattr(browser, "session_id") and not hasattr(browser, "window_handles"):
+            return
+        session_id = getattr(browser, "session_id", None)
+        if not session_id:
+            raise SharePointReadError("WebDriver sem sessão ativa")
+        try:
+            handles = list(getattr(browser, "window_handles"))
+            current = getattr(browser, "current_window_handle")
+        except Exception as error:
+            raise SharePointReadError("WebDriver sem janela acessível") from error
+        if not handles or current not in handles:
+            raise SharePointReadError("WebDriver sem window handle válido")
+        try:
+            ready_state = browser.execute_script("return document.readyState")
+            current_url = browser.current_url
+        except Exception as error:
+            raise SharePointReadError("WebDriver perdeu o contexto da página") from error
+        expected = urlsplit(self.site_url)
+        actual = urlsplit(current_url)
+        if ready_state not in {"interactive", "complete"}:
+            raise SharePointReadError(f"Documento WebDriver indisponível: {ready_state}")
+        if expected.netloc.casefold() != actual.netloc.casefold():
+            raise SharePointReadError("WebDriver fora da origem SharePoint esperada")
 
     def _log_prefetch_buffer(self) -> None:
         """Publica limites do buffer; bytes exatos são confirmados ao consumir."""
@@ -1320,6 +1358,9 @@ class BrowserSharePointSource:
         )
         self._notify_status("Edge não respondeu. Recuperando sessão...")
         try:
+            # In particular, NoSuchWindow must stop here: never send cleanup,
+            # refresh or fallback JavaScript into a missing browsing context.
+            self._validate_webdriver_context()
             self.cancel_prefetch()
             # Também elimina um possível slot do download normal. Falhar aqui
             # não impede o refresh, que destrói todo o contexto JavaScript.
@@ -1502,6 +1543,17 @@ class BrowserSharePointSource:
             "mode": "prefetch" if use_prefetch else "normal",
             "was_ready": bool(result.get("wasReady")) if use_prefetch else False,
             "prefetch_age": prefetch_age,
+            "queue_age": (
+                float(result.get("queueAgeMs", 0.0)) / 1000.0
+                if isinstance(result.get("queueAgeMs"), (int, float)) else 0.0
+            ),
+            "active_fetch_elapsed": (
+                float(result.get("activeFetchMs", begin_seconds * 1000.0)) / 1000.0
+                if isinstance(result.get("activeFetchMs", begin_seconds * 1000.0), (int, float))
+                else begin_seconds
+            ),
+            "fetch_started_at": float(prefetch_started_at or begin_started),
+            "fetch_finished_at": time.perf_counter(),
             "residual_wait": (
                 float(result.get("waitMs", begin_seconds * 1000.0)) / 1000.0
                 if use_prefetch and isinstance(result.get("waitMs", begin_seconds * 1000.0), (int, float))
@@ -1671,6 +1723,7 @@ class BrowserSharePointSource:
         return destination
 
     def get_version(self, spreadsheet: SpreadsheetInfo, version: VersionInfo) -> Path:
+        self._validate_webdriver_context()
         url = self._version_download_url(spreadsheet, version)
         alternate_url = self._historical_url_fallback(version)
         destination = self._workspace.filename(

@@ -11,6 +11,7 @@ import pytest
 from app.database import Database
 from app.models import AuditExecutionStatus
 from app.parallel_audit import (PREFETCH_TARGET_BY_SLOTS, ParallelAuditService,
+                                prefetch_base_target,
                                 StagingStore, TaskState, scheduler_window_for_slots)
 from app.sources.base import SpreadsheetInfo, VersionInfo
 from app.sources.local import LocalSource
@@ -85,6 +86,15 @@ def test_prefetch_target_is_bounded_benchmark_configuration():
     assert [scheduler_window_for_slots(slots) for slots in range(1, 9)] == [
         3, 6, 9, 12, 15, 18, 21, 24,
     ]
+
+
+@pytest.mark.parametrize(
+    ("slots", "average_bytes", "expected"),
+    [(8, 512 * 1024, 16), (8, 2 * 1024**2, 8), (8, 8 * 1024**2, 4),
+     (1, 8 * 1024**2, 2)],
+)
+def test_prefetch_base_target_adapts_to_file_size(slots, average_bytes, expected):
+    assert prefetch_base_target(slots, average_bytes) == expected
 
 
 def test_parallel_scheduler_prefetches_once_by_technical_id(tmp_path: Path):
