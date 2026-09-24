@@ -5,6 +5,7 @@ from functools import lru_cache
 import re
 
 from app.excel.reader import CellValue, RowSheetSnapshot, Snapshot
+from app.excel.formula_values import normalize_formula_value
 from app.models import ChangeType
 
 
@@ -52,6 +53,8 @@ def _has_content(cells: dict[str, CellValue], address: str) -> bool:
 
 
 def _values_equal(previous: CellValue, current: CellValue) -> bool:
+    previous = normalize_formula_value(previous)
+    current = normalize_formula_value(current)
     # Em Python, False == 0 e True == 1. No Excel são tipos distintos.
     if isinstance(previous, bool) or isinstance(current, bool):
         return type(previous) is type(current) and previous == current
@@ -66,6 +69,7 @@ def _compare_cells(
     """Compara uma unidade já limitada (aba comum ou row alterada)."""
     changes: list[CellChange] = []
     for address, previous_value in previous_cells.items():
+        previous_value = normalize_formula_value(previous_value)
         existed = previous_value is not None
         exists = _has_content(current_cells, address)
         if existed and not exists:
@@ -73,12 +77,13 @@ def _compare_cells(
             continue
         if not existed or not exists:
             continue
-        new_value = current_cells[address]
+        new_value = normalize_formula_value(current_cells[address])
         if not _values_equal(previous_value, new_value):
             changes.append(
                 CellChange(sheet, address, ChangeType.MOD, previous_value, new_value)
             )
     for address, new_value in current_cells.items():
+        new_value = normalize_formula_value(new_value)
         if new_value is not None and not _has_content(previous_cells, address):
             changes.append(CellChange(sheet, address, ChangeType.ADD, None, new_value))
     return changes
