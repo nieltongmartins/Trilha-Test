@@ -42,6 +42,13 @@ class VersionSource(Protocol):
 
     def list_versions(self, spreadsheet: SpreadsheetInfo) -> Sequence[VersionInfo]: ...
 
+    def get_current_version(self, spreadsheet: SpreadsheetInfo) -> VersionInfo: ...
+
+    def list_version_delta(
+        self, spreadsheet: SpreadsheetInfo, anchor_id: str, anchor_label: str,
+        progress_callback=None,
+    ) -> Sequence[VersionInfo]: ...
+
     def get_version(
         self, spreadsheet: SpreadsheetInfo, version: VersionInfo
     ) -> Path: ...

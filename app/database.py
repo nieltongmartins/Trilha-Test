@@ -114,16 +114,31 @@ CREATE TABLE IF NOT EXISTS erro_processamento (
 
 -- Catálogo de descoberta; independente do checkpoint de auditoria e sem XLSX.
 CREATE TABLE IF NOT EXISTS version_catalog (
+    id INTEGER PRIMARY KEY,
     workbook_identity TEXT NOT NULL,
     technical_version_id TEXT NOT NULL,
     version_label TEXT NOT NULL,
-    created_modified TEXT,
+    created_at_sharepoint TEXT,
+    is_current_snapshot INTEGER NOT NULL DEFAULT 0 CHECK (is_current_snapshot IN (0, 1)),
     discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (workbook_identity, technical_version_id)
+    CONSTRAINT uq_version_catalog_identity UNIQUE (workbook_identity, technical_version_id)
 );
 CREATE INDEX IF NOT EXISTS idx_version_catalog_watermark
     ON version_catalog (workbook_identity, technical_version_id);
+
+CREATE TABLE IF NOT EXISTS version_catalog_state (
+    workbook_identity TEXT PRIMARY KEY,
+    last_historical_id TEXT,
+    last_historical_label TEXT,
+    last_known_current_id TEXT NOT NULL,
+    last_known_current_label TEXT NOT NULL,
+    catalog_count INTEGER NOT NULL CHECK (catalog_count >= 1),
+    last_sync_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    catalog_status TEXT NOT NULL CHECK (
+        catalog_status IN ('VALID', 'NEEDS_RECONCILIATION', 'INVALID')
+    )
+);
 
 CREATE INDEX IF NOT EXISTS idx_versao_planilha
     ON versao_processada (planilha_id, data_processamento);
@@ -138,7 +153,7 @@ CREATE INDEX IF NOT EXISTS idx_erro_execucao
 # Colunas acrescentadas ao modelo depois da criação dos primeiros bancos F1.
 # CREATE TABLE IF NOT EXISTS não evolui uma tabela que já existe, portanto cada
 # acréscimo precisa permanecer registrado como uma migração explícita.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 VERSION_PROCESSED_MIGRATIONS = {
     "autor_email": "TEXT",
     "autor_login": "TEXT",
@@ -196,6 +211,33 @@ class Database:
                 connection.execute(
                     f'ALTER TABLE versao_processada ADD COLUMN "{name}" {definition}'
                 )
+        catalog_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(version_catalog)")
+        }
+        if catalog_columns and "id" not in catalog_columns:
+            connection.execute("ALTER TABLE version_catalog RENAME TO version_catalog_legacy")
+            connection.executescript(
+                """CREATE TABLE version_catalog (
+                    id INTEGER PRIMARY KEY,
+                    workbook_identity TEXT NOT NULL,
+                    technical_version_id TEXT NOT NULL,
+                    version_label TEXT NOT NULL,
+                    created_at_sharepoint TEXT,
+                    is_current_snapshot INTEGER NOT NULL DEFAULT 0 CHECK (is_current_snapshot IN (0, 1)),
+                    discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_version_catalog_identity UNIQUE (workbook_identity, technical_version_id)
+                );
+                INSERT INTO version_catalog
+                    (workbook_identity, technical_version_id, version_label,
+                     created_at_sharepoint, discovered_at, last_verified_at)
+                SELECT workbook_identity, technical_version_id, version_label,
+                       created_modified, discovered_at, last_verified_at
+                  FROM version_catalog_legacy;
+                DROP TABLE version_catalog_legacy;
+                CREATE INDEX IF NOT EXISTS idx_version_catalog_watermark
+                    ON version_catalog (workbook_identity, technical_version_id);"""
+            )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -203,30 +245,6 @@ class Database:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
-
-    def cache_versions(self, workbook_identity: str, versions) -> None:
-        """Persist only discovery metadata; SharePoint remains authoritative."""
-        with self.connection:
-            self.connection.executemany(
-                """INSERT INTO version_catalog
-                   (workbook_identity, technical_version_id, version_label, created_modified)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(workbook_identity, technical_version_id) DO UPDATE SET
-                     version_label=excluded.version_label,
-                     created_modified=excluded.created_modified,
-                     last_verified_at=CURRENT_TIMESTAMP""",
-                ((workbook_identity, item.id, item.number, item.modified_at)
-                 for item in versions),
-            )
-
-    def catalog_max_id(self, workbook_identity: str) -> str | None:
-        """Return the discovery watermark, never the audit checkpoint."""
-        row = self.connection.execute(
-            "SELECT technical_version_id FROM version_catalog "
-            "WHERE workbook_identity=? ORDER BY CAST(technical_version_id AS INTEGER) DESC LIMIT 1",
-            (workbook_identity,),
-        ).fetchone()
-        return None if row is None else str(row[0])
 
     def __enter__(self) -> "Database":
         self.connect()

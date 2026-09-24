@@ -78,7 +78,7 @@ def test_version_discovery_is_indeterminate_and_reports_only_received_items() ->
     application._begin_version_scan("5.129")
     assert application.progress_bar.mode == "indeterminate"
     assert application.progress_bar.running is True
-    assert "checkpoint 5.129" in application.progress_text.value
+    assert "Carregando catálogo local" in application.progress_text.value
     assert "Versões encontradas: 0" in application.progress_text.value
 
     application._version_scan_updates.put(1000)
