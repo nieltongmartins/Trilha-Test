@@ -83,6 +83,8 @@ class AuditApplication(ttk.Frame):
             queue.SimpleQueue()
         )
         self._version_progress_updates: queue.SimpleQueue[object] = queue.SimpleQueue()
+        self._slot_progress_updates: queue.SimpleQueue[object] = queue.SimpleQueue()
+        self._parallel_metrics_updates: queue.SimpleQueue[object] = queue.SimpleQueue()
         self._report_updates: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._control_updates: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
         self._version_scan_updates: queue.SimpleQueue[int] = queue.SimpleQueue()
@@ -217,20 +219,31 @@ class AuditApplication(ttk.Frame):
         self.progress_text = tk.StringVar(value="0 / 0 (0%) | Tempo total: 00:00")
         ttk.Label(progress, textvariable=self.progress_text).grid(row=1, column=0, sticky="w")
 
-        current = ttk.LabelFrame(audit_tab, text="Versão atual: —", padding=8)
-        current.grid(row=7, column=0, sticky="ew", pady=(4, 0))
-        current.columnconfigure(0, weight=1)
-        self.current_version_frame = current
-        self.version_progress_value = tk.DoubleVar(value=0)
-        ttk.Progressbar(
-            current, variable=self.version_progress_value, maximum=100, mode="determinate"
-        ).grid(row=0, column=0, sticky="ew")
-        self.version_stage_text = tk.StringVar(value="Aguardando.")
-        ttk.Label(current, textvariable=self.version_stage_text).grid(row=1, column=0, sticky="w")
-        self.version_timing_text = tk.StringVar(
-            value="Tempo da versão: 00:00 | Média recente: calculando | Estimativa restante: calculando"
-        )
-        ttk.Label(current, textvariable=self.version_timing_text).grid(row=2, column=0, sticky="w")
+        self.slot_frames = []
+        self.slot_progress_values = []
+        self.slot_stage_texts = []
+        self.slot_timing_texts = []
+        for slot_id in (1, 2):
+            current = ttk.LabelFrame(audit_tab, text=f"SLOT {slot_id} — AGUARDANDO", padding=8)
+            current.grid(row=6 + slot_id, column=0, sticky="ew", pady=(4, 0))
+            current.columnconfigure(0, weight=1)
+            value = tk.DoubleVar(value=0)
+            ttk.Progressbar(current, variable=value, maximum=100, mode="determinate").grid(
+                row=0, column=0, sticky="ew"
+            )
+            stage = tk.StringVar(value="Aguardando.")
+            timing = tk.StringVar(value="ID técnico: — | Tempo da tarefa: 00:00")
+            ttk.Label(current, textvariable=stage).grid(row=1, column=0, sticky="w")
+            ttk.Label(current, textvariable=timing).grid(row=2, column=0, sticky="w")
+            self.slot_frames.append(current)
+            self.slot_progress_values.append(value)
+            self.slot_stage_texts.append(stage)
+            self.slot_timing_texts.append(timing)
+        # Aliases conservados para integrações e testes da tela serial anterior.
+        self.current_version_frame = self.slot_frames[0]
+        self.version_progress_value = self.slot_progress_values[0]
+        self.version_stage_text = self.slot_stage_texts[0]
+        self.version_timing_text = self.slot_timing_texts[0]
         self._startup_log("widgets_auditoria")
         self._build_stored_tab(stored_tab)
         self._startup_log("widgets_auditorias_armazenadas")
@@ -634,7 +647,7 @@ class AuditApplication(ttk.Frame):
         self.status.set("Pronto.")
 
     def audit(self) -> None:
-        from app.audit_service import AuditService
+        from app.parallel_audit import ParallelAuditService
 
         try:
             spreadsheet = self._selected()
@@ -680,11 +693,21 @@ class AuditApplication(ttk.Frame):
         def report_control(state: str, checkpoint: str | None) -> None:
             self._control_updates.put((state, checkpoint))
 
+        def report_slot(event: object) -> None:
+            self._slot_progress_updates.put(event)
+
+        def report_metrics(event: object) -> None:
+            self._parallel_metrics_updates.put(event)
+
         self._start_work(
             "Auditoria em andamento...",
-            lambda: AuditService(
+            lambda: ParallelAuditService(
                 self.database,
                 source,
+                slots=2,
+                backend="process",
+                slot_callback=report_slot,
+                metrics_callback=report_metrics,
                 progress_callback=report_progress,
                 checkpoint_callback=report_checkpoint,
                 version_progress_callback=report_version_progress,
@@ -993,6 +1016,46 @@ class AuditApplication(ttk.Frame):
             self._update_progress(completed, total)
         if getattr(self, "_audit_started_at", None) is not None:
             self._update_progress(self._progress_completed, self._progress_total)
+        self._poll_slot_progress_updates()
+
+    def _poll_slot_progress_updates(self) -> None:
+        """Atualiza os dois slots e a taxa agregada somente na thread Tk."""
+        if not hasattr(self, "_slot_progress_updates"):
+            return
+        while True:
+            try:
+                event = self._slot_progress_updates.get_nowait()
+            except queue.Empty:
+                break
+            index = event.slot_id - 1
+            if index not in (0, 1):
+                continue
+            self.slot_frames[index].configure(
+                text=f"SLOT {event.slot_id} — {event.state.value} — Versão {event.version or '—'}"
+            )
+            self.slot_progress_values[index].set(event.percent)
+            self.slot_stage_texts[index].set(event.stage)
+            self.slot_timing_texts[index].set(
+                f"ID técnico: {event.technical_version_id or '—'} | "
+                f"Tempo da tarefa: {self._format_duration(event.duration)}"
+            )
+        latest = None
+        while True:
+            try:
+                latest = self._parallel_metrics_updates.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None and self._progress_total:
+            remaining = max(self._progress_total - latest.committed, 0)
+            eta = (remaining / latest.throughput_recent * 60
+                   if latest.throughput_recent else None)
+            self.progress_text.set(
+                f"{latest.committed} / {self._progress_total} | checkpoint seq. "
+                f"{latest.checkpoint_sequence} | ativos: {latest.active_slots} | "
+                f"staged: {latest.staged_count} | Taxa recente: "
+                f"{latest.throughput_recent:.1f} versões/min | Estimativa restante: "
+                f"{self._format_duration(eta) if eta is not None else 'calculando'}"
+            )
 
     def _poll_version_progress_updates(self) -> None:
         """Aplica eventos da worker exclusivamente pela thread principal do Tk."""
