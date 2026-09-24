@@ -186,6 +186,14 @@ class AuditApplication(ttk.Frame):
         ttk.Label(audit_tab, textvariable=self.details).grid(row=3, column=0, sticky="w")
         buttons = ttk.Frame(audit_tab)
         buttons.grid(row=4, column=0, sticky="w", pady=10)
+        ttk.Label(buttons, text="Processamentos simultâneos:").pack(side="left", padx=(0, 4))
+        self.worker_count = tk.IntVar(value=2)
+        self.worker_selector = ttk.Combobox(
+            buttons, textvariable=self.worker_count, values=(1, 2, 3, 4, 5),
+            state="readonly", width=3,
+        )
+        self.worker_selector.pack(side="left", padx=(0, 10))
+        self.worker_selector.bind("<<ComboboxSelected>>", lambda _event: self._rebuild_slot_frames())
         self.refresh_button = ttk.Button(
             buttons, text="Atualizar lista", command=self.refresh
         )
@@ -219,13 +227,41 @@ class AuditApplication(ttk.Frame):
         self.progress_text = tk.StringVar(value="0 / 0 (0%) | Tempo total: 00:00")
         ttk.Label(progress, textvariable=self.progress_text).grid(row=1, column=0, sticky="w")
 
+        self.slots_container = ttk.Frame(audit_tab)
+        self.slots_container.grid(row=7, column=0, sticky="ew")
+        self.slots_container.columnconfigure(0, weight=1)
         self.slot_frames = []
         self.slot_progress_values = []
         self.slot_stage_texts = []
         self.slot_timing_texts = []
-        for slot_id in (1, 2):
-            current = ttk.LabelFrame(audit_tab, text=f"SLOT {slot_id} — AGUARDANDO", padding=8)
-            current.grid(row=6 + slot_id, column=0, sticky="ew", pady=(4, 0))
+        self._rebuild_slot_frames()
+        # Aliases conservados para integrações e testes da tela serial anterior.
+        self.current_version_frame = self.slot_frames[0]
+        self.version_progress_value = self.slot_progress_values[0]
+        self.version_stage_text = self.slot_stage_texts[0]
+        self.version_timing_text = self.slot_timing_texts[0]
+        self._startup_log("widgets_auditoria")
+        self._build_stored_tab(stored_tab)
+        self._startup_log("widgets_auditorias_armazenadas")
+        self._set_action_state()
+        self._startup_log("configurar_callbacks_estado")
+        self.refresh_stored()
+        self._startup_log("refresh_inicial")
+
+    def _rebuild_slot_frames(self) -> None:
+        """Materializa apenas os slots selecionados, sempre antes da execução."""
+        if getattr(self, "_audit_active", False):
+            return
+        for frame in getattr(self, "slot_frames", ()):
+            frame.destroy()
+        self.slot_frames = []
+        self.slot_progress_values = []
+        self.slot_stage_texts = []
+        self.slot_timing_texts = []
+        count = max(1, min(5, int(self.worker_count.get())))
+        for slot_id in range(1, count + 1):
+            current = ttk.LabelFrame(self.slots_container, text=f"SLOT {slot_id} — AGUARDANDO", padding=8)
+            current.grid(row=slot_id - 1, column=0, sticky="ew", pady=(4, 0))
             current.columnconfigure(0, weight=1)
             value = tk.DoubleVar(value=0)
             ttk.Progressbar(current, variable=value, maximum=100, mode="determinate").grid(
@@ -239,18 +275,10 @@ class AuditApplication(ttk.Frame):
             self.slot_progress_values.append(value)
             self.slot_stage_texts.append(stage)
             self.slot_timing_texts.append(timing)
-        # Aliases conservados para integrações e testes da tela serial anterior.
         self.current_version_frame = self.slot_frames[0]
         self.version_progress_value = self.slot_progress_values[0]
         self.version_stage_text = self.slot_stage_texts[0]
         self.version_timing_text = self.slot_timing_texts[0]
-        self._startup_log("widgets_auditoria")
-        self._build_stored_tab(stored_tab)
-        self._startup_log("widgets_auditorias_armazenadas")
-        self._set_action_state()
-        self._startup_log("configurar_callbacks_estado")
-        self.refresh_stored()
-        self._startup_log("refresh_inicial")
 
     def _build_stored_tab(self, tab: ttk.Frame) -> None:
         tab.columnconfigure(0, weight=1)
@@ -704,7 +732,7 @@ class AuditApplication(ttk.Frame):
             lambda: ParallelAuditService(
                 self.database,
                 source,
-                slots=2,
+                slots=max(1, min(5, int(self.worker_count.get()))),
                 backend="process",
                 slot_callback=report_slot,
                 metrics_callback=report_metrics,
@@ -1019,7 +1047,7 @@ class AuditApplication(ttk.Frame):
         self._poll_slot_progress_updates()
 
     def _poll_slot_progress_updates(self) -> None:
-        """Atualiza os dois slots e a taxa agregada somente na thread Tk."""
+        """Atualiza os slots dinâmicos e a taxa agregada somente na thread Tk."""
         if not hasattr(self, "_slot_progress_updates"):
             return
         while True:
@@ -1028,7 +1056,7 @@ class AuditApplication(ttk.Frame):
             except queue.Empty:
                 break
             index = event.slot_id - 1
-            if index not in (0, 1):
+            if not 0 <= index < len(self.slot_frames):
                 continue
             self.slot_frames[index].configure(
                 text=f"SLOT {event.slot_id} — {event.state.value} — Versão {event.version or '—'}"
@@ -1037,7 +1065,10 @@ class AuditApplication(ttk.Frame):
             self.slot_stage_texts[index].set(event.stage)
             self.slot_timing_texts[index].set(
                 f"ID técnico: {event.technical_version_id or '—'} | "
-                f"Tempo da tarefa: {self._format_duration(event.duration)}"
+                f"Decorrido: {self._format_duration(event.duration)} | Média da etapa: "
+                f"{self._format_duration(event.stage_average) if event.learned else 'Calculando...'} | "
+                f"Estimativa da tarefa: {self._format_duration(event.task_average or 0)} | "
+                f"Restante: {self._format_duration(event.estimated_remaining or 0)}"
             )
         latest = None
         while True:
@@ -1047,8 +1078,7 @@ class AuditApplication(ttk.Frame):
                 break
         if latest is not None and self._progress_total:
             remaining = max(self._progress_total - latest.committed, 0)
-            eta = (remaining / latest.throughput_recent * 60
-                   if latest.throughput_recent else None)
+            eta = latest.estimated_remaining
             self.progress_text.set(
                 f"{latest.committed} / {self._progress_total} | checkpoint seq. "
                 f"{latest.checkpoint_sequence} | ativos: {latest.active_slots} | "
@@ -1210,6 +1240,8 @@ class AuditApplication(ttk.Frame):
             self.stop_button.configure(
                 state="normal" if self._audit_active and not self._stop_event.is_set() else "disabled"
             )
+        if hasattr(self, "worker_selector"):
+            self.worker_selector.configure(state="disabled" if self._audit_active else "readonly")
         for button in getattr(self, "storage_buttons", ()):
             button.configure(state=state)
         self._stored_selection_changed()
