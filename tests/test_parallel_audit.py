@@ -241,3 +241,78 @@ def test_stop_with_eight_slots_preserves_empty_checkpoint(tmp_path: Path):
         ).audit(SHEET)
         assert result.status is AuditExecutionStatus.STOPPED
         assert database.connection.execute("SELECT count(*) FROM checkpoint").fetchone()[0] == 0
+
+
+def test_completed_worker_is_promoted_while_webdriver_owner_is_blocked(
+    monkeypatch, tmp_path: Path,
+):
+    """A Selenium wait must not hold staging or the ordered checkpoint."""
+    items = history(tmp_path, 4)
+    fetch_active = threading.Event()
+    promoted_during_fetch = []
+
+    class SlowDownloadSource(LocalSource):
+        def get_version(self, spreadsheet, version):
+            if version.id == "technical-2":
+                fetch_active.set()
+                time.sleep(.30)
+                fetch_active.clear()
+            return super().get_version(spreadsheet, version)
+
+    import app.parallel_audit as parallel
+    real_compare = parallel._compare_pair
+
+    def short_compare(task):
+        time.sleep(.03)
+        return real_compare(task)
+
+    monkeypatch.setattr(parallel, "_compare_pair", short_compare)
+    slow_source = SlowDownloadSource(
+        [SHEET], {(SHEET.site_id, SHEET.drive_id, SHEET.drive_item_id): items}
+    )
+    with Database(tmp_path / "promotion-during-fetch.db") as database:
+        database.initialize()
+        result = ParallelAuditService(
+            database, slow_source, slots=4, backend="thread",
+            checkpoint_callback=lambda *_args: promoted_during_fetch.append(fetch_active.is_set()),
+            staging_directory=tmp_path / "stage-promotion-during-fetch",
+        ).audit(SHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    assert promoted_during_fetch[0] is True
+
+
+def test_four_workers_receive_ready_files_concurrently(monkeypatch, tmp_path: Path):
+    items = history(tmp_path, 7)
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+    import app.parallel_audit as parallel
+    real_compare = parallel._compare_pair
+
+    def measured_compare(task):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(.12)
+            return real_compare(task)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(parallel, "_compare_pair", measured_compare)
+    with Database(tmp_path / "four-workers.db") as database:
+        database.initialize()
+        service = ParallelAuditService(
+            database, source(items), slots=4, backend="thread",
+            staging_directory=tmp_path / "stage-four-workers",
+        )
+        result = service.audit(SHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    assert peak == 4
+    staged = [item for item in service.telemetry if item.get("stage") == "STAGED"]
+    assert all(float(item["worker_to_staging"]) < .5 for item in staged)
+    assert all("task_reserved_at" in item and "promoted_at" in item for item in staged)

@@ -1183,30 +1183,24 @@ class AuditApplication(ttk.Frame):
             except queue.Empty:
                 break
         if latest is not None:
-            self._refresh_global_statistics()
+            self._refresh_global_statistics(latest)
             self.global_timing_text.set(self._global_timing_message(
-                latest.slots_processing, len(self.slot_frames)
+                latest.slots_processing, len(self.slot_frames), latest.slots_waiting
             ))
 
-    def _refresh_global_statistics(self) -> None:
-        """Copy presentation metrics from the model without changing execution."""
-        model = getattr(self, "_timing_model", None)
-        if model is None:
-            return
-        stats = model.global_stats
-        if stats.recent_throughput is not None:
-            self._last_global_throughput = stats.recent_throughput
-            self._last_global_mean = stats.recent_average
-        remaining = max(0, self._progress_total - self._progress_completed)
-        eta = stats.update_eta(remaining)
+    def _refresh_global_statistics(self, snapshot: object) -> None:
+        """Render an immutable metrics event; never consult scheduler state."""
+        rate = getattr(snapshot, "throughput_recent", None)
+        if rate is not None and rate > 0:
+            self._last_global_throughput = rate
+            self._last_global_mean = 60.0 / rate
+        eta = getattr(snapshot, "estimated_remaining", None)
         if eta is not None:
             self._last_global_eta = eta
 
     def _set_slot_timing(self, index: int, elapsed: float) -> None:
-        model = getattr(self, "_timing_model", None)
-        average = None
-        if model is not None:
-            average = model.slot_stats[index + 1].average_duration
+        event = self._slot_visual_events[index]
+        average = event.task_average if event is not None else None
         average_text = (self._format_clock(average)
                         if average is not None else "calculando...")
         self.slot_timing_texts[index].set(
@@ -1215,28 +1209,25 @@ class AuditApplication(ttk.Frame):
 
     def _tick_slot_progress(self) -> None:
         """Interpola os slots no MainThread; eventos continuam autoritativos."""
-        model = getattr(self, "_timing_model", None)
-        if model is None or not getattr(self, "_audit_active", False):
+        if not getattr(self, "_audit_active", False):
             return
-        if self._stop_event.is_set():
+        if self._stop_event.is_set() or self._pause_event.is_set():
             return
-        now = model.active_now()
+        now = time.monotonic()
         for index, event in enumerate(getattr(self, "_slot_visual_events", ())):
             if event is None or event.timed_stage is None or event.percent >= 100:
                 continue
-            stage_started = event.stage_started_active
-            if stage_started is None:
-                continue
-            estimate = model.estimate_task(
-                event.timed_stage, max(0.0, now - stage_started),
-                event.completed_stages,
+            elapsed_since_snapshot = max(0.0, now - event.occurred_at)
+            stage_average = event.stage_average or 0.0
+            visual_increment = (
+                min(8.0, elapsed_since_snapshot / stage_average * 8.0)
+                if stage_average > 0 else 0.0
             )
-            # Mudanças na média compartilhada só alteram a velocidade futura.
             current = float(self.slot_progress_values[index].get())
-            self.slot_progress_values[index].set(max(current, min(99.0, estimate.progress)))
-            if event.task_started_active is not None:
-                elapsed = max(0.0, now - event.task_started_active)
-                self._set_slot_timing(index, elapsed)
+            self.slot_progress_values[index].set(
+                max(current, min(99.0, event.percent + visual_increment))
+            )
+            self._set_slot_timing(index, event.duration + elapsed_since_snapshot)
 
     def _poll_version_progress_updates(self) -> None:
         """Aplica eventos da worker exclusivamente pela thread principal do Tk."""
@@ -1320,10 +1311,6 @@ class AuditApplication(ttk.Frame):
             return
         self._progress_completed = completed
         self._progress_total = total
-        now = time.monotonic()
-        if now - getattr(self, "_last_timing_tick", 0.0) >= .5:
-            self._last_timing_tick = now
-            self._refresh_global_statistics()
         elapsed = self._audit_elapsed()
         percent = 0 if total <= 0 else completed / total * 100
         self.progress_value.set(percent)

@@ -1010,7 +1010,7 @@ def test_prefetch_timeout_is_cleaned_and_retried_with_same_identity(
 
 
 def test_prefetch_exhaustion_falls_back_and_normal_timeout_retries(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     content = workbook_bytes("fallback-normal")
 
@@ -1047,6 +1047,13 @@ def test_prefetch_exhaustion_falls_back_and_normal_timeout_retries(
     assert browser.refresh_count == 1
     assert any("Fallback" in status for status in statuses)
     assert any("Tentando novamente" in status for status in statuses)
+    decisions = [
+        record.message for record in caplog.records
+        if "FETCH_TIMEOUT_DECISION" in record.message
+    ]
+    assert decisions
+    assert all("active_fetch_elapsed=" in message for message in decisions)
+    assert all("reason=active_fetch_timeout" in message for message in decisions)
 
 
 def test_stuck_prefetch_refreshes_and_resumes_same_version_with_fresh_token(
