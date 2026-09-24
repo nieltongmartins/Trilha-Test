@@ -22,6 +22,7 @@ from app.audit_service import AuditResult, AuditService
 from app.excel.comparator import CellChange, compare_snapshots
 from app.excel.reader import read_workbook
 from app.integrity import sha256_file
+from app.execution_timing import OPERATIONAL_STAGES, SharedExecutionTimingModel, TimedStage
 from app.models import AuditExecutionStatus
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 
@@ -31,13 +32,13 @@ logger = logging.getLogger("auditoria_excel.parallel")
 
 class TaskState(StrEnum):
     WAITING = "AGUARDANDO"
-    RESERVED = "RESERVADO"
-    DOWNLOAD = "DOWNLOAD"
-    SHA = "VALIDACAO_SHA"
-    PARSE = "LEITURA_XLSX"
+    RESERVED = "RESERVANDO"
+    DOWNLOAD = "BAIXANDO"
+    SHA = "VALIDANDO"
+    PARSE = "LENDO"
     DEPENDENCY = "AGUARDANDO_DEPENDENCIA"
-    COMPARE = "COMPARACAO"
-    STAGED = "STAGED"
+    COMPARE = "COMPARANDO"
+    STAGED = "STAGING"
     COMPLETED = "CONCLUIDO"
     PAUSED = "PAUSADO"
     ERROR = "ERRO"
@@ -82,9 +83,13 @@ class SlotProgress:
     version: str | None
     sequence: int | None
     state: TaskState
-    percent: int
+    percent: float
     stage: str
     duration: float = 0.0
+    stage_average: float | None = None
+    task_average: float | None = None
+    estimated_remaining: float | None = None
+    learned: bool = False
     occurred_at: float = field(default_factory=time.monotonic)
 
 
@@ -100,6 +105,8 @@ class ParallelMetrics:
     rss_python: int
     rss_workers: int = 0
     rss_edge: int = 0
+    estimated_remaining: float | None = None
+    window_occupancy: int = 0
 
 
 def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, float]]:
@@ -111,9 +118,11 @@ def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, flo
     changes = compare_snapshots(previous, current)
     finished = time.perf_counter()
     return changes, {
-        "parse": parsed - started,
+        "read_xlsx": parsed - started,
         "compare": finished - parsed,
         "duration": finished - started,
+        "worker_pid": os.getpid(),
+        "worker_thread_id": threading.get_ident(),
     }
 
 
@@ -199,12 +208,16 @@ class OrderedCommitCoordinator:
                 previous, current, digest, changes,
             )
             now = time.monotonic()
+            commit_duration = time.perf_counter() - started
+            self.service.timing_model.observe(TimedStage.WAIT_PROMOTION, started - staged_at)
+            self.service.timing_model.observe(TimedStage.COMMIT, commit_duration)
+            self.service.timing_model.record_commit(now)
             self.commit_times.append(now)
             self.commit_times = [stamp for stamp in self.commit_times if now - stamp <= 60]
             logger.info(
                 "TELEMETRIA_PROMOCAO sequence=%d technical_id=%s staging=%.3fs commit_duration=%.3fs",
                 self.next_sequence, current.id, started - staged_at,
-                time.perf_counter() - started,
+                commit_duration,
             )
             self.staging.remove(self.next_sequence)
             self.committed += 1
@@ -216,16 +229,17 @@ class OrderedCommitCoordinator:
 
 
 class ParallelAuditService(AuditService):
-    """Scheduler central limitado deliberadamente a um ou dois slots."""
+    """Scheduler com fila dinâmica e de um a cinco workers independentes."""
 
-    def __init__(self, database, source: VersionSource, *, slots: Literal[1, 2] = 2,
+    def __init__(self, database, source: VersionSource, *, slots: int = 2,
                  backend: Literal["sync", "thread", "process"] = "process",
                  slot_callback: Callable[[SlotProgress], None] | None = None,
                  metrics_callback: Callable[[ParallelMetrics], None] | None = None,
                  staging_directory: str | Path | None = None, max_retries: int = 1,
+                 timing_model: SharedExecutionTimingModel | None = None,
                  **kwargs) -> None:
-        if slots not in (1, 2):
-            raise ValueError("A Fase 2 aceita exclusivamente 1 ou 2 slots")
+        if not 1 <= slots <= 5:
+            raise ValueError("slots deve estar entre 1 e 5")
         super().__init__(database, source, **kwargs)
         self.slots = slots
         self.backend = backend
@@ -238,15 +252,29 @@ class ParallelAuditService(AuditService):
             else Path(tempfile.gettempdir()) / "trilha-staging"
         )
         self.telemetry: list[dict[str, float | int | str]] = []
+        self.timing_model = timing_model or SharedExecutionTimingModel()
+        self._task_stages: dict[int, tuple[TimedStage, ...]] = {}
 
-    def _slot(self, task: VersionTask, state: TaskState, percent: int, stage: str,
-              started: float = 0.0) -> None:
+    def _slot(self, task: VersionTask, state: TaskState, percent: float, stage: str,
+              started: float = 0.0, timed_stage: TimedStage | None = None,
+              stage_started: float | None = None) -> None:
         task.state = state
         if self.slot_callback:
+            duration = time.perf_counter() - started if started else 0.0
+            estimate = None
+            if timed_stage is not None:
+                estimate = self.timing_model.estimate_task(
+                    timed_stage, max(0.0, time.perf_counter() - (stage_started or started)),
+                    self._task_stages.get(task.sequence, ()), state is TaskState.COMPLETED,
+                )
             self.slot_callback(SlotProgress(
                 task.slot_id or 0, task.reservation_token, task.technical_version_id,
-                task.version_label, task.sequence, state, percent, stage,
-                time.perf_counter() - started if started else 0.0,
+                task.version_label, task.sequence, state,
+                estimate.progress if estimate else percent, stage, duration,
+                estimate.stage_average if estimate else None,
+                estimate.task_average if estimate else None,
+                estimate.remaining if estimate else None,
+                estimate.learned if estimate else False,
             ))
 
     def audit(self, spreadsheet: SpreadsheetInfo,
@@ -292,11 +320,12 @@ class ParallelAuditService(AuditService):
             executor_type = ProcessPoolExecutor if self.backend == "process" else ThreadPoolExecutor
             workers = self.slots if self.backend != "sync" else 1
             with executor_type(max_workers=workers) as executor:
-                running: dict[Future, tuple[VersionTask, ComparisonTask, float]] = {}
+                running: dict[Future, tuple[VersionTask, ComparisonTask, float, float]] = {}
                 while coordinator.committed < len(pairs):
                     if self.stop_event.is_set():
                         break
                     if self.pause_event.is_set():
+                        self.timing_model.pause()
                         if not running:
                             for slot in range(1, self.slots + 1):
                                 paused = VersionTask("", "", "", 0, execution_id, slot_id=slot)
@@ -304,6 +333,7 @@ class ParallelAuditService(AuditService):
                             self._report_control("paused", coordinator.final or initial)
                             while self.pause_event.is_set() and not self.stop_event.wait(.05):
                                 pass
+                            self.timing_model.resume()
                             self._report_control("resumed", coordinator.final or initial)
                         else:
                             self._collect_done(running, staging, block=True)
@@ -322,15 +352,24 @@ class ParallelAuditService(AuditService):
                         task.reservation_token = uuid4().hex
                         pair = pairs[task.sequence - 1]
                         task_started = time.perf_counter()
+                        self._task_stages[task.sequence] = ()
                         self._slot(task, TaskState.RESERVED, 2, "Reserva exclusiva", task_started)
                         for version in pair:
                             if version.id not in acquired:
-                                self._slot(task, TaskState.DOWNLOAD, 15, "Download pelo ator WebDriver", task_started)
                                 download_started = time.perf_counter()
+                                self._slot(task, TaskState.DOWNLOAD, 15, "Download pelo ator WebDriver",
+                                           task_started, TimedStage.DOWNLOAD_TRANSFER, download_started)
                                 acquired[version.id] = self.source.get_version(spreadsheet, version)
                                 download_seconds = time.perf_counter() - download_started
-                                self._slot(task, TaskState.SHA, 35, "Validando SHA-256", task_started)
+                                self.timing_model.observe(TimedStage.DOWNLOAD_TRANSFER, download_seconds, slot)
+                                self._task_stages[task.sequence] = (*self._task_stages[task.sequence], TimedStage.DOWNLOAD_TRANSFER)
+                                sha_started = time.perf_counter()
+                                self._slot(task, TaskState.SHA, 35, "Validando SHA-256", task_started,
+                                           TimedStage.SHA, sha_started)
                                 digest = sha256_file(acquired[version.id])
+                                sha_seconds = time.perf_counter() - sha_started
+                                self.timing_model.observe(TimedStage.SHA, sha_seconds, slot)
+                                self._task_stages[task.sequence] = (*self._task_stages[task.sequence], TimedStage.SHA)
                                 verify = getattr(self.source, "verify_download_digest", None)
                                 if callable(verify):
                                     verify(acquired[version.id], digest)
@@ -338,22 +377,28 @@ class ParallelAuditService(AuditService):
                                     "slot_id": slot, "task_id": task.reservation_token,
                                     "technical_version_id": version.id,
                                     "sequence": task.sequence, "stage": "DOWNLOAD",
-                                    "download": download_seconds,
+                                    "download_transfer": download_seconds, "sha": sha_seconds,
+                                    "worker_pid": os.getpid(),
+                                    "worker_thread_id": threading.get_ident(),
+                                    "coordinator_pid": os.getpid(),
                                 })
                         current_hash = sha256_file(acquired[pair[1].id])
                         comparison = ComparisonTask(
                             task.sequence, pair[0], pair[1], str(acquired[pair[0].id]),
                             str(acquired[pair[1].id]), current_hash, task.reservation_token,
                         )
-                        self._slot(task, TaskState.PARSE, 50, "Leitura XLSX independente", task_started)
+                        stage_started = time.perf_counter()
+                        self._slot(task, TaskState.PARSE, 50, "Leitura XLSX independente", task_started,
+                                   TimedStage.READ_XLSX, stage_started)
                         future = executor.submit(_compare_pair, comparison)
-                        running[future] = (task, comparison, task_started)
+                        running[future] = (task, comparison, task_started, stage_started)
 
                     self._collect_done(running, staging, block=not any(f.done() for f in running))
                     self._promote(coordinator, tasks, len(pairs))
                     self._metrics(started, coordinator, staging, len(running))
 
             if self.stop_event.is_set():
+                self.timing_model.stop()
                 return self._stop_execution(connection, execution_id, code, initial,
                                             coordinator.committed, coordinator.changes,
                                             coordinator.final or initial)
@@ -378,28 +423,39 @@ class ParallelAuditService(AuditService):
     def _collect_done(self, running, staging: StagingStore, *, block: bool) -> None:
         if block and running:
             while not any(future.done() for future in running):
-                time.sleep(.01)
+                for task, _comparison, task_started, stage_started in running.values():
+                    self._slot(task, TaskState.PARSE, 50, "Leitura XLSX independente",
+                               task_started, TimedStage.READ_XLSX, stage_started)
+                time.sleep(.05)
         for future in [item for item in running if item.done()]:
-            task, comparison, started = running.pop(future)
+            task, comparison, started, _stage_started = running.pop(future)
             try:
                 changes, metrics = future.result()
                 self._slot(task, TaskState.COMPARE, 90, "Comparando snapshots", started)
+                staging_started = time.perf_counter()
                 staging.put(comparison, changes, metrics)
-                metrics.update({"staging": 0.0, "queue_wait": 0.0})
+                metrics.update({"staging": time.perf_counter() - staging_started, "queue_wait": 0.0})
+                self.timing_model.observe(TimedStage.READ_XLSX, metrics["read_xlsx"], task.slot_id)
+                self.timing_model.observe(TimedStage.COMPARE, metrics["compare"], task.slot_id)
+                self.timing_model.observe(TimedStage.STAGING, metrics["staging"], task.slot_id)
+                self.timing_model.observe(TimedStage.TOTAL_TASK, time.perf_counter() - started, task.slot_id)
                 self.telemetry.append({
                     "slot_id": task.slot_id or 0,
                     "task_id": task.reservation_token or "",
                     "technical_version_id": task.technical_version_id,
                     "sequence": task.sequence, "stage": "STAGED",
+                    "coordinator_pid": os.getpid(),
                     **metrics,
                 })
-                self._slot(task, TaskState.STAGED, 100, "Concluída — aguardando promoção", started)
+                self._slot(task, TaskState.STAGED, 99, "Staging concluído — aguardando promoção", started)
                 logger.info(
                     "TELEMETRIA_SLOT slot_id=%d task_id=%s technical_version_id=%s sequence=%d "
-                    "stage=STAGED duration=%.3f parse=%.3f compare=%.3f retry=%d",
+                    "stage=STAGED duration=%.3f read_xlsx=%.3f compare=%.3f worker_pid=%d "
+                    "worker_thread_id=%d coordinator_pid=%d retry=%d",
                     task.slot_id, task.reservation_token, task.technical_version_id,
-                    task.sequence, metrics["duration"], metrics["parse"],
-                    metrics["compare"], task.retry_count,
+                    task.sequence, metrics["duration"], metrics["read_xlsx"],
+                    metrics["compare"], metrics["worker_pid"], metrics["worker_thread_id"],
+                    os.getpid(), task.retry_count,
                 )
             except Exception as error:
                 task.retry_count += 1
@@ -446,4 +502,7 @@ class ParallelAuditService(AuditService):
         self.metrics_callback(ParallelMetrics(
             elapsed, coordinator.committed, float(recent), staging.count(), active,
             coordinator.committed, 2 * self.slots, rss, worker_rss, 0,
+            self.timing_model.global_eta(max(len(coordinator.pairs) - coordinator.committed, 0),
+                                         max(active, self.slots)),
+            staging.count() + active,
         ))

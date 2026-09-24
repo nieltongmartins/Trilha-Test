@@ -1,4 +1,4 @@
-"""Benchmark reproduzível da Fase 2 (CQLPA123 sintética, 24 versões)."""
+"""Benchmark reproduzível da Fase 3 para os cinco níveis de concorrência."""
 from __future__ import annotations
 
 import argparse
@@ -51,7 +51,7 @@ def run(root: Path, items, backend: str, slots: int):
     elapsed = time.perf_counter() - started
     usage_after = resource.getrusage(resource.RUSAGE_SELF)
     stage_rows = [row for row in service.telemetry if row["stage"] == "STAGED"]
-    downloads = [float(row["download"]) for row in service.telemetry if row["stage"] == "DOWNLOAD"]
+    downloads = [float(row["download_transfer"]) for row in service.telemetry if row["stage"] == "DOWNLOAD"]
     average = lambda key: round(sum(float(row.get(key, 0)) for row in stage_rows) / len(stage_rows), 6)
     comparisons = len(items) - 1
     return {
@@ -64,10 +64,14 @@ def run(root: Path, items, backend: str, slots: int):
             usage_after.ru_utime + usage_after.ru_stime - usage_before.ru_utime - usage_before.ru_stime, 3
         ),
         "download_average_seconds": round(sum(downloads) / len(downloads), 6),
-        "parse_average_seconds": average("parse"),
+        "parse_average_seconds": average("read_xlsx"),
         "compare_average_seconds": average("compare"),
         "staging_average_seconds": average("staging"),
         "commit_wait_average_seconds": 0.0,
+        "rss_workers_mib": round(max((item.rss_workers for item in metrics), default=0) / 1048576, 2),
+        "rss_edge_mib": round(max((item.rss_edge for item in metrics), default=0) / 1048576, 2),
+        "staged_maximum": max((item.staged_count for item in metrics), default=0),
+        "window_occupancy_maximum": max((item.window_occupancy for item in metrics), default=0),
         "errors": 0, "retries": 0,
         "changes": result.changes, "official": official,
     }
@@ -82,7 +86,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="trilha-bench-") as temporary:
         root = Path(temporary)
         items = build(root, args.versions, args.rows)
-        results = [run(root, items, "sync", 1), run(root, items, "thread", 2), run(root, items, "process", 2)]
+        results = [run(root, items, "process", slots) for slots in range(1, 6)]
         baseline = results[0]["seconds"]
         reference = results[0].pop("official")
         for result in results:

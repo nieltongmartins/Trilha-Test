@@ -5,6 +5,7 @@ import sqlite3
 import time
 
 from openpyxl import Workbook
+import pytest
 
 from app.database import Database
 from app.models import AuditExecutionStatus
@@ -50,10 +51,10 @@ def official_rows(connection: sqlite3.Connection):
     return versions, changes, checkpoint
 
 
-def test_one_and_two_slots_produce_identical_official_database(tmp_path: Path):
+def test_one_to_five_slots_produce_identical_official_database(tmp_path: Path):
     items = history(tmp_path)
     outputs = []
-    for slots in (1, 2):
+    for slots in (1, 2, 3, 4, 5):
         with Database(tmp_path / f"audit-{slots}.db") as database:
             database.initialize()
             result = ParallelAuditService(
@@ -62,9 +63,17 @@ def test_one_and_two_slots_produce_identical_official_database(tmp_path: Path):
             ).audit(SHEET)
             assert result.status is AuditExecutionStatus.COMPLETED
             outputs.append(official_rows(database.connection))
-    assert outputs[0] == outputs[1]
-    assert len(outputs[1][0]) == len(items) - 1
-    assert len({row[2] for row in outputs[1][0]}) == len(items) - 1
+    assert all(output == outputs[0] for output in outputs[1:])
+    assert len(outputs[-1][0]) == len(items) - 1
+    assert len({row[2] for row in outputs[-1][0]}) == len(items) - 1
+
+
+@pytest.mark.parametrize("slots", [0, 6])
+def test_worker_count_is_limited_to_one_through_five(tmp_path: Path, slots: int):
+    with Database(tmp_path / "invalid.db") as database:
+        database.initialize()
+        with pytest.raises(ValueError, match="entre 1 e 5"):
+            ParallelAuditService(database, source([]), slots=slots)
 
 
 def test_out_of_order_staging_never_advances_checkpoint(monkeypatch, tmp_path: Path):
