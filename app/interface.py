@@ -20,6 +20,7 @@ from app.execution_timing import SharedExecutionTimingModel
 from app.models import AuditExecutionStatus
 from app.progress import SmoothVersionProgress
 from app.report_artifacts import ReportArtifactManager
+from app.runtime_profile import RuntimeProfile, RuntimeProfileStore, workbook_identity
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 from app.version_catalog import VersionCatalog
 
@@ -80,6 +81,8 @@ class AuditApplication(ttk.Frame):
         self.last_report: Path | None = None
         self._busy = False
         self._audit_active = False
+        self._manual_slot_identity: str | None = None
+        self._loaded_runtime_profile: RuntimeProfile | None = None
         self._audit_paused = False
         self._pause_event = threading.Event()
         self._stop_event = threading.Event()
@@ -213,7 +216,11 @@ class AuditApplication(ttk.Frame):
             state="readonly", width=3,
         )
         self.worker_selector.pack(side="left", padx=(0, 10))
-        self.worker_selector.bind("<<ComboboxSelected>>", lambda _event: self._rebuild_slot_frames())
+        self.worker_selector.bind("<<ComboboxSelected>>", self._manual_worker_selection)
+        self.runtime_recommendation = tk.StringVar(value="Recomendado: ainda não calculado")
+        ttk.Label(buttons, textvariable=self.runtime_recommendation).pack(
+            side="left", padx=(0, 10)
+        )
         self.refresh_button = ttk.Button(
             buttons, text="Atualizar lista", command=self.refresh
         )
@@ -317,6 +324,15 @@ class AuditApplication(ttk.Frame):
         self.version_timing_text = self.slot_timing_texts[0]
         if hasattr(self, "global_timing_text"):
             self.global_timing_text.set(self._global_timing_message(0, count))
+
+    def _manual_worker_selection(self, _event: object | None = None) -> None:
+        """Marca override somente para o workbook atual; nunca muda durante a execução."""
+        if not self._audit_active:
+            try:
+                self._manual_slot_identity = workbook_identity(self._selected())
+            except ValueError:
+                self._manual_slot_identity = None
+            self._rebuild_slot_frames()
 
     def _build_stored_tab(self, tab: ttk.Frame) -> None:
         tab.columnconfigure(0, weight=1)
@@ -691,12 +707,17 @@ class AuditApplication(ttk.Frame):
                 pending = max(
                     len(versions) - ids.index(checkpoint_row["versao_id"]) - 1, 0
                 )
-        return checkpoint, latest, pending, len(versions)
+        profile = RuntimeProfileStore(self.database.connection).load(
+            workbook_identity(spreadsheet)
+        )
+        return checkpoint, latest, pending, len(versions), profile
 
     def _show_status_finished(
         self, result: tuple[str | None, str, int, int]
     ) -> None:
-        checkpoint, latest, pending, total_versions = result
+        checkpoint, latest, pending, total_versions = result[:4]
+        profile = result[4] if len(result) > 4 else None
+        self._apply_runtime_profile(profile)
         self._end_version_scan(total_versions=total_versions)
         self._latest_available = latest
         self._set_audit_details(checkpoint, pending)
@@ -714,6 +735,27 @@ class AuditApplication(ttk.Frame):
             self.status.set(f"{new} novas versões encontradas.")
         else:
             self.status.set(f"Catálogo local criado com {total_versions:,} versões.")
+
+    def _apply_runtime_profile(self, profile: RuntimeProfile | None) -> None:
+        """Aplica recomendação no Tk MainThread, preservando override manual."""
+        self._loaded_runtime_profile = profile
+        label = getattr(self, "runtime_recommendation", None)
+        if profile is None or profile.recommended_slots is None:
+            if label is not None:
+                label.set("Recomendado: ainda não calculado")
+            return
+        confidence = {"LOW": "baixa", "MEDIUM": "média", "HIGH": "alta"}.get(
+            profile.recommendation_confidence, "baixa"
+        )
+        if label is not None:
+            label.set(f"Recomendado: {profile.recommended_slots} slots ({confidence} confiança)")
+        try:
+            current_identity = workbook_identity(self._selected())
+        except ValueError:
+            return
+        if (not self._audit_active and self._manual_slot_identity != current_identity):
+            self.worker_count.set(profile.recommended_slots)
+            self._rebuild_slot_frames()
 
     def audit(self) -> None:
         from app.parallel_audit import ParallelAuditService
@@ -804,6 +846,14 @@ class AuditApplication(ttk.Frame):
                 stop_event=self._stop_event,
                 control_callback=report_control,
                 timing_model=self._timing_model,
+                initial_avg_file_bytes=(
+                    self._loaded_runtime_profile.avg_file_bytes
+                    if self._loaded_runtime_profile else 0.0
+                ),
+                recommended_prefetch_target=(
+                    self._loaded_runtime_profile.recommended_prefetch_target
+                    if self._loaded_runtime_profile else None
+                ),
             ).audit(spreadsheet, versions=cached_versions),
             self._audit_finished,
         )
