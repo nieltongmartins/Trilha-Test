@@ -119,6 +119,7 @@ class AuditApplication(ttk.Frame):
         self._version_animation_interval = 0.15
         self._version_last_animation = 0.0
         self._version_last_clock_update = 0.0
+        self._last_timing_tick = 0.0
         self._hidden_clicks: list[float] = []
         # AuditService, ReportService, leitor XLSX/openpyxl, fontes SharePoint e
         # Graph permanecem fora deste caminho e são importados somente nas ações.
@@ -291,7 +292,7 @@ class AuditApplication(ttk.Frame):
             row, column = self.slot_grid_position(slot_id)
             current = ttk.LabelFrame(
                 self.slots_container, text=f"SLOT {slot_id} — —", padding=5,
-                height=82,
+                height=102,
             )
             current.grid(row=row, column=column,
                          sticky="nsew", padx=(0, 4) if slot_id % 2 else (4, 0), pady=(3, 0))
@@ -302,7 +303,7 @@ class AuditApplication(ttk.Frame):
                 row=0, column=0, sticky="ew"
             )
             stage = tk.StringVar(value="Aguardando")
-            timing = tk.StringVar(value="Decorrido: 00:00:00")
+            timing = tk.StringVar(value="Decorrido: 00:00:00\nMédia: calculando...")
             ttk.Label(current, textvariable=stage, width=40, anchor="w").grid(row=1, column=0, sticky="ew")
             ttk.Label(current, textvariable=timing, width=40, anchor="w").grid(row=2, column=0, sticky="ew")
             self.slot_frames.append(current)
@@ -738,17 +739,15 @@ class AuditApplication(ttk.Frame):
         self.progress_bar.configure(mode="determinate")
         self._audit_started_at = time.monotonic()
         timing_key = self._version_cache_key(spreadsheet)
-        if timing_key != self._timing_model_key:
-            self._last_global_mean = None
-            self._last_global_throughput = None
-            self._last_global_eta = None
-            self._timing_model_key = timing_key
-        self._timing_model = self._timing_models.setdefault(
-            timing_key, SharedExecutionTimingModel()
-        )
-        # A stopped model is a completed logical run.  Continue uses its samples,
-        # but needs a live clock again; observations themselves are never cleared.
-        self._timing_model.continue_execution()
+        # Every click starts a new execution statistics session.  A checkpoint
+        # may preserve audit data, but visual averages must never leak from an
+        # earlier run (including another run of the same workbook).
+        self._last_global_mean = None
+        self._last_global_throughput = None
+        self._last_global_eta = None
+        self._timing_model_key = timing_key
+        self._timing_model = SharedExecutionTimingModel()
+        self._timing_models[timing_key] = self._timing_model
         self._audit_active_started_at = self._timing_model.active_now()
         if self._timing_model.sample_count():
             self._last_global_mean = self._timing_model.task_average()
@@ -757,6 +756,8 @@ class AuditApplication(ttk.Frame):
         self._progress_completed = 0
         self._progress_total = 0
         self._slot_visual_events = [None] * len(self.slot_frames)
+        for timing in self.slot_timing_texts:
+            timing.set("Decorrido: 00:00:00\nMédia: calculando...")
         self.progress_value.set(0)
         self.progress_text.set(
             "0 / 0 (0,00%) | Tempo total: 00:00:00 | Tempo restante: calculando..."
@@ -1123,9 +1124,7 @@ class AuditApplication(ttk.Frame):
             self.slot_progress_values[index].set(max(current, event.percent))
             self._slot_visual_events[index] = event
             self.slot_stage_texts[index].set(self._compact_text(event.stage, 42))
-            self.slot_timing_texts[index].set(
-                f"Decorrido: {self._format_clock(event.duration)}"
-            )
+            self._set_slot_timing(index, event.duration)
         self._tick_slot_progress()
         latest = None
         while True:
@@ -1134,20 +1133,35 @@ class AuditApplication(ttk.Frame):
             except queue.Empty:
                 break
         if latest is not None:
-            throughput = (self._timing_model.throughput_per_minute()
-                          if self._timing_model is not None else None)
-            if latest.mean_task is not None:
-                self._last_global_mean = latest.mean_task
-            if throughput is not None and throughput > 0:
-                self._last_global_throughput = throughput
-            if latest.committed >= 5 and latest.estimated_remaining is not None:
-                # Smooth presentation only; scheduler/throughput remain untouched.
-                self._last_global_eta = (latest.estimated_remaining
-                    if self._last_global_eta is None else
-                    .8 * self._last_global_eta + .2 * latest.estimated_remaining)
+            self._refresh_global_statistics()
             self.global_timing_text.set(self._global_timing_message(
-                latest.slots_processing, len(self.slot_frames), latest.slots_waiting
+                latest.slots_processing, len(self.slot_frames)
             ))
+
+    def _refresh_global_statistics(self) -> None:
+        """Copy presentation metrics from the model without changing execution."""
+        model = getattr(self, "_timing_model", None)
+        if model is None:
+            return
+        stats = model.global_stats
+        if stats.recent_throughput is not None:
+            self._last_global_throughput = stats.recent_throughput
+            self._last_global_mean = stats.recent_average
+        remaining = max(0, self._progress_total - self._progress_completed)
+        eta = stats.update_eta(remaining)
+        if eta is not None:
+            self._last_global_eta = eta
+
+    def _set_slot_timing(self, index: int, elapsed: float) -> None:
+        model = getattr(self, "_timing_model", None)
+        average = None
+        if model is not None:
+            average = model.slot_stats[index + 1].average_duration
+        average_text = (self._format_clock(average)
+                        if average is not None else "calculando...")
+        self.slot_timing_texts[index].set(
+            f"Decorrido: {self._format_clock(elapsed)}\nMédia: {average_text}"
+        )
 
     def _tick_slot_progress(self) -> None:
         """Interpola os slots no MainThread; eventos continuam autoritativos."""
@@ -1172,9 +1186,7 @@ class AuditApplication(ttk.Frame):
             self.slot_progress_values[index].set(max(current, min(99.0, estimate.progress)))
             if event.task_started_active is not None:
                 elapsed = max(0.0, now - event.task_started_active)
-                self.slot_timing_texts[index].set(
-                    f"Decorrido: {self._format_clock(elapsed)}"
-                )
+                self._set_slot_timing(index, elapsed)
 
     def _poll_version_progress_updates(self) -> None:
         """Aplica eventos da worker exclusivamente pela thread principal do Tk."""
@@ -1258,6 +1270,10 @@ class AuditApplication(ttk.Frame):
             return
         self._progress_completed = completed
         self._progress_total = total
+        now = time.monotonic()
+        if now - getattr(self, "_last_timing_tick", 0.0) >= .5:
+            self._last_timing_tick = now
+            self._refresh_global_statistics()
         elapsed = self._audit_elapsed()
         percent = 0 if total <= 0 else completed / total * 100
         self.progress_value.set(percent)
@@ -1277,9 +1293,15 @@ class AuditApplication(ttk.Frame):
             return
         elapsed = self._audit_elapsed()
         if failed:
+            percent = (0 if self._progress_total <= 0 else
+                       self._progress_completed / self._progress_total * 100)
+            percent_text = f"{percent:.2f}".replace(".", ",")
             self.progress_text.set(
-                "Auditoria interrompida por erro | "
-                f"Tempo total: {self._format_duration(elapsed)}"
+                f"{self._progress_completed} / {self._progress_total} "
+                f"({percent_text}%) | "
+                f"Tempo total: {self._format_clock(elapsed)} | "
+                "Tempo restante: " + (self._format_clock(self._last_global_eta)
+                                       if self._last_global_eta is not None else "calculando...")
             )
         else:
             self.progress_value.set(100)
@@ -1304,10 +1326,10 @@ class AuditApplication(ttk.Frame):
                                waiting_slots: int | None = None) -> str:
         """Stable four-line aggregate view; last valid estimates never disappear.
 
-        ``Média recente`` is the robust rolling mean of complete version tasks.
+        ``Média recente`` is 60 divided by the smoothed recent commit rate.
         Throughput is derived exclusively from recent ordered checkpoint commits.
-        ETA is commit throughput based after three commits and model/bootstrap based
-        before that (as calculated by ``SharedExecutionTimingModel.global_eta``).
+        ETA remains in bootstrap until five official commits and then uses the
+        presentation-only EWMA maintained by ``GlobalTimingStats``.
         """
         mean = (self._format_clock(self._last_global_mean)
                 if self._last_global_mean is not None else "calculando...")

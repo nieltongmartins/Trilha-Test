@@ -2,7 +2,51 @@ from __future__ import annotations
 
 import pytest
 
-from app.execution_timing import SharedExecutionTimingModel, TimedStage
+from app.execution_timing import (
+    GlobalTimingStats, SharedExecutionTimingModel, SlotTimingStats, TimedStage,
+)
+
+
+def test_global_rate_and_average_are_coherent_at_four_versions_per_minute():
+    stats = GlobalTimingStats(rate_alpha=1)
+    for timestamp in (0, 15, 30, 45, 60):
+        stats.record_commit(timestamp)
+    assert stats.recent_throughput == pytest.approx(4)
+    assert stats.recent_average == pytest.approx(15)
+
+
+def test_visual_rate_rises_gradually_when_raw_rate_changes():
+    stats = GlobalTimingStats(window_size=5, rate_alpha=.25)
+    for timestamp in (0, 15, 30, 45, 60):
+        stats.record_commit(timestamp)
+    previous = stats.recent_throughput
+    for timestamp in (70, 80, 90):
+        stats.record_commit(timestamp)
+    assert previous < stats.recent_throughput < 6
+
+
+def test_eta_ewma_converges_without_full_jump_and_never_loses_valid_value():
+    stats = GlobalTimingStats(eta_alpha=.2)
+    stats.recent_throughput = 1
+    stats.recent_commit_timestamps.extend((0, 1, 2, 3, 4))
+    assert stats.update_eta(600) == pytest.approx(10 * 3600)
+    stats.recent_throughput = 1.25
+    displayed = stats.update_eta(600)
+    assert 8 * 3600 < displayed < 10 * 3600
+    stats.recent_throughput = None
+    assert stats.update_eta(600) == displayed
+
+
+def test_slot_average_survives_wait_and_keeps_learning_robust_window():
+    stats = SlotTimingStats()
+    for duration in (10, 12, 11):
+        stats.complete(duration)
+    assert stats.average_duration == pytest.approx(11)
+    # Waiting has no API/event and therefore cannot contaminate or clear it.
+    assert stats.average_duration == pytest.approx(11)
+    stats.complete(13)
+    assert stats.completed_tasks == 4
+    assert stats.average_duration == pytest.approx(11.5)
 
 
 def test_bootstrap_first_sample_and_shared_slots():
