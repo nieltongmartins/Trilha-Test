@@ -669,6 +669,35 @@ class BrowserSharePointSource:
             )
         )
 
+    def get_current_version(self, spreadsheet: SpreadsheetInfo) -> VersionInfo:
+        """Obtém somente o watermark atual, sem tocar em ``File/Versions``."""
+        self._validate_spreadsheet(spreadsheet)
+        metadata = self._file_metadata(spreadsheet)
+        unique_id = metadata.get("UniqueId")
+        if not isinstance(unique_id, str) or unique_id.lower() != spreadsheet.drive_item_id.lower():
+            raise SharePointReadError("UniqueId atual diverge da identidade da planilha")
+        version_id, label = metadata.get("UIVersion"), metadata.get("UIVersionLabel")
+        if not isinstance(version_id, int) or not isinstance(label, str):
+            raise SharePointReadError("Arquivo atual sem UIVersion/UIVersionLabel")
+        return VersionInfo(
+            str(version_id), label,
+            metadata.get("TimeLastModified") if isinstance(metadata.get("TimeLastModified"), str) else None,
+            size=self._size(metadata), source_url=spreadsheet.path, is_current=True,
+        )
+
+    def list_version_delta(
+        self, spreadsheet: SpreadsheetInfo, anchor_id: str, anchor_label: str,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> tuple[VersionInfo, ...]:
+        """Consulta a cauda inclusiva; inconsistência é reportada ao catálogo."""
+        try:
+            technical_id = int(anchor_id)
+        except ValueError as error:
+            raise SharePointReadError("anchor técnico inválido") from error
+        return self._list_versions(
+            spreadsheet, progress_callback, checkpoint=(technical_id, anchor_label)
+        )
+
     def list_versions(
         self,
         spreadsheet: SpreadsheetInfo,

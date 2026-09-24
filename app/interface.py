@@ -21,6 +21,7 @@ from app.models import AuditExecutionStatus
 from app.progress import SmoothVersionProgress
 from app.report_artifacts import ReportArtifactManager
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
+from app.version_catalog import VersionCatalog
 
 if TYPE_CHECKING:
     from app.audit_service import AuditResult
@@ -76,7 +77,6 @@ class AuditApplication(ttk.Frame):
         # arquivos com dezenas de milhares de versões; reutilizá-la evita repetir
         # a mesma consulta ao clicar em "Continuar auditoria".
         self._version_cache: dict[str, tuple[float, tuple[VersionInfo, ...]]] = {}
-        self._version_cache_ttl = 300.0
         self.last_report: Path | None = None
         self._busy = False
         self._audit_active = False
@@ -618,10 +618,7 @@ class AuditApplication(ttk.Frame):
         cached = self._version_cache.get(key)
         if cached is None:
             return None
-        created_at, versions = cached
-        if time.monotonic() - created_at > self._version_cache_ttl:
-            self._version_cache.pop(key, None)
-            return None
+        _created_at, versions = cached
         return versions
 
     def _store_versions(
@@ -648,11 +645,10 @@ class AuditApplication(ttk.Frame):
             return
 
         if self._cached_versions(spreadsheet) is None:
-            row = self._database_row(spreadsheet)
-            self._begin_version_scan(row["versao_numero"] if row else None)
+            self._begin_version_scan()
 
         self._start_work(
-            "Consultando histórico de versões no SharePoint...",
+            "Carregando catálogo local e verificando novas versões...",
             lambda: self._spreadsheet_status(spreadsheet),
             self._show_status_finished,
         )
@@ -664,20 +660,17 @@ class AuditApplication(ttk.Frame):
         checkpoint = row["versao_numero"] if row else None
         cached = self._cached_versions(spreadsheet)
         if cached is None:
-            list_versions = getattr(self.source, "list_versions")
+            catalog = VersionCatalog(self.database, self.source)
             try:
-                versions = tuple(
-                    list_versions(
-                        spreadsheet,
-                        progress_callback=self._version_scan_updates.put,
-                        checkpoint_id=row["versao_id"] if row else None,
-                        checkpoint_label=checkpoint,
-                    )
-                )
-            except TypeError:
-                # Compatibilidade com fontes alternativas que ainda implementem
-                # a assinatura antiga do protocolo VersionSource.
-                versions = tuple(list_versions(spreadsheet))
+                sync = catalog.synchronize(spreadsheet, self._version_scan_updates.put)
+                versions = sync.versions
+                self._catalog_sync_source = sync.source
+                self._catalog_new_versions = sync.new_versions
+            except (AttributeError, TypeError):
+                # Fontes locais/de teste mantêm o contrato mínimo legado.
+                versions = tuple(self.source.list_versions(spreadsheet))
+                self._catalog_sync_source = "full_rebuild"
+                self._catalog_new_versions = len(versions)
             self._store_versions(spreadsheet, versions)
         else:
             versions = cached
@@ -709,7 +702,17 @@ class AuditApplication(ttk.Frame):
         self.audit_button.configure(
             text="Continuar auditoria" if checkpoint else "Auditar histórico"
         )
-        self.status.set("Pronto.")
+        source = getattr(self, "_catalog_sync_source", "memory")
+        new = getattr(self, "_catalog_new_versions", 0)
+        if source == "local_only":
+            self.status.set(
+                f"{total_versions:,} versões carregadas localmente. "
+                "Catálogo atualizado — nenhuma versão nova."
+            )
+        elif source == "delta":
+            self.status.set(f"{new} novas versões encontradas.")
+        else:
+            self.status.set(f"Catálogo local criado com {total_versions:,} versões.")
 
     def audit(self) -> None:
         from app.parallel_audit import ParallelAuditService
@@ -1023,9 +1026,7 @@ class AuditApplication(ttk.Frame):
         self.progress_value.set(0)
         self.progress_bar.start(12)
         prefix = (
-            f"Buscando versões após o checkpoint {checkpoint_label}..."
-            if checkpoint_label
-            else "Buscando versões no SharePoint..."
+            "Carregando catálogo local..."
         )
         self.progress_text.set(
             f"{prefix} Versões encontradas: 0 | "
@@ -1049,10 +1050,7 @@ class AuditApplication(ttk.Frame):
             else 0.0
         )
         prefix = (
-            f"Buscando versões após o checkpoint "
-            f"{self._version_scan_checkpoint_label}... "
-            if getattr(self, "_version_scan_checkpoint_label", None)
-            else "Buscando versões no SharePoint... "
+            "Sincronizando catálogo de versões... "
         )
         self.progress_text.set(
             prefix + f"Versões encontradas: {latest_count:,} | "
