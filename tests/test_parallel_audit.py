@@ -97,6 +97,11 @@ def test_prefetch_base_target_adapts_to_file_size(slots, average_bytes, expected
     assert prefetch_base_target(slots, average_bytes) == expected
 
 
+def test_large_files_keep_operational_prefetch_floor_for_worker_count():
+    assert prefetch_base_target(4, 64 * 1024**2) == 3
+    assert prefetch_base_target(8, 64 * 1024**2) == 4
+
+
 def test_parallel_scheduler_prefetches_once_by_technical_id(tmp_path: Path):
     items = history(tmp_path, 5)
 

@@ -362,7 +362,7 @@ def test_versions_read_error_is_presented_without_closing_interface() -> None:
     assert application.status.value == "Falha na operação: resposta REST incompatível"
 
 
-def test_audit_progress_displays_percentage_and_elapsed_without_duplicate_eta(monkeypatch) -> None:
+def test_audit_progress_displays_decimal_percentage_elapsed_and_global_eta(monkeypatch) -> None:
     application = AuditApplication.__new__(AuditApplication)
     application._audit_started_at = 90.0
     application._progress_completed = 0
@@ -374,7 +374,9 @@ def test_audit_progress_displays_percentage_and_elapsed_without_duplicate_eta(mo
     application._update_progress(1, 4)
 
     assert application.progress_value.value == 25
-    assert application.progress_text.value == "1 / 4 (25%) | Tempo total: 00:00:10"
+    assert application.progress_text.value == (
+        "1 / 4 (25,00%) | Tempo total: 00:00:10 | Tempo restante: calculando..."
+    )
 
 
 def test_confirmed_checkpoints_update_details_only_when_polled_on_main_thread() -> None:
@@ -651,7 +653,8 @@ def test_global_timing_preserves_last_valid_values_and_final_eta() -> None:
     assert "Média recente: 00:00:09" in message
     assert "Taxa recente: 28,4 versões/min" in message
     assert "Estimativa restante: 00:10:31" in message
-    assert "Slots ativos: 8/8" in message
+    assert "Slots processando: 8/8" in message
+    assert "Slots aguardando: 0/8" in message
     application._last_global_eta = 0.0
     assert "Estimativa restante: 00:00:00" in application._global_timing_message(0, 8)
 
@@ -665,7 +668,8 @@ def test_global_timing_bootstrap_fields_never_disappear() -> None:
         "Média recente: calculando...",
         "Taxa recente: calculando...",
         "Estimativa restante: calculando...",
-        "Slots ativos: 0/5",
+        "Slots processando: 0/5",
+        "Slots aguardando: 5/5",
     ]
 
 

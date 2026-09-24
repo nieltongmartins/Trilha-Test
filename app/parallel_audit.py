@@ -73,14 +73,15 @@ def scheduler_window_for_slots(slots: int) -> int:
 
 
 def prefetch_base_target(slots: int, avg_file_bytes: float) -> int:
-    """Return the conservative size-aware starting target."""
+    """Return a size-aware target without starving the selected worker pool."""
+    operational_floor = 2 if slots <= 2 else 3 if slots <= 4 else 4
     if avg_file_bytes < MIB:
         target = min(2 * slots, PREFETCH_MAX_TARGET)
     elif avg_file_bytes < 4 * MIB:
         target = min(slots, 8)
     else:
-        target = max(PREFETCH_MIN_TARGET, (slots + 1) // 2)
-    return max(PREFETCH_MIN_TARGET, min(PREFETCH_MAX_TARGET, target))
+        target = max(operational_floor, (slots + 1) // 2)
+    return max(operational_floor, min(PREFETCH_MAX_TARGET, target))
 
 
 @dataclass(slots=True)
@@ -192,6 +193,10 @@ class ParallelMetrics:
     pending_ratio: float = 0.0
     prefetch_bytes_pending: int = 0
     prefetch_bytes_ready: int = 0
+    slots_processing: int = 0
+    slots_waiting: int = 0
+    ready_zero_seconds: float = 0.0
+    pending_only_seconds: float = 0.0
 
 
 def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, float]]:
@@ -376,6 +381,14 @@ class ParallelAuditService(AuditService):
         self._download_normal: list[float] = []
         self._download_prefetch: list[float] = []
         self._worker_starvation_count = 0
+        self._slot_states: dict[int, TaskState] = {
+            slot: TaskState.WAITING for slot in range(1, slots + 1)
+        }
+        self._buffer_state_sampled_at = time.monotonic()
+        self._ready_zero_seconds = 0.0
+        self._pending_only_seconds = 0.0
+        self._slot_wait_started: dict[int, tuple[float, int]] = {}
+        self._slot_wait_durations: list[float] = []
         configure = getattr(source, "configure_prefetch_buffer", None)
         if callable(configure):
             configure(self.prefetch_target)
@@ -384,6 +397,8 @@ class ParallelAuditService(AuditService):
               started: float = 0.0, timed_stage: TimedStage | None = None,
               stage_started: float | None = None) -> None:
         task.state = state
+        if task.slot_id:
+            self._slot_states[task.slot_id] = state
         duration = time.perf_counter() - started if started else 0.0
         estimate = None
         if timed_stage is not None:
@@ -441,7 +456,8 @@ class ParallelAuditService(AuditService):
         return pending, ready
 
     def _set_prefetch_target(self, target: int, reason: str) -> None:
-        target = max(PREFETCH_MIN_TARGET, min(PREFETCH_MAX_TARGET, target))
+        floor = 2 if self.slots <= 2 else 3 if self.slots <= 4 else 4
+        target = max(floor, min(PREFETCH_MAX_TARGET, target))
         if target == self.prefetch_target:
             return
         old = self.prefetch_target
@@ -462,6 +478,13 @@ class ParallelAuditService(AuditService):
         self._target_observations = 0
         self._last_target_review = now
         ready, pending = self._prefetch_counts()
+        sampled = time.monotonic()
+        interval = max(0.0, sampled - self._buffer_state_sampled_at)
+        self._buffer_state_sampled_at = sampled
+        if ready == 0:
+            self._ready_zero_seconds += interval
+            if pending:
+                self._pending_only_seconds += interval
         avg_queue = statistics.fmean(self._queue_ages[-20:]) if self._queue_ages else 0.0
         avg_residual = statistics.fmean(self._residual_waits[-20:]) if self._residual_waits else 0.0
         avg_fetch = statistics.fmean(self._active_fetch_times[-20:]) if self._active_fetch_times else 0.0
@@ -470,7 +493,7 @@ class ParallelAuditService(AuditService):
         if self._pending_pressure_samples >= 2:
             self._set_prefetch_target(self.prefetch_target - 1, "pending_or_latency_pressure")
             self._pending_pressure_samples = 0
-        elif (ready == 0 and self._worker_starvation_count and avg_fetch and avg_fetch < 5.0
+        elif (ready == 0 and self._worker_starvation_count and avg_fetch and avg_fetch < 30.0
               and sum(self._buffer_bytes()) < self.max_prefetch_bytes // 2):
             self._set_prefetch_target(self.prefetch_target + 1, "ready_empty_fast_download")
 
@@ -679,6 +702,15 @@ class ParallelAuditService(AuditService):
                         if self._memory_pressure() and running:
                             break
                         task.slot_id = slot
+                        wait = self._slot_wait_started.pop(slot, None)
+                        if wait is not None:
+                            wait_seconds = max(0.0, time.monotonic() - wait[0])
+                            self._slot_wait_durations.append(wait_seconds)
+                            logger.info(
+                                "SLOT_WAIT_END slot_id=%d previous_sequence=%d "
+                                "next_sequence=%d wait_reason=WAIT_SCHEDULER wait_seconds=%.3f",
+                                slot, wait[1], task.sequence, wait_seconds,
+                            )
                         task.reservation_token = uuid4().hex
                         pair = pairs[task.sequence - 1]
                         task_started = time.perf_counter()
@@ -897,6 +929,18 @@ class ParallelAuditService(AuditService):
         for sequence in coordinator.promote_available():
             task = tasks[sequence - 1]
             self._slot(task, TaskState.COMPLETED, 100, "Checkpoint confirmado")
+            logger.info(
+                "SLOT_RELEASED slot_id=%d previous_sequence=%d next_sequence=%s",
+                task.slot_id or 0, sequence, sequence + 1 if sequence < total else "none",
+            )
+            # Confirmation is feedback, never an explanation for idle time.
+            self._slot(task, TaskState.WAITING, 0, "Aguardando próxima versão")
+            self._slot_wait_started[task.slot_id or 0] = (time.monotonic(), sequence)
+            logger.info(
+                "SLOT_WAIT_START slot_id=%d previous_sequence=%d next_sequence=%s "
+                "wait_reason=WAIT_SCHEDULER wait_seconds=0.000",
+                task.slot_id or 0, sequence, sequence + 1 if sequence < total else "none",
+            )
             self._report_progress(coordinator.committed, total)
             self._report_checkpoint(task.version_label, coordinator.committed,
                                     total - coordinator.committed)
@@ -925,6 +969,15 @@ class ParallelAuditService(AuditService):
         worker_busy = sum(self._worker_busy.values())
         worker_capacity = elapsed * (self.slots if self.backend != "sync" else 1)
         slot_busy = sum(self._slot_busy.values())
+        processing_states = {
+            TaskState.DOWNLOAD, TaskState.SHA, TaskState.PARSE, TaskState.COMPARE,
+            TaskState.STAGED,
+        }
+        slots_processing = sum(state in processing_states for state in self._slot_states.values())
+        slots_waiting = sum(
+            state in {TaskState.WAITING, TaskState.RESERVED, TaskState.COMPLETED}
+            for state in self._slot_states.values()
+        )
         logger.info(
             "TELEMETRIA_MEMORIA slots=%d rss_coordinator=%d rss_workers_total=%d "
             "rss_edge=%d rss_total=%d staged_count=%d window_occupancy=%d "
@@ -960,6 +1013,8 @@ class ParallelAuditService(AuditService):
             self._prefetch_counts()[0] / max(1, sum(self._prefetch_counts())),
             self._prefetch_counts()[1] / max(1, sum(self._prefetch_counts())),
             self._buffer_bytes()[0], self._buffer_bytes()[1],
+            slots_processing, slots_waiting, self._ready_zero_seconds,
+            self._pending_only_seconds,
         ))
 
     def _prefetch_resource_metrics(self) -> dict[str, int]:
