@@ -140,6 +140,57 @@ CREATE TABLE IF NOT EXISTS version_catalog_state (
     )
 );
 
+-- Perfil operacional separado dos dados funcionais da auditoria. A identidade
+-- composta do item SharePoint é serializada em workbook_identity.
+CREATE TABLE IF NOT EXISTS workbook_runtime_profile (
+    id INTEGER PRIMARY KEY,
+    workbook_identity TEXT NOT NULL UNIQUE,
+    avg_file_bytes REAL NOT NULL DEFAULT 0 CHECK (avg_file_bytes >= 0),
+    recommended_slots INTEGER CHECK (recommended_slots BETWEEN 1 AND 8),
+    recommended_prefetch_target INTEGER CHECK (recommended_prefetch_target >= 1),
+    best_measured_throughput REAL NOT NULL DEFAULT 0,
+    best_measured_slots INTEGER CHECK (best_measured_slots BETWEEN 1 AND 8),
+    last_slots_used INTEGER CHECK (last_slots_used BETWEEN 1 AND 8),
+    last_prefetch_target INTEGER,
+    avg_download_seconds REAL NOT NULL DEFAULT 0,
+    avg_read_xlsx_seconds REAL NOT NULL DEFAULT 0,
+    avg_compare_seconds REAL NOT NULL DEFAULT 0,
+    avg_worker_task_seconds REAL NOT NULL DEFAULT 0,
+    avg_worker_utilization REAL NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    benchmark_count INTEGER NOT NULL DEFAULT 0,
+    recommendation_confidence TEXT NOT NULL DEFAULT 'LOW'
+        CHECK (recommendation_confidence IN ('LOW', 'MEDIUM', 'HIGH')),
+    profile_needs_revalidation INTEGER NOT NULL DEFAULT 0
+        CHECK (profile_needs_revalidation IN (0, 1)),
+    last_updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_benchmark_at TEXT,
+    profile_version INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS workbook_runtime_benchmark (
+    id INTEGER PRIMARY KEY,
+    workbook_identity TEXT NOT NULL,
+    run_kind TEXT NOT NULL DEFAULT 'normal_run'
+        CHECK (run_kind IN ('normal_run', 'benchmark_run')),
+    slots INTEGER NOT NULL CHECK (slots BETWEEN 1 AND 8),
+    prefetch_target INTEGER NOT NULL,
+    versions_processed INTEGER NOT NULL,
+    elapsed_seconds REAL NOT NULL,
+    throughput_per_minute REAL NOT NULL,
+    avg_download REAL NOT NULL DEFAULT 0,
+    avg_read_xlsx REAL NOT NULL DEFAULT 0,
+    avg_compare REAL NOT NULL DEFAULT 0,
+    avg_worker_task REAL NOT NULL DEFAULT 0,
+    worker_utilization REAL NOT NULL DEFAULT 0,
+    avg_file_bytes REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_normally INTEGER NOT NULL CHECK (completed_normally IN (0, 1)),
+    comparable INTEGER NOT NULL DEFAULT 1 CHECK (comparable IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_benchmark_workbook
+    ON workbook_runtime_benchmark (workbook_identity, created_at);
+
 CREATE INDEX IF NOT EXISTS idx_versao_planilha
     ON versao_processada (planilha_id, data_processamento);
 CREATE INDEX IF NOT EXISTS idx_alteracao_planilha
@@ -153,7 +204,7 @@ CREATE INDEX IF NOT EXISTS idx_erro_execucao
 # Colunas acrescentadas ao modelo depois da criação dos primeiros bancos F1.
 # CREATE TABLE IF NOT EXISTS não evolui uma tabela que já existe, portanto cada
 # acréscimo precisa permanecer registrado como uma migração explícita.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 VERSION_PROCESSED_MIGRATIONS = {
     "autor_email": "TEXT",
     "autor_login": "TEXT",

@@ -23,8 +23,9 @@ from app.audit_service import AuditResult, AuditService
 from app.excel.comparator import CellChange, compare_snapshots
 from app.excel.reader import read_workbook
 from app.integrity import sha256_file
-from app.execution_timing import OPERATIONAL_STAGES, SharedExecutionTimingModel, TimedStage
+from app.execution_timing import SharedExecutionTimingModel, TimedStage
 from app.models import AuditExecutionStatus
+from app.runtime_profile import RuntimeProfileStore, RuntimeSample, workbook_identity
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 
 
@@ -334,6 +335,8 @@ class ParallelAuditService(AuditService):
                  metrics_callback: Callable[[ParallelMetrics], None] | None = None,
                  staging_directory: str | Path | None = None, max_retries: int = 1,
                  max_prefetch_bytes: int = DEFAULT_MAX_PREFETCH_BYTES,
+                 initial_avg_file_bytes: float = 0.0,
+                 recommended_prefetch_target: int | None = None,
                  timing_model: SharedExecutionTimingModel | None = None,
                  **kwargs) -> None:
         if not MIN_WORKERS <= slots <= MAX_WORKERS:
@@ -361,8 +364,12 @@ class ParallelAuditService(AuditService):
         self._slot_busy: dict[int, float] = {slot: 0.0 for slot in range(1, slots + 1)}
         self._download_starvation_time = 0.0
         self.max_prefetch_bytes = max_prefetch_bytes
-        self._avg_file_bytes = 0.0
-        self.prefetch_target = prefetch_base_target(slots, self._avg_file_bytes)
+        self._avg_file_bytes = max(0.0, initial_avg_file_bytes)
+        calculated_target = prefetch_base_target(slots, self._avg_file_bytes)
+        self.prefetch_target = max(
+            PREFETCH_MIN_TARGET,
+            min(PREFETCH_MAX_TARGET, recommended_prefetch_target or calculated_target),
+        )
         self.prefetch_target_initial = self.prefetch_target
         self.prefetch_target_min = self.prefetch_target
         self.prefetch_target_max = self.prefetch_target
@@ -614,6 +621,22 @@ class ParallelAuditService(AuditService):
     def audit(self, spreadsheet: SpreadsheetInfo,
               versions: list[VersionInfo] | tuple[VersionInfo, ...] | None = None) -> AuditResult:
         connection = self.database.connection
+        identity = workbook_identity(spreadsheet)
+        # Fail safe: banco corrompido ou perfil de versão antiga jamais impede a auditoria.
+        profile = RuntimeProfileStore(connection).load(identity)
+        if profile is not None:
+            self._avg_file_bytes = profile.avg_file_bytes
+            target = profile.recommended_prefetch_target
+            if target is None:
+                target = prefetch_base_target(self.slots, self._avg_file_bytes)
+            self.prefetch_target = max(PREFETCH_MIN_TARGET, min(PREFETCH_MAX_TARGET, target))
+            self.prefetch_target_initial = self.prefetch_target
+            self.prefetch_target_min = self.prefetch_target
+            self.prefetch_target_max = self.prefetch_target
+            self._target_calibrated = True
+            configure = getattr(self.source, "configure_prefetch_buffer", None)
+            if callable(configure):
+                configure(self.prefetch_target)
         spreadsheet_id = self._upsert_spreadsheet(connection, spreadsheet)
         checkpoint = connection.execute(
             "SELECT versao_id, versao_numero FROM checkpoint WHERE planilha_id=?",
@@ -627,6 +650,9 @@ class ParallelAuditService(AuditService):
         ).lastrowid
         connection.commit()
         staging: StagingStore | None = None
+        coordinator: OrderedCommitCoordinator | None = None
+        learnable = False
+        completed_normally = False
         acquired: dict[str, Path] = {}
         started = time.perf_counter()
         configured_workers = self.slots if self.backend != "sync" else 1
@@ -775,12 +801,14 @@ class ParallelAuditService(AuditService):
 
             if self.stop_event.is_set():
                 self.timing_model.stop()
+                learnable = True
                 return self._stop_execution(connection, execution_id, code, initial,
                                             coordinator.committed, coordinator.changes,
                                             coordinator.final or initial)
             self._finish_execution(connection, execution_id, AuditExecutionStatus.COMPLETED,
                                    coordinator.final, coordinator.committed,
                                    coordinator.changes, None)
+            learnable = completed_normally = True
             return AuditResult(code, AuditExecutionStatus.COMPLETED, coordinator.committed,
                                coordinator.changes, initial, coordinator.final)
         except Exception as error:
@@ -831,6 +859,34 @@ class ParallelAuditService(AuditService):
                 worker_busy / worker_capacity, slot_busy,
                 max(0.0, elapsed * self.slots - slot_busy), self.scheduler_window,
             )
+            if learnable and coordinator is not None:
+                staged = [item for item in self.telemetry if item.get("stage") == "STAGED"]
+                downloads = [float(item["download_transfer"]) for item in self.telemetry
+                             if item.get("stage") == "DOWNLOAD"]
+                def average(key: str) -> float:
+                    values = [float(item[key]) for item in staged if key in item]
+                    return statistics.fmean(values) if values else 0.0
+                utilization = worker_busy / worker_capacity if worker_capacity else 0.0
+                sample = RuntimeSample(
+                    slots=self.slots, prefetch_target=self.prefetch_target,
+                    versions_processed=coordinator.committed, elapsed_seconds=elapsed,
+                    avg_download=statistics.fmean(downloads) if downloads else 0.0,
+                    avg_read_xlsx=average("read_xlsx"), avg_compare=average("compare"),
+                    avg_worker_task=average("worker_task_duration"),
+                    worker_utilization=utilization, avg_file_bytes=self._avg_file_bytes,
+                    completed_normally=completed_normally,
+                )
+                logger.info(
+                    "RUNTIME_BENCHMARK_SUMMARY workbook=%s slots=%d versions_processed=%d "
+                    "elapsed=%.3f throughput=%.3f avg_read=%.3f avg_compare=%.3f "
+                    "worker_utilization=%.4f prefetch_target=%d", identity, self.slots,
+                    coordinator.committed, elapsed, sample.throughput, sample.avg_read_xlsx,
+                    sample.avg_compare, utilization, self.prefetch_target,
+                )
+                try:
+                    RuntimeProfileStore(connection).record(identity, sample)
+                except sqlite3.Error:
+                    logger.warning("Não foi possível persistir runtime profile", exc_info=True)
             # Freeze only the execution clock.  Samples and recent official
             # commits remain available if this spreadsheet is continued.
             self.timing_model.stop()
