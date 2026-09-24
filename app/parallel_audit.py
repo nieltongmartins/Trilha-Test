@@ -28,6 +28,10 @@ from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 
 
 logger = logging.getLogger("auditoria_excel.parallel")
+MIN_WORKERS = 1
+MAX_WORKERS = 8
+MEMORY_PRESSURE_PERCENT = 90.0
+MEMORY_MIN_AVAILABLE_BYTES = 512 * 1024 * 1024
 
 
 class TaskState(StrEnum):
@@ -107,6 +111,12 @@ class ParallelMetrics:
     rss_edge: int = 0
     estimated_remaining: float | None = None
     window_occupancy: int = 0
+    rss_workers_by_pid: tuple[tuple[int, int], ...] = ()
+    rss_total: int = 0
+    slot_utilization: tuple[tuple[int, float], ...] = ()
+    download_starvation_time: float = 0.0
+    cpu_coordinator_percent: float = 0.0
+    cpu_workers_percent: float = 0.0
 
 
 def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, float]]:
@@ -229,7 +239,7 @@ class OrderedCommitCoordinator:
 
 
 class ParallelAuditService(AuditService):
-    """Scheduler com fila dinâmica e de um a cinco workers independentes."""
+    """Scheduler com fila dinâmica e de um a oito workers independentes."""
 
     def __init__(self, database, source: VersionSource, *, slots: int = 2,
                  backend: Literal["sync", "thread", "process"] = "process",
@@ -238,8 +248,8 @@ class ParallelAuditService(AuditService):
                  staging_directory: str | Path | None = None, max_retries: int = 1,
                  timing_model: SharedExecutionTimingModel | None = None,
                  **kwargs) -> None:
-        if not 1 <= slots <= 5:
-            raise ValueError("slots deve estar entre 1 e 5")
+        if not MIN_WORKERS <= slots <= MAX_WORKERS:
+            raise ValueError("slots deve estar entre 1 e 8")
         super().__init__(database, source, **kwargs)
         self.slots = slots
         self.backend = backend
@@ -254,19 +264,35 @@ class ParallelAuditService(AuditService):
         self.telemetry: list[dict[str, float | int | str]] = []
         self.timing_model = timing_model or SharedExecutionTimingModel()
         self._task_stages: dict[int, tuple[TimedStage, ...]] = {}
+        self._last_slot_log: dict[int, tuple[float, TaskState]] = {}
+        self._worker_pids: set[int] = set()
+        self._slot_busy: dict[int, float] = {slot: 0.0 for slot in range(1, slots + 1)}
+        self._download_starvation_time = 0.0
 
     def _slot(self, task: VersionTask, state: TaskState, percent: float, stage: str,
               started: float = 0.0, timed_stage: TimedStage | None = None,
               stage_started: float | None = None) -> None:
         task.state = state
+        duration = time.perf_counter() - started if started else 0.0
+        estimate = None
+        if timed_stage is not None:
+            estimate = self.timing_model.estimate_task(
+                timed_stage, max(0.0, time.perf_counter() - (stage_started or started)),
+                self._task_stages.get(task.sequence, ()), state is TaskState.COMPLETED,
+            )
+        now = time.monotonic()
+        previous = self._last_slot_log.get(task.slot_id or 0)
+        if previous is None or previous[1] is not state or now - previous[0] >= 3.0:
+            self._last_slot_log[task.slot_id or 0] = (now, state)
+            logger.info(
+                "SLOT_PROGRESS slot_id=%d sequence=%s stage=%s elapsed=%.3f "
+                "estimated_stage=%.3f task_progress=%.1f eta_task=%.3f",
+                task.slot_id or 0, task.sequence, timed_stage.value if timed_stage else state.value,
+                duration, estimate.stage_average if estimate else 0.0,
+                estimate.progress if estimate else percent,
+                estimate.remaining if estimate else 0.0,
+            )
         if self.slot_callback:
-            duration = time.perf_counter() - started if started else 0.0
-            estimate = None
-            if timed_stage is not None:
-                estimate = self.timing_model.estimate_task(
-                    timed_stage, max(0.0, time.perf_counter() - (stage_started or started)),
-                    self._task_stages.get(task.sequence, ()), state is TaskState.COMPLETED,
-                )
             self.slot_callback(SlotProgress(
                 task.slot_id or 0, task.reservation_token, task.technical_version_id,
                 task.version_label, task.sequence, state,
@@ -348,6 +374,14 @@ class ParallelAuditService(AuditService):
                         if not available_slots or task.sequence in reserved or task.state in (TaskState.STAGED, TaskState.COMPLETED):
                             continue
                         slot = available_slots.pop(0)
+                        while self._memory_pressure() and not self.stop_event.is_set():
+                            logger.warning("MEMORY_BACKPRESSURE slots=%d action=hold_reservations", self.slots)
+                            self._metrics(started, coordinator, staging, len(running))
+                            if running:
+                                break
+                            time.sleep(.25)
+                        if self._memory_pressure() and running:
+                            break
                         task.slot_id = slot
                         task.reservation_token = uuid4().hex
                         pair = pairs[task.sequence - 1]
@@ -361,6 +395,9 @@ class ParallelAuditService(AuditService):
                                            task_started, TimedStage.DOWNLOAD_TRANSFER, download_started)
                                 acquired[version.id] = self.source.get_version(spreadsheet, version)
                                 download_seconds = time.perf_counter() - download_started
+                                # Downloader serial: outros slots livres ficaram sem arquivo nesse intervalo.
+                                idle_slots = max(0, self.slots - len(running) - 1)
+                                self._download_starvation_time += download_seconds * idle_slots
                                 self.timing_model.observe(TimedStage.DOWNLOAD_TRANSFER, download_seconds, slot)
                                 self._task_stages[task.sequence] = (*self._task_stages[task.sequence], TimedStage.DOWNLOAD_TRANSFER)
                                 sha_started = time.perf_counter()
@@ -439,6 +476,10 @@ class ParallelAuditService(AuditService):
                 self.timing_model.observe(TimedStage.COMPARE, metrics["compare"], task.slot_id)
                 self.timing_model.observe(TimedStage.STAGING, metrics["staging"], task.slot_id)
                 self.timing_model.observe(TimedStage.TOTAL_TASK, time.perf_counter() - started, task.slot_id)
+                self._slot_busy[task.slot_id or 0] = self._slot_busy.get(task.slot_id or 0, 0.0) + (
+                    time.perf_counter() - started
+                )
+                self._worker_pids.add(int(metrics["worker_pid"]))
                 self.telemetry.append({
                     "slot_id": task.slot_id or 0,
                     "task_id": task.reservation_token or "",
@@ -481,12 +522,7 @@ class ParallelAuditService(AuditService):
                  staging: StagingStore, active: int) -> None:
         if not self.metrics_callback:
             return
-        rss = 0
-        try:
-            import resource
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
-        except (ImportError, OSError):
-            pass
+        rss = self._process_rss(os.getpid())
         elapsed = time.perf_counter() - started
         recent_window = min(60.0, elapsed)
         recent = (
@@ -494,15 +530,67 @@ class ParallelAuditService(AuditService):
             if recent_window > 0
             else 0.0
         )
-        worker_rss = 0
-        try:
-            worker_rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024
-        except (NameError, OSError):
-            pass
+        workers_by_pid = tuple((pid, self._process_rss(pid)) for pid in sorted(self._worker_pids))
+        worker_rss = sum(value for _pid, value in workers_by_pid)
+        edge_rss = self._edge_rss()
+        cpu_coordinator, cpu_workers = self._cpu_percentages()
+        utilization = tuple(
+            (slot, min(100.0, busy / max(elapsed, .001) * 100.0))
+            for slot, busy in sorted(self._slot_busy.items())
+        )
+        logger.info(
+            "TELEMETRIA_MEMORIA slots=%d rss_coordinator=%d rss_workers_total=%d "
+            "rss_edge=%d rss_total=%d staged_count=%d window_occupancy=%d",
+            self.slots, rss, worker_rss, edge_rss, rss + worker_rss + edge_rss,
+            staging.count(), staging.count() + active,
+        )
         self.metrics_callback(ParallelMetrics(
             elapsed, coordinator.committed, float(recent), staging.count(), active,
-            coordinator.committed, 2 * self.slots, rss, worker_rss, 0,
+            coordinator.committed, 2 * self.slots, rss, worker_rss, edge_rss,
             self.timing_model.global_eta(max(len(coordinator.pairs) - coordinator.committed, 0),
                                          max(active, self.slots)),
-            staging.count() + active,
+            staging.count() + active, workers_by_pid, rss + worker_rss + edge_rss,
+            utilization, self._download_starvation_time, cpu_coordinator, cpu_workers,
         ))
+
+    @staticmethod
+    def _process_rss(pid: int) -> int:
+        try:
+            import psutil
+            return int(psutil.Process(pid).memory_info().rss)
+        except (ImportError, OSError):
+            try:
+                fields = Path(f"/proc/{pid}/statm").read_text(encoding="ascii").split()
+                return int(fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+            except (OSError, IndexError, ValueError):
+                return 0
+
+    @staticmethod
+    def _edge_rss() -> int:
+        try:
+            import psutil
+            return sum(
+                int(process.info["memory_info"].rss)
+                for process in psutil.process_iter(("name", "memory_info"))
+                if "edge" in (process.info["name"] or "").lower()
+            )
+        except (ImportError, OSError):
+            return 0
+
+    def _cpu_percentages(self) -> tuple[float, float]:
+        try:
+            import psutil
+            coordinator = psutil.Process(os.getpid()).cpu_percent(None)
+            workers = sum(psutil.Process(pid).cpu_percent(None) for pid in self._worker_pids)
+            return float(coordinator), float(workers)
+        except (ImportError, OSError):
+            return 0.0, 0.0
+
+    @staticmethod
+    def _memory_pressure() -> bool:
+        try:
+            import psutil
+            memory = psutil.virtual_memory()
+            return memory.percent >= MEMORY_PRESSURE_PERCENT or memory.available < MEMORY_MIN_AVAILABLE_BYTES
+        except ImportError:
+            return False

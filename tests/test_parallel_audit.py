@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
+import threading
 import time
 
 from openpyxl import Workbook
@@ -51,10 +52,10 @@ def official_rows(connection: sqlite3.Connection):
     return versions, changes, checkpoint
 
 
-def test_one_to_five_slots_produce_identical_official_database(tmp_path: Path):
+def test_one_to_eight_slots_produce_identical_official_database(tmp_path: Path):
     items = history(tmp_path)
     outputs = []
-    for slots in (1, 2, 3, 4, 5):
+    for slots in range(1, 9):
         with Database(tmp_path / f"audit-{slots}.db") as database:
             database.initialize()
             result = ParallelAuditService(
@@ -68,11 +69,11 @@ def test_one_to_five_slots_produce_identical_official_database(tmp_path: Path):
     assert len({row[2] for row in outputs[-1][0]}) == len(items) - 1
 
 
-@pytest.mark.parametrize("slots", [0, 6])
-def test_worker_count_is_limited_to_one_through_five(tmp_path: Path, slots: int):
+@pytest.mark.parametrize("slots", [0, 9])
+def test_worker_count_is_limited_to_one_through_eight(tmp_path: Path, slots: int):
     with Database(tmp_path / "invalid.db") as database:
         database.initialize()
-        with pytest.raises(ValueError, match="entre 1 e 5"):
+        with pytest.raises(ValueError, match="entre 1 e 8"):
             ParallelAuditService(database, source([]), slots=slots)
 
 
@@ -134,3 +135,37 @@ def test_restart_discards_staging_and_resumes_from_official_checkpoint(tmp_path:
         rows = list(database.connection.execute("SELECT versao_atual_id FROM versao_processada"))
         assert len(rows) == 3
         assert len({row[0] for row in rows}) == 3
+
+
+def test_pause_and_resume_at_safe_boundary_with_eight_slots(tmp_path: Path):
+    items = history(tmp_path, 3)
+    pause = threading.Event()
+    pause.set()
+    controls = []
+    timer = threading.Timer(.1, pause.clear)
+    timer.start()
+    try:
+        with Database(tmp_path / "pause.db") as database:
+            database.initialize()
+            result = ParallelAuditService(
+                database, source(items), slots=8, backend="thread",
+                pause_event=pause, control_callback=lambda state, checkpoint: controls.append(state),
+                staging_directory=tmp_path / "stage-pause",
+            ).audit(SHEET)
+        assert result.status is AuditExecutionStatus.COMPLETED
+        assert controls[:2] == ["paused", "resumed"]
+    finally:
+        timer.cancel()
+
+
+def test_stop_with_eight_slots_preserves_empty_checkpoint(tmp_path: Path):
+    stop = threading.Event()
+    stop.set()
+    with Database(tmp_path / "stop.db") as database:
+        database.initialize()
+        result = ParallelAuditService(
+            database, source(history(tmp_path, 3)), slots=8, backend="thread",
+            stop_event=stop, staging_directory=tmp_path / "stage-stop",
+        ).audit(SHEET)
+        assert result.status is AuditExecutionStatus.STOPPED
+        assert database.connection.execute("SELECT count(*) FROM checkpoint").fetchone()[0] == 0

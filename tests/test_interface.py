@@ -420,6 +420,13 @@ def test_duration_uses_hours_only_when_needed() -> None:
     assert AuditApplication._format_duration(3661) == "01:01:01"
 
 
+def test_eight_slots_use_four_rows_and_two_columns() -> None:
+    assert [AuditApplication.slot_grid_position(slot) for slot in range(1, 9)] == [
+        (0, 0), (0, 1), (1, 0), (1, 1),
+        (2, 0), (2, 1), (3, 0), (3, 1),
+    ]
+
+
 def test_complete_deletion_cancellation_does_not_touch_local_database(monkeypatch) -> None:
     application = AuditApplication.__new__(AuditApplication)
     calls = []
