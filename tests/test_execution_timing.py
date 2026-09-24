@@ -96,3 +96,37 @@ def test_very_fast_and_slow_slots_share_a_bounded_estimate(fast, slow):
     for value in (1, 1.1, 1.2, fast, slow):
         model.observe(TimedStage.COMPARE, value)
     assert fast <= model.average(TimedStage.COMPARE) < slow
+
+
+def test_controlled_stage_samples_advance_inside_download_and_read():
+    model = SharedExecutionTimingModel(baseline={
+        TimedStage.DOWNLOAD_FETCH: .001,
+        TimedStage.DOWNLOAD_TRANSFER: 2,
+        TimedStage.SHA: .001,
+        TimedStage.READ_XLSX: 4,
+        TimedStage.COMPARE: 1,
+        TimedStage.STAGING: .001,
+    })
+    download = [model.estimate_task(TimedStage.DOWNLOAD_TRANSFER, t).progress
+                for t in (.5, 1, 1.5, 2)]
+    assert download == sorted(download)
+    assert len(set(download)) == 4
+    completed = (TimedStage.DOWNLOAD_FETCH, TimedStage.DOWNLOAD_TRANSFER,
+                 TimedStage.SHA)
+    reading = [model.estimate_task(TimedStage.READ_XLSX, t, completed).progress
+               for t in (1, 2, 3)]
+    assert reading == sorted(reading)
+    assert download[-1] < reading[0] < reading[-1] < 100
+
+
+def test_slow_stage_keeps_moving_fast_stage_finishes_only_on_fact_and_mean_cannot_regress():
+    model = SharedExecutionTimingModel(baseline={TimedStage.READ_XLSX: 2})
+    slow = [model.estimate_task(TimedStage.READ_XLSX, t).progress for t in (2, 4, 8)]
+    assert slow[0] < slow[1] < slow[2] < 100
+    fast_running = model.estimate_task(TimedStage.READ_XLSX, 1)
+    assert fast_running.progress < 100
+    assert model.estimate_task(TimedStage.READ_XLSX, 1, finished=True).progress == 100
+    displayed = fast_running.progress
+    model.observe(TimedStage.READ_XLSX, 10)
+    recalculated = model.estimate_task(TimedStage.READ_XLSX, 1).progress
+    assert max(displayed, recalculated) >= displayed

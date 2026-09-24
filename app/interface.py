@@ -258,6 +258,7 @@ class AuditApplication(ttk.Frame):
         self.slot_progress_values = []
         self.slot_stage_texts = []
         self.slot_timing_texts = []
+        self._slot_visual_events = []
         self._rebuild_slot_frames()
         # Aliases conservados para integrações e testes da tela serial anterior.
         self.current_version_frame = self.slot_frames[0]
@@ -282,6 +283,7 @@ class AuditApplication(ttk.Frame):
         self.slot_progress_values = []
         self.slot_stage_texts = []
         self.slot_timing_texts = []
+        self._slot_visual_events = []
         count = max(1, min(8, int(self.worker_count.get())))
         for slot_id in range(1, count + 1):
             row, column = self.slot_grid_position(slot_id)
@@ -305,6 +307,7 @@ class AuditApplication(ttk.Frame):
             self.slot_progress_values.append(value)
             self.slot_stage_texts.append(stage)
             self.slot_timing_texts.append(timing)
+            self._slot_visual_events.append(None)
         self.current_version_frame = self.slot_frames[0]
         self.version_progress_value = self.slot_progress_values[0]
         self.version_stage_text = self.slot_stage_texts[0]
@@ -748,6 +751,7 @@ class AuditApplication(ttk.Frame):
         self.global_timing_text.set(self._global_timing_message(0, len(self.slot_frames)))
         self._progress_completed = 0
         self._progress_total = 0
+        self._slot_visual_events = [None] * len(self.slot_frames)
         self.progress_value.set(0)
         self.progress_text.set("0 / 0 (0%) | Tempo total: 00:00")
         self._current_version_started_at = None
@@ -1111,11 +1115,16 @@ class AuditApplication(ttk.Frame):
             self.slot_frames[index].configure(
                 text=f"SLOT {event.slot_id} — {self._compact_text(event.version or '—', 24)}"
             )
-            self.slot_progress_values[index].set(event.percent)
+            previous = self._slot_visual_events[index]
+            same_task = previous is not None and previous.task_id == event.task_id
+            current = float(self.slot_progress_values[index].get()) if same_task else 0.0
+            self.slot_progress_values[index].set(max(current, event.percent))
+            self._slot_visual_events[index] = event
             self.slot_stage_texts[index].set(self._compact_text(event.stage, 42))
             self.slot_timing_texts[index].set(
                 f"Decorrido: {self._format_clock(event.duration)}"
             )
+        self._tick_slot_progress()
         latest = None
         while True:
             try:
@@ -1134,6 +1143,33 @@ class AuditApplication(ttk.Frame):
             self.global_timing_text.set(self._global_timing_message(
                 latest.active_slots, len(self.slot_frames)
             ))
+
+    def _tick_slot_progress(self) -> None:
+        """Interpola os slots no MainThread; eventos continuam autoritativos."""
+        model = getattr(self, "_timing_model", None)
+        if model is None or not getattr(self, "_audit_active", False):
+            return
+        if self._stop_event.is_set():
+            return
+        now = model.active_now()
+        for index, event in enumerate(getattr(self, "_slot_visual_events", ())):
+            if event is None or event.timed_stage is None or event.percent >= 100:
+                continue
+            stage_started = event.stage_started_active
+            if stage_started is None:
+                continue
+            estimate = model.estimate_task(
+                event.timed_stage, max(0.0, now - stage_started),
+                event.completed_stages,
+            )
+            # Mudanças na média compartilhada só alteram a velocidade futura.
+            current = float(self.slot_progress_values[index].get())
+            self.slot_progress_values[index].set(max(current, min(99.9, estimate.progress)))
+            if event.task_started_active is not None:
+                elapsed = max(0.0, now - event.task_started_active)
+                self.slot_timing_texts[index].set(
+                    f"Decorrido: {self._format_clock(elapsed)}"
+                )
 
     def _poll_version_progress_updates(self) -> None:
         """Aplica eventos da worker exclusivamente pela thread principal do Tk."""
