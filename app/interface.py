@@ -243,7 +243,9 @@ class AuditApplication(ttk.Frame):
             progress, variable=self.progress_value, maximum=100, mode="determinate"
         )
         self.progress_bar.grid(row=0, column=0, sticky="ew")
-        self.progress_text = tk.StringVar(value="0 / 0 (0%) | Tempo total: 00:00")
+        self.progress_text = tk.StringVar(
+            value="0 / 0 (0,00%) | Tempo total: 00:00:00 | Tempo restante: calculando..."
+        )
         ttk.Label(progress, textvariable=self.progress_text).grid(row=1, column=0, sticky="w")
         self.global_timing_text = tk.StringVar(value=self._global_timing_message(0, 0))
         ttk.Label(progress, textvariable=self.global_timing_text, justify="left").grid(
@@ -753,7 +755,9 @@ class AuditApplication(ttk.Frame):
         self._progress_total = 0
         self._slot_visual_events = [None] * len(self.slot_frames)
         self.progress_value.set(0)
-        self.progress_text.set("0 / 0 (0%) | Tempo total: 00:00")
+        self.progress_text.set(
+            "0 / 0 (0,00%) | Tempo total: 00:00:00 | Tempo restante: calculando..."
+        )
         self._current_version_started_at = None
         self._current_version = "—"
         self._smooth_version_progress = SmoothVersionProgress()
@@ -1138,10 +1142,13 @@ class AuditApplication(ttk.Frame):
                 self._last_global_mean = latest.mean_task
             if throughput is not None and throughput > 0:
                 self._last_global_throughput = throughput
-            if latest.estimated_remaining is not None:
-                self._last_global_eta = latest.estimated_remaining
+            if latest.committed >= 5 and latest.estimated_remaining is not None:
+                # Smooth presentation only; scheduler/throughput remain untouched.
+                self._last_global_eta = (latest.estimated_remaining
+                    if self._last_global_eta is None else
+                    .8 * self._last_global_eta + .2 * latest.estimated_remaining)
             self.global_timing_text.set(self._global_timing_message(
-                latest.active_slots, len(self.slot_frames)
+                latest.slots_processing, len(self.slot_frames), latest.slots_waiting
             ))
 
     def _tick_slot_progress(self) -> None:
@@ -1256,16 +1263,13 @@ class AuditApplication(ttk.Frame):
         elapsed = self._audit_elapsed()
         percent = 0 if total <= 0 else completed / total * 100
         self.progress_value.set(percent)
-        if completed > 0 and completed < total:
-            remaining = elapsed / completed * (total - completed)
-            estimate = self._format_duration(remaining)
-        elif total > 0 and completed >= total:
-            estimate = "00:00"
-        else:
-            estimate = "calculando"
+        last_eta = getattr(self, "_last_global_eta", None)
+        estimate = (self._format_clock(last_eta)
+                    if last_eta is not None else "calculando...")
+        percent_text = f"{percent:.2f}".replace(".", ",")
         self.progress_text.set(
-            f"{completed} / {total} ({percent:.0f}%) | "
-            f"Tempo total: {self._format_clock(elapsed)}"
+            f"{completed} / {total} ({percent_text}%) | "
+            f"Tempo total: {self._format_clock(elapsed)} | Tempo restante: {estimate}"
         )
         if hasattr(self, "version_timing_text"):
             self._update_version_timing()
@@ -1298,7 +1302,8 @@ class AuditApplication(ttk.Frame):
         return (time.monotonic() - self._audit_started_at
                 if self._audit_started_at is not None else 0.0)
 
-    def _global_timing_message(self, active_slots: int, total_slots: int) -> str:
+    def _global_timing_message(self, processing_slots: int, total_slots: int,
+                               waiting_slots: int | None = None) -> str:
         """Stable four-line aggregate view; last valid estimates never disappear.
 
         ``Média recente`` is the robust rolling mean of complete version tasks.
@@ -1312,9 +1317,13 @@ class AuditApplication(ttk.Frame):
                 if self._last_global_throughput is not None else "calculando...")
         eta = (self._format_clock(self._last_global_eta)
                if self._last_global_eta is not None else "calculando...")
+        waiting_slots = (max(0, total_slots - processing_slots)
+                         if waiting_slots is None else waiting_slots)
         return (f"Média recente: {mean}\nTaxa recente: {rate}"
                 f"{' versões/min' if self._last_global_throughput is not None else ''}\n"
-                f"Estimativa restante: {eta}\nSlots ativos: {active_slots}/{total_slots}")
+                f"Estimativa restante: {eta}\n"
+                f"Slots processando: {processing_slots}/{total_slots}\n"
+                f"Slots aguardando: {waiting_slots}/{total_slots}")
 
     @staticmethod
     def _compact_text(value: object, limit: int) -> str:

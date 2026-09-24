@@ -112,6 +112,19 @@ CREATE TABLE IF NOT EXISTS erro_processamento (
         REFERENCES planilha (id) ON DELETE RESTRICT
 );
 
+-- Catálogo de descoberta; independente do checkpoint de auditoria e sem XLSX.
+CREATE TABLE IF NOT EXISTS version_catalog (
+    workbook_identity TEXT NOT NULL,
+    technical_version_id TEXT NOT NULL,
+    version_label TEXT NOT NULL,
+    created_modified TEXT,
+    discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (workbook_identity, technical_version_id)
+);
+CREATE INDEX IF NOT EXISTS idx_version_catalog_watermark
+    ON version_catalog (workbook_identity, technical_version_id);
+
 CREATE INDEX IF NOT EXISTS idx_versao_planilha
     ON versao_processada (planilha_id, data_processamento);
 CREATE INDEX IF NOT EXISTS idx_alteracao_planilha
@@ -190,6 +203,30 @@ class Database:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
+
+    def cache_versions(self, workbook_identity: str, versions) -> None:
+        """Persist only discovery metadata; SharePoint remains authoritative."""
+        with self.connection:
+            self.connection.executemany(
+                """INSERT INTO version_catalog
+                   (workbook_identity, technical_version_id, version_label, created_modified)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(workbook_identity, technical_version_id) DO UPDATE SET
+                     version_label=excluded.version_label,
+                     created_modified=excluded.created_modified,
+                     last_verified_at=CURRENT_TIMESTAMP""",
+                ((workbook_identity, item.id, item.number, item.modified_at)
+                 for item in versions),
+            )
+
+    def catalog_max_id(self, workbook_identity: str) -> str | None:
+        """Return the discovery watermark, never the audit checkpoint."""
+        row = self.connection.execute(
+            "SELECT technical_version_id FROM version_catalog "
+            "WHERE workbook_identity=? ORDER BY CAST(technical_version_id AS INTEGER) DESC LIMIT 1",
+            (workbook_identity,),
+        ).fetchone()
+        return None if row is None else str(row[0])
 
     def __enter__(self) -> "Database":
         self.connect()
