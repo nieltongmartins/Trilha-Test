@@ -21,7 +21,7 @@ from app.models import AuditExecutionStatus
 from app.progress import SmoothVersionProgress
 from app.report_artifacts import ReportArtifactManager
 from app.runtime_profile import RuntimeProfile, RuntimeProfileStore, workbook_identity
-from app.slot_visual_progress import SlotVisualProgress, TaskProgressPlan
+from app.slot_visual_progress import SlotTaskIdentity, SlotVisualProgress, TaskProgressPlan
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 from app.version_catalog import VersionCatalog
 
@@ -271,6 +271,8 @@ class AuditApplication(ttk.Frame):
         self.slot_timing_texts = []
         self._slot_visual_events = []
         self._slot_visual_progress = []
+        self._slot_visual_identities = []
+        self._slot_progress_plans = []
         self._rebuild_slot_frames()
         # Aliases conservados para integrações e testes da tela serial anterior.
         self.current_version_frame = self.slot_frames[0]
@@ -321,6 +323,8 @@ class AuditApplication(ttk.Frame):
             self.slot_timing_texts.append(timing)
             self._slot_visual_events.append(None)
             self._slot_visual_progress.append(None)
+            self._slot_visual_identities.append(SlotTaskIdentity())
+            self._slot_progress_plans.append(None)
         self.current_version_frame = self.slot_frames[0]
         self.version_progress_value = self.slot_progress_values[0]
         self.version_stage_text = self.slot_stage_texts[0]
@@ -802,6 +806,8 @@ class AuditApplication(ttk.Frame):
         self._progress_total = 0
         self._slot_visual_events = [None] * len(self.slot_frames)
         self._slot_visual_progress = [None] * len(self.slot_frames)
+        self._slot_visual_identities = [SlotTaskIdentity() for _ in self.slot_frames]
+        self._slot_progress_plans = [None] * len(self.slot_frames)
         for timing in self.slot_timing_texts:
             timing.set("Decorrido: 00:00:00\nMédia: calculando...")
         self.progress_value.set(0)
@@ -1169,18 +1175,34 @@ class AuditApplication(ttk.Frame):
             index = event.slot_id - 1
             if not 0 <= index < len(self.slot_frames):
                 continue
+            identity_status = self._slot_visual_identities[index].classify(
+                event.task_id, event.sequence
+            )
+            if identity_status == "stale":
+                # Um evento tardio jamais pode substituir o estado visual de
+                # uma versão mais nova que já ocupa este slot.
+                continue
+            if identity_status == "new":
+                # Reset atômico e exclusivamente visual no primeiro evento da
+                # nova task. A média compartilhada permanece intocada.
+                assert self._timing_model is not None
+                self._slot_visual_progress[index] = None
+                self._slot_progress_plans[index] = TaskProgressPlan.snapshot(
+                    self._timing_model
+                )
+                self.slot_progress_values[index].set(0.0)
             self.slot_frames[index].configure(
                 text=f"SLOT {event.slot_id} — {self._compact_text(event.version or '—', 24)}"
             )
             previous = self._slot_visual_events[index]
-            same_task = previous is not None and previous.task_id == event.task_id
+            same_task = identity_status == "current"
             visual = self._slot_visual_progress[index]
             now = time.monotonic()
             if event.timed_stage is not None and (not same_task or visual is None):
                 # Snapshot feito uma vez: observações posteriores afetam apenas
                 # as próximas tasks e jamais reposicionam esta barra.
-                assert self._timing_model is not None
-                plan = TaskProgressPlan.snapshot(self._timing_model)
+                plan = self._slot_progress_plans[index]
+                assert plan is not None
                 visual = SlotVisualProgress(event.task_id, plan, event.timed_stage, now)
                 # O slot só é atribuído depois que o prefetch está pronto;
                 # portanto DOWNLOAD/SHA já estão visualmente concluídos.
@@ -1229,8 +1251,14 @@ class AuditApplication(ttk.Frame):
     def _set_slot_timing(self, index: int, elapsed: float) -> None:
         event = self._slot_visual_events[index]
         average = event.task_average if event is not None else None
-        average_text = (self._format_clock(average)
-                        if average is not None else "calculando...")
+        if average is not None:
+            average_text = self._format_clock(average)
+        else:
+            # Trocar de task reinicia apenas o decorrido. A média apresentada
+            # é histórica e não deve piscar como "calculando..." entre eventos.
+            previous = self.slot_timing_texts[index].get()
+            average_text = (previous.split("Média: ", 1)[1]
+                            if "Média: " in previous else "calculando...")
         self.slot_timing_texts[index].set(
             f"Decorrido: {self._format_clock(elapsed)}\nMédia: {average_text}"
         )

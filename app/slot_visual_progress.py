@@ -8,12 +8,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import Literal
 
 from app.execution_timing import OPERATIONAL_STAGES, SharedExecutionTimingModel, TimedStage
 
 
 OPERATIONAL_LIMIT = 99.0
 PROMOTION_LIMIT = 99.8
+
+
+@dataclass(slots=True)
+class SlotTaskIdentity:
+    """Protege um slot contra reutilização de estado e eventos atrasados."""
+
+    task_id: str | None = None
+    sequence: int | None = None
+
+    def classify(
+        self, task_id: str | None, sequence: int | None
+    ) -> Literal["new", "current", "stale"]:
+        if task_id == self.task_id and sequence == self.sequence:
+            return "current"
+        if (self.sequence is not None and sequence is not None and
+                sequence <= self.sequence):
+            return "stale"
+        self.task_id = task_id
+        self.sequence = sequence
+        return "new"
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,4 +114,3 @@ class SlotVisualProgress:
                 self.last_displayed_progress, min(calculated, phase_range.end)
             )
         return self.last_displayed_progress
-

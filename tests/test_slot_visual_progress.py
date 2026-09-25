@@ -1,7 +1,7 @@
 import pytest
 
 from app.execution_timing import SharedExecutionTimingModel, TimedStage
-from app.slot_visual_progress import SlotVisualProgress, TaskProgressPlan
+from app.slot_visual_progress import SlotTaskIdentity, SlotVisualProgress, TaskProgressPlan
 
 
 def _plan(**seconds):
@@ -68,3 +68,38 @@ def test_wait_promotion_stays_below_complete_and_progress_never_regresses():
     visual.complete = True
     assert visual.tick(1001) == 100
     assert visual.tick(999) == 100
+
+
+def test_new_task_resets_progress_and_rejects_late_previous_event():
+    identity = SlotTaskIdentity()
+    plan = _plan(READ_XLSX=10)
+
+    assert identity.classify("A", 10) == "new"
+    task_a = SlotVisualProgress("A", plan, TimedStage.READ_XLSX, 0)
+    values_a = [task_a.tick(second) for second in (2, 5, 9)]
+    assert values_a == sorted(values_a)
+    task_a.complete = True
+    assert task_a.tick(10) == 100
+
+    assert identity.classify("B", 11) == "new"
+    task_b = SlotVisualProgress("B", plan, TimedStage.READ_XLSX, 11)
+    assert task_b.last_displayed_progress == 0
+    progress_b = task_b.tick(12)
+    assert 0 < progress_b < 100
+    assert identity.classify("A", 10) == "stale"
+    assert task_b.last_displayed_progress == progress_b
+
+
+def test_rapid_task_changes_always_create_clean_state():
+    identity = SlotTaskIdentity()
+    plan = _plan(COMPARE=4)
+    states = []
+    for task_id, sequence in (("A", 10), ("B", 11), ("C", 12)):
+        assert identity.classify(task_id, sequence) == "new"
+        state = SlotVisualProgress(task_id, plan, TimedStage.COMPARE, sequence)
+        states.append(state)
+        assert state.last_displayed_progress == 0
+        state.tick(sequence + 1)
+    assert states[0].last_displayed_progress > 0
+    assert states[1].last_displayed_progress > 0
+    assert states[2].last_displayed_progress > 0
