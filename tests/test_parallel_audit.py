@@ -319,10 +319,19 @@ def test_four_workers_receive_ready_files_concurrently(monkeypatch, tmp_path: Pa
 
 
 @pytest.mark.parametrize("slots", [1, 4])
-def test_pipeline_parses_each_version_once_and_preserves_official_result(
-    tmp_path: Path, slots: int,
+def test_each_pair_reads_both_xlsx_independently_and_preserves_official_result(
+    monkeypatch, tmp_path: Path, slots: int,
 ):
     items = history(tmp_path, 6)
+    import app.parallel_audit as parallel
+    real_read = parallel.read_workbook
+    reads = []
+
+    def counted_read(path):
+        reads.append(Path(path).name)
+        return real_read(path)
+
+    monkeypatch.setattr(parallel, "read_workbook", counted_read)
     with Database(tmp_path / f"snapshot-{slots}.db") as database:
         database.initialize()
         service = ParallelAuditService(
@@ -334,9 +343,11 @@ def test_pipeline_parses_each_version_once_and_preserves_official_result(
 
     assert result.status is AuditExecutionStatus.COMPLETED
     assert len(rows[0]) == 5
-    summary = service.snapshot_cache_summary
-    assert summary is not None
-    assert summary.unique_versions == 6
-    assert summary.parse_count == 6
-    assert summary.duplicate_parse_prevented == 4
-    assert summary.parse_amplification == 1.0
+    assert len(reads) == 2 * len(rows[0])
+    # Every intermediate version is intentionally parsed by both adjacent pairs.
+    assert all(reads.count(f"v{index}.xlsx") == 2 for index in range(1, 5))
+    assert not hasattr(service, "snapshot_cache_summary")
+    submitted = [item for item in service.telemetry if item.get("stage") == "PAIR_SUBMITTED"]
+    reused = [item for item in service.telemetry if item.get("stage") == "FILE_REUSED"]
+    assert len(submitted) == 5
+    assert reused
