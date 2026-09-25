@@ -16,11 +16,12 @@ import tkinter as tk
 
 from app.audit_storage import AuditStorageManager, RestoreConflictError
 from app.database import Database
-from app.execution_timing import SharedExecutionTimingModel
+from app.execution_timing import SharedExecutionTimingModel, TimedStage
 from app.models import AuditExecutionStatus
 from app.progress import SmoothVersionProgress
 from app.report_artifacts import ReportArtifactManager
 from app.runtime_profile import RuntimeProfile, RuntimeProfileStore, workbook_identity
+from app.slot_visual_progress import SlotVisualProgress, TaskProgressPlan
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 from app.version_catalog import VersionCatalog
 
@@ -269,6 +270,7 @@ class AuditApplication(ttk.Frame):
         self.slot_stage_texts = []
         self.slot_timing_texts = []
         self._slot_visual_events = []
+        self._slot_visual_progress = []
         self._rebuild_slot_frames()
         # Aliases conservados para integrações e testes da tela serial anterior.
         self.current_version_frame = self.slot_frames[0]
@@ -318,6 +320,7 @@ class AuditApplication(ttk.Frame):
             self.slot_stage_texts.append(stage)
             self.slot_timing_texts.append(timing)
             self._slot_visual_events.append(None)
+            self._slot_visual_progress.append(None)
         self.current_version_frame = self.slot_frames[0]
         self.version_progress_value = self.slot_progress_values[0]
         self.version_stage_text = self.slot_stage_texts[0]
@@ -798,6 +801,7 @@ class AuditApplication(ttk.Frame):
         self._progress_completed = 0
         self._progress_total = 0
         self._slot_visual_events = [None] * len(self.slot_frames)
+        self._slot_visual_progress = [None] * len(self.slot_frames)
         for timing in self.slot_timing_texts:
             timing.set("Decorrido: 00:00:00\nMédia: calculando...")
         self.progress_value.set(0)
@@ -1170,8 +1174,32 @@ class AuditApplication(ttk.Frame):
             )
             previous = self._slot_visual_events[index]
             same_task = previous is not None and previous.task_id == event.task_id
-            current = float(self.slot_progress_values[index].get()) if same_task else 0.0
-            self.slot_progress_values[index].set(max(current, event.percent))
+            visual = self._slot_visual_progress[index]
+            now = time.monotonic()
+            if event.timed_stage is not None and (not same_task or visual is None):
+                # Snapshot feito uma vez: observações posteriores afetam apenas
+                # as próximas tasks e jamais reposicionam esta barra.
+                assert self._timing_model is not None
+                plan = TaskProgressPlan.snapshot(self._timing_model)
+                visual = SlotVisualProgress(event.task_id, plan, event.timed_stage, now)
+                # O slot só é atribuído depois que o prefetch está pronto;
+                # portanto DOWNLOAD/SHA já estão visualmente concluídos.
+                visual.last_displayed_progress = plan.ranges[event.timed_stage].start
+                self._slot_visual_progress[index] = visual
+            elif visual is not None and event.timed_stage is not None:
+                target_phase = event.timed_stage
+                if target_phase is TimedStage.STAGING and TimedStage.STAGING in event.completed_stages:
+                    target_phase = TimedStage.WAIT_PROMOTION
+                if target_phase is not visual.phase:
+                    visual.enter_phase(target_phase, now)
+            if visual is not None:
+                if event.percent >= 100:
+                    visual.complete = True
+                elif event.timed_stage is None:
+                    visual.waiting = True
+                self.slot_progress_values[index].set(visual.tick(now))
+            elif not same_task:
+                self.slot_progress_values[index].set(event.percent)
             self._slot_visual_events[index] = event
             self.slot_stage_texts[index].set(self._compact_text(event.stage, 42))
             self._set_slot_timing(index, event.duration)
@@ -1214,19 +1242,13 @@ class AuditApplication(ttk.Frame):
         if self._stop_event.is_set() or self._pause_event.is_set():
             return
         now = time.monotonic()
+        visuals = getattr(self, "_slot_visual_progress", ())
         for index, event in enumerate(getattr(self, "_slot_visual_events", ())):
-            if event is None or event.timed_stage is None or event.percent >= 100:
+            visual = visuals[index] if index < len(visuals) else None
+            if event is None or visual is None:
                 continue
             elapsed_since_snapshot = max(0.0, now - event.occurred_at)
-            stage_average = event.stage_average or 0.0
-            visual_increment = (
-                min(8.0, elapsed_since_snapshot / stage_average * 8.0)
-                if stage_average > 0 else 0.0
-            )
-            current = float(self.slot_progress_values[index].get())
-            self.slot_progress_values[index].set(
-                max(current, min(99.0, event.percent + visual_increment))
-            )
+            self.slot_progress_values[index].set(visual.tick(now))
             self._set_slot_timing(index, event.duration + elapsed_since_snapshot)
 
     def _poll_version_progress_updates(self) -> None:
