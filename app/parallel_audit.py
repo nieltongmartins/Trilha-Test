@@ -21,12 +21,17 @@ from uuid import uuid4
 
 from app.audit_service import AuditResult, AuditService
 from app.excel.comparator import CellChange, compare_snapshots
-from app.excel.reader import read_workbook
 from app.integrity import sha256_file
 from app.execution_timing import SharedExecutionTimingModel, TimedStage
 from app.models import AuditExecutionStatus
 from app.runtime_profile import RuntimeProfileStore, RuntimeSample, workbook_identity
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
+from app.version_snapshots import (
+    SnapshotCache,
+    SnapshotState,
+    VersionSnapshot,
+    parse_version_snapshot,
+)
 
 
 logger = logging.getLogger("auditoria_excel.parallel")
@@ -128,10 +133,23 @@ class ComparisonTask:
     sequence: int
     previous: VersionInfo
     current: VersionInfo
+    previous_snapshot: VersionSnapshot
+    current_snapshot: VersionSnapshot
+    current_hash: str
+    reservation_token: str
+    read_xlsx_duration: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPair:
+    """Arquivos locais READY, usados somente para criar snapshots."""
+
+    sequence: int
+    previous: VersionInfo
+    current: VersionInfo
     previous_path: str
     current_path: str
     current_hash: str
-    reservation_token: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,16 +232,15 @@ class ParallelMetrics:
 
 
 def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, float]]:
-    """Função isolada e serializável executada pelo worker."""
+    """Compara exclusivamente snapshots prontos; nunca abre um XLSX."""
     started = time.perf_counter()
-    previous = read_workbook(Path(task.previous_path))
-    current = read_workbook(Path(task.current_path))
-    parsed = time.perf_counter()
-    changes = compare_snapshots(previous, current)
+    changes = compare_snapshots(task.previous_snapshot, task.current_snapshot)  # type: ignore[arg-type]
     finished = time.perf_counter()
     return changes, {
-        "read_xlsx": parsed - started,
-        "compare": finished - parsed,
+        # O coordenador atribui cada duração de parse a exatamente uma task,
+        # mantendo READ_XLSX acumulado sem cobrar snapshots reutilizados.
+        "read_xlsx": task.read_xlsx_duration,
+        "compare": finished - started,
         "duration": finished - started,
         "worker_pid": os.getpid(),
         "worker_thread_id": threading.get_ident(),
@@ -411,6 +428,10 @@ class ParallelAuditService(AuditService):
         self._pending_only_seconds = 0.0
         self._slot_wait_started: dict[int, tuple[float, int]] = {}
         self._slot_wait_durations: list[float] = []
+        self.snapshot_cache_summary = None
+        self.snapshot_read_xlsx_total = 0.0
+        self.snapshot_serialize_duration = 0.0
+        self.snapshot_serialized_bytes = 0
         configure = getattr(source, "configure_prefetch_buffer", None)
         if callable(configure):
             configure(self.prefetch_target)
@@ -640,7 +661,7 @@ class ParallelAuditService(AuditService):
         task: VersionTask,
         acquired: dict[str, Path],
         prefetch_candidates: list[VersionInfo],
-    ) -> ComparisonTask:
+    ) -> PreparedPair:
         """Run all WebDriver operations on its sole owner thread.
 
         This method deliberately does not reserve a worker slot.  The scheduler
@@ -673,9 +694,9 @@ class ParallelAuditService(AuditService):
                 "coordinator_pid": os.getpid(),
             })
         current_hash = sha256_file(acquired[pair[1].id])
-        return ComparisonTask(
+        return PreparedPair(
             task.sequence, pair[0], pair[1], str(acquired[pair[0].id]),
-            str(acquired[pair[1].id]), current_hash, "",
+            str(acquired[pair[1].id]), current_hash,
         )
 
     def audit(self, spreadsheet: SpreadsheetInfo,
@@ -738,6 +759,10 @@ class ParallelAuditService(AuditService):
             )
             tasks = [VersionTask(cur.id, cur.number, prev.id, index, execution_id)
                      for index, (prev, cur) in enumerate(pairs, 1)]
+            snapshot_cache = SnapshotCache(self.scheduler_window + 1)
+            for sequence, (previous, current) in enumerate(pairs, 1):
+                snapshot_cache.register((identity, previous.id), {sequence})
+                snapshot_cache.register((identity, current.id), {sequence})
             executor_type = ProcessPoolExecutor if self.backend == "process" else ThreadPoolExecutor
             # Selenium has exactly one owner.  Acquisition runs independently from
             # the coordinator so completed workers are staged/promoted while Edge waits.
@@ -745,6 +770,10 @@ class ParallelAuditService(AuditService):
                   ThreadPoolExecutor(max_workers=1, thread_name_prefix="webdriver-owner") as downloader):
                 running: dict[Future, tuple[VersionTask, ComparisonTask, float, float]] = {}
                 ready: list[tuple[VersionTask, ComparisonTask]] = []
+                snapshot_waiting: list[
+                    tuple[VersionTask, PreparedPair, Future | None, Future | None]
+                ] = []
+                accounted_snapshot_reads: set[str] = set()
                 lifecycles: dict[int, TaskLifecycle] = {}
                 acquisition: Future | None = None
                 acquisition_task: VersionTask | None = None
@@ -756,7 +785,11 @@ class ParallelAuditService(AuditService):
                     # Result consumption and ordered commit are always serviced before
                     # polling/submitting WebDriver work.
                     self._collect_done(running, staging, block=False, lifecycles=lifecycles)
-                    self._promote(coordinator, tasks, len(pairs), lifecycles=lifecycles)
+                    self._promote(
+                        coordinator, tasks, len(pairs), lifecycles=lifecycles,
+                        snapshot_cache=snapshot_cache, snapshot_identity=identity,
+                        pairs=pairs,
+                    )
 
                     if acquisition is not None and acquisition.done():
                         assert acquisition_task is not None
@@ -767,7 +800,7 @@ class ParallelAuditService(AuditService):
                             raise
                         lifecycle = lifecycles[acquisition_task.sequence]
                         lifecycle.download_ready_at = time.perf_counter()
-                        ready.append((acquisition_task, comparison))
+                        snapshot_waiting.append((acquisition_task, comparison, None, None))
                         acquisition = None
                         acquisition_task = None
 
@@ -785,7 +818,8 @@ class ParallelAuditService(AuditService):
 
                     # Queue one pair at a time on the sole WebDriver owner.  No worker
                     # slot is reserved until this future publishes local READY files.
-                    if acquisition is None and next_acquisition < len(tasks):
+                    if (acquisition is None and next_acquisition < len(tasks)
+                            and next_acquisition - coordinator.committed < self.scheduler_window):
                         candidate_task = tasks[next_acquisition]
                         if candidate_task.state is TaskState.WAITING:
                             candidate_task.state = TaskState.WAITING_DOWNLOAD
@@ -805,6 +839,76 @@ class ParallelAuditService(AuditService):
                             )
                             next_acquisition += 1
 
+                    # Solicita cada versão uma única vez. Solicitações repetidas recebem
+                    # o mesmo Future PARSING/READY e nunca abrem o XLSX novamente.
+                    still_waiting = []
+                    for task, prepared, left_future, right_future in snapshot_waiting:
+                        left_key = (identity, prepared.previous.id)
+                        right_key = (identity, prepared.current.id)
+                        for side, key, future in (
+                            ("left", left_key, left_future),
+                            ("right", right_key, right_future),
+                        ):
+                            if future is None or not future.done() or future.exception() is None:
+                                continue
+                            if task.retry_count >= self.max_retries:
+                                raise RuntimeError(
+                                    f"snapshot parse falhou após retry: technical_id={key[1]}"
+                                ) from future.exception()
+                            task.retry_count += 1
+                            if snapshot_cache.state(key) is SnapshotState.FAILED:
+                                snapshot_cache.reset_failed(key)
+                            if side == "left":
+                                left_future = None
+                            else:
+                                right_future = None
+                        if left_future is None and snapshot_cache.can_request(left_key):
+                            left_future = snapshot_cache.request(
+                                left_key, prepared.previous_path, task.sequence, executor,
+                                parse_version_snapshot,
+                            )
+                        if right_future is None and snapshot_cache.can_request(right_key):
+                            right_future = snapshot_cache.request(
+                                right_key, prepared.current_path, task.sequence, executor,
+                                parse_version_snapshot,
+                            )
+                        if (left_future is not None and right_future is not None
+                                and left_future.done() and right_future.done()):
+                            left = snapshot_cache.result(left_key)
+                            right = snapshot_cache.result(right_key)
+                            task_metrics = {
+                                "snapshot_read_xlsx": left.duration + right.duration,
+                                "snapshot_serialized_bytes": (
+                                    left.serialized_bytes + right.serialized_bytes
+                                ),
+                                "snapshot_serialize_duration": (
+                                    left.serialize_duration + right.serialize_duration
+                                ),
+                            }
+                            self.telemetry.append({
+                                "stage": "SNAPSHOTS_READY", "sequence": task.sequence,
+                                "technical_version_id": task.technical_version_id,
+                                **task_metrics,
+                            })
+                            ready.append((task, ComparisonTask(
+                                prepared.sequence, prepared.previous, prepared.current,
+                                left.snapshot, right.snapshot, prepared.current_hash, "",
+                                read_xlsx_duration=sum(
+                                    result.duration
+                                    for technical_id, result in (
+                                        (prepared.previous.id, left),
+                                        (prepared.current.id, right),
+                                    )
+                                    if technical_id not in accounted_snapshot_reads
+                                ),
+                            )))
+                            accounted_snapshot_reads.update((
+                                prepared.previous.id, prepared.current.id,
+                            ))
+                        else:
+                            still_waiting.append((task, prepared, left_future, right_future))
+                    snapshot_waiting = still_waiting
+
                     available_slots = [
                         slot for slot in range(1, self.slots + 1)
                         if slot not in {item[0].slot_id for item in running.values()}
@@ -816,8 +920,9 @@ class ParallelAuditService(AuditService):
                         task.reservation_token = uuid4().hex
                         comparison = ComparisonTask(
                             prepared.sequence, prepared.previous, prepared.current,
-                            prepared.previous_path, prepared.current_path,
+                            prepared.previous_snapshot, prepared.current_snapshot,
                             prepared.current_hash, task.reservation_token,
+                            read_xlsx_duration=prepared.read_xlsx_duration,
                         )
                         task_started = time.perf_counter()
                         lifecycle = lifecycles[task.sequence]
@@ -831,7 +936,7 @@ class ParallelAuditService(AuditService):
                         running[future] = (task, comparison, task_started, stage_started)
 
                     self._metrics(started, coordinator, staging, len(running))
-                    if running or acquisition is not None or ready:
+                    if running or acquisition is not None or ready or snapshot_waiting:
                         self.stop_event.wait(.01)
                     elif coordinator.committed < len(pairs):
                         raise RuntimeError("pipeline sem trabalho antes do checkpoint final")
@@ -879,6 +984,21 @@ class ParallelAuditService(AuditService):
                 statistics.fmean(self._download_prefetch) if self._download_prefetch else 0.0,
                 self._worker_starvation_count, self._download_starvation_time,
             )
+            if 'snapshot_cache' in locals():
+                snapshot_summary = snapshot_cache.summary()
+                self.snapshot_cache_summary = snapshot_summary
+                self.snapshot_read_xlsx_total = snapshot_cache.read_xlsx_total
+                self.snapshot_serialize_duration = snapshot_cache.serialize_duration_total
+                self.snapshot_serialized_bytes = snapshot_cache.serialized_bytes_total
+                logger.info(
+                    "SNAPSHOT_CACHE_SUMMARY unique_versions=%d parse_count=%d reuse_count=%d "
+                    "duplicate_parse_prevented=%d peak_cache_count=%d estimated_peak_bytes=%d "
+                    "parse_amplification=%.6f",
+                    snapshot_summary.unique_versions, snapshot_summary.parse_count,
+                    snapshot_summary.reuse_count, snapshot_summary.duplicate_parse_prevented,
+                    snapshot_summary.peak_cache_count, snapshot_summary.estimated_peak_bytes,
+                    snapshot_summary.parse_amplification,
+                )
             elapsed = max(time.perf_counter() - started, .001)
             worker_busy = sum(self._worker_busy.values())
             worker_capacity = elapsed * configured_workers
@@ -1044,7 +1164,10 @@ class ParallelAuditService(AuditService):
 
     def _promote(self, coordinator: OrderedCommitCoordinator,
                  tasks: list[VersionTask], total: int,
-                 lifecycles: dict[int, TaskLifecycle] | None = None) -> None:
+                 lifecycles: dict[int, TaskLifecycle] | None = None,
+                 snapshot_cache: SnapshotCache | None = None,
+                 snapshot_identity: str | None = None,
+                 pairs: list[tuple[VersionInfo, VersionInfo]] | None = None) -> None:
         for sequence in coordinator.promote_available():
             task = tasks[sequence - 1]
             promoted_at = time.perf_counter()
@@ -1076,6 +1199,13 @@ class ParallelAuditService(AuditService):
             self._report_progress(coordinator.committed, total)
             self._report_checkpoint(task.version_label, coordinator.committed,
                                     total - coordinator.committed)
+            # A promoção encerra também a retenção conservadora durante staging.
+            # A liberação depende das comparações registradas, nunca apenas do
+            # valor corrente do checkpoint.
+            if snapshot_cache is not None and snapshot_identity is not None and pairs is not None:
+                previous, current = pairs[sequence - 1]
+                snapshot_cache.release((snapshot_identity, previous.id), sequence)
+                snapshot_cache.release((snapshot_identity, current.id), sequence)
 
     def _metrics(self, started: float, coordinator: OrderedCommitCoordinator,
                  staging: StagingStore, active: int) -> None:

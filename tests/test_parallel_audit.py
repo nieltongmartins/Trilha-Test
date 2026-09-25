@@ -316,3 +316,27 @@ def test_four_workers_receive_ready_files_concurrently(monkeypatch, tmp_path: Pa
     staged = [item for item in service.telemetry if item.get("stage") == "STAGED"]
     assert all(float(item["worker_to_staging"]) < .5 for item in staged)
     assert all("task_reserved_at" in item and "promoted_at" in item for item in staged)
+
+
+@pytest.mark.parametrize("slots", [1, 4])
+def test_pipeline_parses_each_version_once_and_preserves_official_result(
+    tmp_path: Path, slots: int,
+):
+    items = history(tmp_path, 6)
+    with Database(tmp_path / f"snapshot-{slots}.db") as database:
+        database.initialize()
+        service = ParallelAuditService(
+            database, source(items), slots=slots, backend="thread",
+            staging_directory=tmp_path / f"snapshot-stage-{slots}",
+        )
+        result = service.audit(SHEET)
+        rows = official_rows(database.connection)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    assert len(rows[0]) == 5
+    summary = service.snapshot_cache_summary
+    assert summary is not None
+    assert summary.unique_versions == 6
+    assert summary.parse_count == 6
+    assert summary.duplicate_parse_prevented == 4
+    assert summary.parse_amplification == 1.0

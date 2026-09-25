@@ -59,6 +59,7 @@ def run(root: Path, items, backend: str, slots: int, workload: str = "CQLPA123")
     percentile = lambda values, fraction: round(sorted(values)[min(len(values) - 1, int(len(values) * fraction))], 6) if values else 0.0
     read_times = [float(row.get("read_xlsx", 0)) for row in stage_rows]
     comparisons = len(items) - 1
+    snapshot_summary = service.snapshot_cache_summary
     return {
         "workload": workload,
         "backend": backend, "slots": slots, "versions": len(items),
@@ -77,7 +78,27 @@ def run(root: Path, items, backend: str, slots: int, workload: str = "CQLPA123")
         "download_average_seconds": round(sum(downloads) / len(downloads), 6),
         "download_p50_seconds": percentile(downloads, .50),
         "download_p95_seconds": percentile(downloads, .95),
-        "parse_average_seconds": average("read_xlsx"),
+        "parse_average_seconds": round(
+            service.snapshot_read_xlsx_total / max(snapshot_summary.parse_count, 1), 6
+        ) if snapshot_summary else average("read_xlsx"),
+        "read_xlsx_total_seconds": round(
+            service.snapshot_read_xlsx_total if snapshot_summary
+            else sum(read_times), 6
+        ),
+        "unique_versions": snapshot_summary.unique_versions if snapshot_summary else len(items),
+        "parse_count": snapshot_summary.parse_count if snapshot_summary else 2 * comparisons,
+        "duplicate_parse_prevented": (
+            snapshot_summary.duplicate_parse_prevented if snapshot_summary else 0
+        ),
+        "parse_amplification": round(
+            snapshot_summary.parse_amplification if snapshot_summary else
+            (2 * comparisons / max(len(items), 1)), 6
+        ),
+        "snapshot_serialize_duration": round(service.snapshot_serialize_duration, 6),
+        "snapshot_serialized_bytes": service.snapshot_serialized_bytes,
+        # ProcessPool desserializa argumentos antes de invocar a função; essa
+        # duração não é observável com precisão sem mudar o protocolo do worker.
+        "snapshot_deserialize_duration": None,
         "parse_p50_seconds": percentile(read_times, .50),
         "parse_p95_seconds": percentile(read_times, .95),
         "compare_average_seconds": average("compare"),
