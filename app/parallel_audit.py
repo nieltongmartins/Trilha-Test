@@ -21,17 +21,12 @@ from uuid import uuid4
 
 from app.audit_service import AuditResult, AuditService
 from app.excel.comparator import CellChange, compare_snapshots
+from app.excel.reader import read_workbook
 from app.integrity import sha256_file
 from app.execution_timing import SharedExecutionTimingModel, TimedStage
 from app.models import AuditExecutionStatus
 from app.runtime_profile import RuntimeProfileStore, RuntimeSample, workbook_identity
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
-from app.version_snapshots import (
-    SnapshotCache,
-    SnapshotState,
-    VersionSnapshot,
-    parse_version_snapshot,
-)
 
 
 logger = logging.getLogger("auditoria_excel.parallel")
@@ -143,19 +138,20 @@ class TaskLifecycle:
 
 @dataclass(frozen=True, slots=True)
 class ComparisonTask:
+    workbook_identity: str
     sequence: int
+    slot_id: int
     previous: VersionInfo
     current: VersionInfo
-    previous_snapshot: VersionSnapshot
-    current_snapshot: VersionSnapshot
+    previous_path: str
+    current_path: str
     current_hash: str
     reservation_token: str
-    read_xlsx_duration: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedPair:
-    """Arquivos locais READY, usados somente para criar snapshots."""
+    """A pair whose deduplicated local XLSX files are both ready."""
 
     sequence: int
     previous: VersionInfo
@@ -245,15 +241,28 @@ class ParallelMetrics:
 
 
 def _compare_pair(task: ComparisonTask) -> tuple[list[CellChange], dict[str, float]]:
-    """Compara exclusivamente snapshots prontos; nunca abre um XLSX."""
+    """Read and compare one complete pair inside its independent worker."""
     started = time.perf_counter()
-    changes = compare_snapshots(task.previous_snapshot, task.current_snapshot)  # type: ignore[arg-type]
+    logger.info("PAIR_READ_STARTED sequence=%d slot_id=%d previous_id=%s current_id=%s",
+                task.sequence, task.slot_id, task.previous.id, task.current.id)
+    previous_started = time.perf_counter()
+    previous = read_workbook(Path(task.previous_path))
+    previous_finished = time.perf_counter()
+    current = read_workbook(Path(task.current_path))
+    parsed = time.perf_counter()
+    changes = compare_snapshots(previous, current)
     finished = time.perf_counter()
+    read_previous = previous_finished - previous_started
+    read_current = parsed - previous_finished
+    logger.info("PAIR_READ_FINISHED sequence=%d read_previous=%.6f read_current=%.6f read_total=%.6f",
+                task.sequence, read_previous, read_current, parsed - previous_started)
+    logger.info("PAIR_COMPARE_FINISHED sequence=%d compare_duration=%.6f",
+                task.sequence, finished - parsed)
     return changes, {
-        # O coordenador atribui cada duração de parse a exatamente uma task,
-        # mantendo READ_XLSX acumulado sem cobrar snapshots reutilizados.
-        "read_xlsx": task.read_xlsx_duration,
-        "compare": finished - started,
+        "read_previous": read_previous,
+        "read_current": read_current,
+        "read_xlsx": parsed - previous_started,
+        "compare": finished - parsed,
         "duration": finished - started,
         "worker_pid": os.getpid(),
         "worker_thread_id": threading.get_ident(),
@@ -452,10 +461,11 @@ class ParallelAuditService(AuditService):
         self._pending_only_seconds = 0.0
         self._slot_wait_started: dict[int, tuple[float, int]] = {}
         self._slot_wait_durations: list[float] = []
-        self.snapshot_cache_summary = None
-        self.snapshot_read_xlsx_total = 0.0
-        self.snapshot_serialize_duration = 0.0
-        self.snapshot_serialized_bytes = 0
+        self._active_worker_samples: list[int] = []
+        self._active_workers_peak = 0
+        self._file_condition = threading.Condition()
+        self._files_downloading: set[str] = set()
+        self._file_failures: dict[str, BaseException] = {}
         configure = getattr(source, "configure_prefetch_buffer", None)
         if callable(configure):
             configure(self.prefetch_target)
@@ -704,12 +714,36 @@ class ParallelAuditService(AuditService):
         """
         self._refill_prefetch(spreadsheet, prefetch_candidates)
         for version in pair:
-            if version.id in acquired:
-                continue
+            owner = False
+            with self._file_condition:
+                while version.id in self._files_downloading and version.id not in acquired:
+                    self._file_condition.wait()
+                if version.id in acquired:
+                    logger.info("FILE_REUSED technical_version_id=%s sequence=%d",
+                                version.id, task.sequence)
+                    self.telemetry.append({"stage": "FILE_REUSED", "sequence": task.sequence,
+                                           "technical_version_id": version.id})
+                    continue
+                if version.id in self._file_failures:
+                    raise RuntimeError(f"download anterior falhou: {version.id}") from self._file_failures[version.id]
+                self._files_downloading.add(version.id)
+                owner = True
+            assert owner
             download_started = time.perf_counter()
-            acquired[version.id], download_seconds, was_prefetched = self._acquire(
-                spreadsheet, version, 0
-            )
+            logger.info("FILE_DOWNLOAD_REQUESTED technical_version_id=%s sequence=%d",
+                        version.id, task.sequence)
+            try:
+                path, download_seconds, was_prefetched = self._acquire(spreadsheet, version, 0)
+            except BaseException as error:
+                with self._file_condition:
+                    self._file_failures[version.id] = error
+                    self._files_downloading.discard(version.id)
+                    self._file_condition.notify_all()
+                raise
+            with self._file_condition:
+                acquired[version.id] = path
+                self._files_downloading.discard(version.id)
+                self._file_condition.notify_all()
             self.timing_model.observe(TimedStage.DOWNLOAD_TRANSFER, download_seconds)
             sha_started = time.perf_counter()
             digest = sha256_file(acquired[version.id])
@@ -732,6 +766,8 @@ class ParallelAuditService(AuditService):
                 "worker_pid": os.getpid(), "worker_thread_id": threading.get_ident(),
                 "coordinator_pid": os.getpid(),
             })
+            logger.info("FILE_READY technical_version_id=%s sequence=%d path=%s",
+                        version.id, task.sequence, acquired[version.id])
         current_hash = sha256_file(acquired[pair[1].id])
         return PreparedPair(
             task.sequence, pair[0], pair[1], str(acquired[pair[0].id]),
@@ -798,9 +834,6 @@ class ParallelAuditService(AuditService):
             )
             tasks = [VersionTask(cur.id, cur.number, prev.id, index, execution_id)
                      for index, (prev, cur) in enumerate(pairs, 1)]
-            snapshot_cache = SnapshotCache(self.scheduler_window + 1)
-            snapshot_ready_event = threading.Event()
-            snapshot_cache.add_ready_callback(lambda _key: snapshot_ready_event.set())
             executor_type = ProcessPoolExecutor if self.backend == "process" else ThreadPoolExecutor
             # Cada ator Selenium tem owner exclusivo. Os futures abaixo apenas
             # alimentam a fila compartilhada do pool e jamais comandam um driver.
@@ -808,11 +841,7 @@ class ParallelAuditService(AuditService):
                   ThreadPoolExecutor(max_workers=self.driver_count,
                                      thread_name_prefix="download-scheduler") as downloader):
                 running: dict[Future, tuple[VersionTask, ComparisonTask, float, float]] = {}
-                ready: list[tuple[VersionTask, ComparisonTask]] = []
-                snapshot_waiting: list[
-                    tuple[VersionTask, PreparedPair, Future | None, Future | None]
-                ] = []
-                accounted_snapshot_reads: set[str] = set()
+                ready: list[tuple[VersionTask, PreparedPair]] = []
                 lifecycles: dict[int, TaskLifecycle] = {}
                 acquisitions: dict[Future, VersionTask] = {}
                 next_acquisition = 0
@@ -823,11 +852,7 @@ class ParallelAuditService(AuditService):
                     # Result consumption and ordered commit are always serviced before
                     # polling/submitting WebDriver work.
                     self._collect_done(running, staging, block=False, lifecycles=lifecycles)
-                    self._promote(
-                        coordinator, tasks, len(pairs), lifecycles=lifecycles,
-                        snapshot_cache=snapshot_cache, snapshot_identity=identity,
-                        pairs=pairs,
-                    )
+                    self._promote(coordinator, tasks, len(pairs), lifecycles=lifecycles)
 
                     for acquisition, acquisition_task in list(acquisitions.items()):
                         if not acquisition.done():
@@ -839,7 +864,8 @@ class ParallelAuditService(AuditService):
                             raise
                         lifecycle = lifecycles[acquisition_task.sequence]
                         lifecycle.download_ready_at = time.perf_counter()
-                        snapshot_waiting.append((acquisition_task, comparison, None, None))
+                        acquisition_task.pair_state = PairState.READY
+                        ready.append((acquisition_task, comparison))
                         del acquisitions[acquisition]
 
                     if self.pause_event.is_set():
@@ -860,10 +886,6 @@ class ParallelAuditService(AuditService):
                            and next_acquisition - coordinator.committed < self.scheduler_window):
                         candidate_task = tasks[next_acquisition]
                         if candidate_task.state is TaskState.WAITING:
-                            sequence = next_acquisition + 1
-                            previous, current = pairs[next_acquisition]
-                            snapshot_cache.register((identity, previous.id), {sequence})
-                            snapshot_cache.register((identity, current.id), {sequence})
                             candidate_task.state = TaskState.WAITING_DOWNLOAD
                             lifecycles[candidate_task.sequence] = TaskLifecycle(time.perf_counter())
                             window_end = min(len(pairs), next_acquisition + self.scheduler_window)
@@ -883,82 +905,6 @@ class ParallelAuditService(AuditService):
                         else:
                             break
 
-                    # Solicita cada versão uma única vez. Solicitações repetidas recebem
-                    # o mesmo Future PARSING/READY e nunca abrem o XLSX novamente.
-                    still_waiting = []
-                    for task, prepared, left_future, right_future in snapshot_waiting:
-                        left_key = (identity, prepared.previous.id)
-                        right_key = (identity, prepared.current.id)
-                        for side, key, future in (
-                            ("left", left_key, left_future),
-                            ("right", right_key, right_future),
-                        ):
-                            if future is None or not future.done() or future.exception() is None:
-                                continue
-                            if task.retry_count >= self.max_retries:
-                                raise RuntimeError(
-                                    f"snapshot parse falhou após retry: technical_id={key[1]}"
-                                ) from future.exception()
-                            task.retry_count += 1
-                            if snapshot_cache.state(key) is SnapshotState.FAILED:
-                                snapshot_cache.reset_failed(key)
-                            if side == "left":
-                                left_future = None
-                            else:
-                                right_future = None
-                        if left_future is None and snapshot_cache.can_request(left_key):
-                            left_future = snapshot_cache.request(
-                                left_key, prepared.previous_path, task.sequence, executor,
-                                parse_version_snapshot,
-                            )
-                        if right_future is None and snapshot_cache.can_request(right_key):
-                            right_future = snapshot_cache.request(
-                                right_key, prepared.current_path, task.sequence, executor,
-                                parse_version_snapshot,
-                            )
-                        left_ready = snapshot_cache.is_ready(left_key)
-                        right_ready = snapshot_cache.is_ready(right_key)
-                        task.pair_state = (
-                            PairState.READY if left_ready and right_ready else
-                            PairState.WAITING_RIGHT if left_ready else
-                            PairState.WAITING_LEFT if right_ready else PairState.WAITING_BOTH
-                        )
-                        if left_ready and right_ready:
-                            left = snapshot_cache.result(left_key)
-                            right = snapshot_cache.result(right_key)
-                            task_metrics = {
-                                "snapshot_read_xlsx": left.duration + right.duration,
-                                "snapshot_serialized_bytes": (
-                                    left.serialized_bytes + right.serialized_bytes
-                                ),
-                                "snapshot_serialize_duration": (
-                                    left.serialize_duration + right.serialize_duration
-                                ),
-                            }
-                            self.telemetry.append({
-                                "stage": "SNAPSHOTS_READY", "sequence": task.sequence,
-                                "technical_version_id": task.technical_version_id,
-                                **task_metrics,
-                            })
-                            ready.append((task, ComparisonTask(
-                                prepared.sequence, prepared.previous, prepared.current,
-                                left.snapshot, right.snapshot, prepared.current_hash, "",
-                                read_xlsx_duration=sum(
-                                    result.duration
-                                    for technical_id, result in (
-                                        (prepared.previous.id, left),
-                                        (prepared.current.id, right),
-                                    )
-                                    if technical_id not in accounted_snapshot_reads
-                                ),
-                            )))
-                            accounted_snapshot_reads.update((
-                                prepared.previous.id, prepared.current.id,
-                            ))
-                        else:
-                            still_waiting.append((task, prepared, left_future, right_future))
-                    snapshot_waiting = still_waiting
-
                     available_slots = [
                         slot for slot in range(1, self.slots + 1)
                         if slot not in {item[0].slot_id for item in running.values()}
@@ -970,11 +916,20 @@ class ParallelAuditService(AuditService):
                         task.pair_state = PairState.RUNNING
                         task.reservation_token = uuid4().hex
                         comparison = ComparisonTask(
-                            prepared.sequence, prepared.previous, prepared.current,
-                            prepared.previous_snapshot, prepared.current_snapshot,
+                            identity, prepared.sequence, slot,
+                            prepared.previous, prepared.current,
+                            prepared.previous_path, prepared.current_path,
                             prepared.current_hash, task.reservation_token,
-                            read_xlsx_duration=prepared.read_xlsx_duration,
                         )
+                        logger.info(
+                            "PAIR_SUBMITTED sequence=%d slot_id=%d previous_id=%s current_id=%s",
+                            task.sequence, slot, prepared.previous.id, prepared.current.id,
+                        )
+                        self.telemetry.append({
+                            "stage": "PAIR_SUBMITTED", "sequence": task.sequence,
+                            "slot_id": slot, "previous_id": prepared.previous.id,
+                            "current_id": prepared.current.id,
+                        })
                         task_started = time.perf_counter()
                         lifecycle = lifecycles[task.sequence]
                         lifecycle.worker_started_at = task_started
@@ -987,11 +942,8 @@ class ParallelAuditService(AuditService):
                         running[future] = (task, comparison, task_started, stage_started)
 
                     self._metrics(started, coordinator, staging, len(running))
-                    if running or acquisitions or ready or snapshot_waiting:
-                        # Snapshot callbacks wake this scheduler immediately. A short
-                        # bound remains for download/worker futures that have no callback.
-                        snapshot_ready_event.wait(.01)
-                        snapshot_ready_event.clear()
+                    if running or acquisitions or ready:
+                        self.stop_event.wait(.01)
                     elif coordinator.committed < len(pairs):
                         raise RuntimeError("pipeline sem trabalho antes do checkpoint final")
 
@@ -1056,23 +1008,6 @@ class ParallelAuditService(AuditService):
                 0.0, self._download_starvation_time,
                 sum(self._slot_wait_durations) if self._slot_wait_durations else 0.0,
             )
-            if 'snapshot_cache' in locals():
-                snapshot_summary = snapshot_cache.summary()
-                self.snapshot_cache_summary = snapshot_summary
-                self.snapshot_read_xlsx_total = snapshot_cache.read_xlsx_total
-                self.snapshot_serialize_duration = snapshot_cache.serialize_duration_total
-                self.snapshot_serialized_bytes = snapshot_cache.serialized_bytes_total
-                logger.info(
-                    "SNAPSHOT_CACHE_SUMMARY catalog_versions_total=%d execution_unique_versions=%d "
-                    "parse_count=%d reuse_count=%d "
-                    "duplicate_parse_prevented=%d peak_cache_count=%d estimated_peak_bytes=%d "
-                    "parse_amplification=%.6f",
-                    len(versions) if versions is not None else 0,
-                    snapshot_summary.execution_unique_versions, snapshot_summary.parse_count,
-                    snapshot_summary.reuse_count, snapshot_summary.duplicate_parse_prevented,
-                    snapshot_summary.peak_cache_count, snapshot_summary.estimated_peak_bytes,
-                    snapshot_summary.parse_amplification,
-                )
             elapsed = max(time.perf_counter() - started, .001)
             worker_busy = sum(self._worker_busy.values())
             worker_capacity = elapsed * configured_workers
@@ -1082,13 +1017,22 @@ class ParallelAuditService(AuditService):
                 "created_worker_pids=%s initialized_worker_pids=%s workers_that_received_tasks=%s "
                 "workers_that_completed_tasks=%s distinct_active_worker_count=%d "
                 "worker_busy_time=%.3f worker_idle_time=%.3f worker_utilization=%.4f "
-                "slot_busy_time=%.3f slot_idle_time=%.3f scheduler_window=%d",
+                "slot_busy_time=%.3f slot_idle_time=%.3f scheduler_window=%d "
+                "active_workers_peak=%d active_workers_mean=%.3f xlsx_reads_total=%d "
+                "expected_reads_without_reuse=%d worker_wait_download=%.3f "
+                "worker_wait_scheduler=%.3f worker_wait_commit=%.3f snapshot_mode=disabled",
                 self.slots, configured_workers, sorted(self._created_worker_pids),
                 sorted(self._initialized_worker_pids), sorted(self._worker_pids),
                 sorted(self._completed_worker_pids), len(self._worker_pids),
                 worker_busy, max(0.0, worker_capacity - worker_busy),
                 worker_busy / worker_capacity, slot_busy,
                 max(0.0, elapsed * self.slots - slot_busy), self.scheduler_window,
+                self._active_workers_peak,
+                statistics.fmean(self._active_worker_samples) if self._active_worker_samples else 0.0,
+                2 * sum(item.get("stage") == "STAGED" for item in self.telemetry),
+                2 * sum(item.get("stage") == "STAGED" for item in self.telemetry),
+                self._download_starvation_time, sum(self._slot_wait_durations),
+                sum(float(item.get("staging_to_promotion", 0.0)) for item in self.telemetry),
             )
             if learnable and coordinator is not None:
                 staged = [item for item in self.telemetry if item.get("stage") == "STAGED"]
@@ -1126,6 +1070,7 @@ class ParallelAuditService(AuditService):
             for path in acquired.values():
                 try:
                     self.source.release_version(path)
+                    logger.info("FILE_RELEASED path=%s", path)
                 except Exception:
                     logger.warning("Falha ao liberar download %s", path, exc_info=True)
 
@@ -1149,7 +1094,7 @@ class ParallelAuditService(AuditService):
                 self._task_stages[task.sequence] = tuple(dict.fromkeys((
                     *self._task_stages.get(task.sequence, ()), TimedStage.READ_XLSX,
                 )))
-                self._slot(task, TaskState.COMPARE, 0, "Comparando snapshots", started,
+                self._slot(task, TaskState.COMPARE, 0, "Comparando versões", started,
                            TimedStage.COMPARE, compare_started)
                 staging_started = time.perf_counter()
                 self._task_stages[task.sequence] = tuple(dict.fromkeys((
@@ -1159,6 +1104,7 @@ class ParallelAuditService(AuditService):
                            TimedStage.STAGING, staging_started)
                 staging.put(comparison, changes, metrics)
                 task.pair_state = PairState.STAGED
+                logger.info("PAIR_STAGED sequence=%d slot_id=%d", task.sequence, task.slot_id or 0)
                 staged_at = time.perf_counter()
                 if lifecycle is not None:
                     lifecycle.staged_at = staged_at
@@ -1239,10 +1185,7 @@ class ParallelAuditService(AuditService):
 
     def _promote(self, coordinator: OrderedCommitCoordinator,
                  tasks: list[VersionTask], total: int,
-                 lifecycles: dict[int, TaskLifecycle] | None = None,
-                 snapshot_cache: SnapshotCache | None = None,
-                 snapshot_identity: str | None = None,
-                 pairs: list[tuple[VersionInfo, VersionInfo]] | None = None) -> None:
+                 lifecycles: dict[int, TaskLifecycle] | None = None) -> None:
         for sequence in coordinator.promote_available():
             task = tasks[sequence - 1]
             task.pair_state = PairState.COMMITTED
@@ -1275,16 +1218,12 @@ class ParallelAuditService(AuditService):
             self._report_progress(coordinator.committed, total)
             self._report_checkpoint(task.version_label, coordinator.committed,
                                     total - coordinator.committed)
-            # A promoção encerra também a retenção conservadora durante staging.
-            # A liberação depende das comparações registradas, nunca apenas do
-            # valor corrente do checkpoint.
-            if snapshot_cache is not None and snapshot_identity is not None and pairs is not None:
-                previous, current = pairs[sequence - 1]
-                snapshot_cache.release((snapshot_identity, previous.id), sequence)
-                snapshot_cache.release((snapshot_identity, current.id), sequence)
+            logger.info("PAIR_PROMOTED sequence=%d slot_id=%d", sequence, task.slot_id or 0)
 
     def _metrics(self, started: float, coordinator: OrderedCommitCoordinator,
                  staging: StagingStore, active: int) -> None:
+        self._active_worker_samples.append(active)
+        self._active_workers_peak = max(self._active_workers_peak, active)
         if not self.metrics_callback:
             return
         sampled_at = time.monotonic()
