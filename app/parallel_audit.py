@@ -65,6 +65,18 @@ class AcquisitionState(StrEnum):
     FAILED = "FAILED"
 
 
+class PairState(StrEnum):
+    WAITING_LEFT = "WAITING_LEFT"
+    WAITING_RIGHT = "WAITING_RIGHT"
+    WAITING_BOTH = "WAITING_BOTH"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    COMPARISON_READY = "COMPARISON_READY"
+    STAGED = "STAGED"
+    COMMITTED = "COMMITTED"
+    FAILED = "FAILED"
+
+
 MIB = 1024 * 1024
 DEFAULT_MAX_PREFETCH_BYTES = 64 * MIB
 PREFETCH_MIN_TARGET = 2
@@ -114,6 +126,7 @@ class VersionTask:
     slot_id: int | None = None
     reservation_token: str | None = None
     retry_count: int = 0
+    pair_state: PairState = PairState.WAITING_BOTH
 
 
 @dataclass(slots=True)
@@ -428,6 +441,8 @@ class ParallelAuditService(AuditService):
         self._residual_waits: list[float] = []
         self._download_normal: list[float] = []
         self._download_prefetch: list[float] = []
+        self._download_pool: list[float] = []
+        self._validated_file_bytes: list[int] = []
         self._worker_starvation_count = 0
         self._slot_states: dict[int, TaskState] = {
             slot: TaskState.WAITING for slot in range(1, slots + 1)
@@ -572,8 +587,8 @@ class ParallelAuditService(AuditService):
         ready, pending = self._prefetch_counts()
         known_sizes = [int(item.size) for item in candidates if isinstance(item.size, int) and item.size > 0]
         if known_sizes:
-            self._avg_file_bytes = statistics.fmean(known_sizes)
-            base = prefetch_base_target(self.slots, self._avg_file_bytes)
+            estimated_average = statistics.fmean(known_sizes)
+            base = prefetch_base_target(self.slots, estimated_average)
             if not self._target_calibrated:
                 self._set_prefetch_target(base, "average_file_size")
                 self.prefetch_target_initial = base
@@ -661,9 +676,15 @@ class ParallelAuditService(AuditService):
                 self._prefetch_pending_hits += 1
                 logger.info("PREFETCH_PENDING_HIT technical_version_id=%s VersionLabel=%s", version.id, version.number)
         else:
-            self._prefetch_misses += 1
+            # The actor pool is the feed, not a failure of the legacy prefetcher.
+            if self.driver_count == 1:
+                self._prefetch_misses += 1
+            else:
+                self._download_pool.append(duration)
             self._download_normal.append(duration)
-            logger.info("PREFETCH_MISS technical_version_id=%s VersionLabel=%s wait_residual=%.3f", version.id, version.number, duration)
+            logger.info("%s technical_version_id=%s VersionLabel=%s wait_residual=%.3f",
+                        "PREFETCH_MISS" if self.driver_count == 1 else "DOWNLOAD_POOL_FEED",
+                        version.id, version.number, duration)
         self._review_prefetch_target()
         return path, duration, prefetched
 
@@ -697,6 +718,11 @@ class ParallelAuditService(AuditService):
             verify = getattr(self.source, "verify_download_digest", None)
             if callable(verify):
                 verify(acquired[version.id], digest)
+            # Only a completely downloaded and digest-validated file teaches the profile.
+            file_bytes = acquired[version.id].stat().st_size
+            if file_bytes > 0:
+                self._validated_file_bytes.append(file_bytes)
+                self._avg_file_bytes = statistics.fmean(self._validated_file_bytes)
             self.telemetry.append({
                 "slot_id": 0, "task_id": "", "technical_version_id": version.id,
                 "sequence": task.sequence, "stage": "DOWNLOAD",
@@ -773,9 +799,8 @@ class ParallelAuditService(AuditService):
             tasks = [VersionTask(cur.id, cur.number, prev.id, index, execution_id)
                      for index, (prev, cur) in enumerate(pairs, 1)]
             snapshot_cache = SnapshotCache(self.scheduler_window + 1)
-            for sequence, (previous, current) in enumerate(pairs, 1):
-                snapshot_cache.register((identity, previous.id), {sequence})
-                snapshot_cache.register((identity, current.id), {sequence})
+            snapshot_ready_event = threading.Event()
+            snapshot_cache.add_ready_callback(lambda _key: snapshot_ready_event.set())
             executor_type = ProcessPoolExecutor if self.backend == "process" else ThreadPoolExecutor
             # Cada ator Selenium tem owner exclusivo. Os futures abaixo apenas
             # alimentam a fila compartilhada do pool e jamais comandam um driver.
@@ -835,6 +860,10 @@ class ParallelAuditService(AuditService):
                            and next_acquisition - coordinator.committed < self.scheduler_window):
                         candidate_task = tasks[next_acquisition]
                         if candidate_task.state is TaskState.WAITING:
+                            sequence = next_acquisition + 1
+                            previous, current = pairs[next_acquisition]
+                            snapshot_cache.register((identity, previous.id), {sequence})
+                            snapshot_cache.register((identity, current.id), {sequence})
                             candidate_task.state = TaskState.WAITING_DOWNLOAD
                             lifecycles[candidate_task.sequence] = TaskLifecycle(time.perf_counter())
                             window_end = min(len(pairs), next_acquisition + self.scheduler_window)
@@ -887,8 +916,14 @@ class ParallelAuditService(AuditService):
                                 right_key, prepared.current_path, task.sequence, executor,
                                 parse_version_snapshot,
                             )
-                        if (left_future is not None and right_future is not None
-                                and left_future.done() and right_future.done()):
+                        left_ready = snapshot_cache.is_ready(left_key)
+                        right_ready = snapshot_cache.is_ready(right_key)
+                        task.pair_state = (
+                            PairState.READY if left_ready and right_ready else
+                            PairState.WAITING_RIGHT if left_ready else
+                            PairState.WAITING_LEFT if right_ready else PairState.WAITING_BOTH
+                        )
+                        if left_ready and right_ready:
                             left = snapshot_cache.result(left_key)
                             right = snapshot_cache.result(right_key)
                             task_metrics = {
@@ -932,6 +967,7 @@ class ParallelAuditService(AuditService):
                         task, prepared = ready.pop(0)
                         slot = available_slots.pop(0)
                         task.slot_id = slot
+                        task.pair_state = PairState.RUNNING
                         task.reservation_token = uuid4().hex
                         comparison = ComparisonTask(
                             prepared.sequence, prepared.previous, prepared.current,
@@ -952,7 +988,10 @@ class ParallelAuditService(AuditService):
 
                     self._metrics(started, coordinator, staging, len(running))
                     if running or acquisitions or ready or snapshot_waiting:
-                        self.stop_event.wait(.01)
+                        # Snapshot callbacks wake this scheduler immediately. A short
+                        # bound remains for download/worker futures that have no callback.
+                        snapshot_ready_event.wait(.01)
+                        snapshot_ready_event.clear()
                     elif coordinator.committed < len(pairs):
                         raise RuntimeError("pipeline sem trabalho antes do checkpoint final")
 
@@ -999,6 +1038,24 @@ class ParallelAuditService(AuditService):
                 statistics.fmean(self._download_prefetch) if self._download_prefetch else 0.0,
                 self._worker_starvation_count, self._download_starvation_time,
             )
+            downloads = len(self._download_normal)
+            logger.info(
+                "DOWNLOAD_FEED_SUMMARY downloads_requested=%d downloads_started=%d "
+                "downloads_completed=%d download_queue_wait_mean=%.3f download_queue_wait_max=%.3f "
+                "ready_files_produced=%d ready_queue_mean=%.3f ready_queue_max=%d "
+                "ready_queue_empty_time=%.3f workers_waiting_for_input_time=%.3f "
+                "pair_ready_count=%d pair_ready_wait_mean=%.3f "
+                "worker_starvation_due_to_download=%.3f worker_starvation_due_to_snapshot=%.3f",
+                downloads, downloads, downloads,
+                statistics.fmean(self._queue_ages) if self._queue_ages else 0.0,
+                max(self._queue_ages, default=0.0), downloads, 0.0, 0,
+                self._ready_zero_seconds, self._download_starvation_time,
+                sum(task.pair_state in {PairState.READY, PairState.RUNNING,
+                    PairState.COMPARISON_READY, PairState.STAGED, PairState.COMMITTED}
+                    for task in tasks) if 'tasks' in locals() else 0,
+                0.0, self._download_starvation_time,
+                sum(self._slot_wait_durations) if self._slot_wait_durations else 0.0,
+            )
             if 'snapshot_cache' in locals():
                 snapshot_summary = snapshot_cache.summary()
                 self.snapshot_cache_summary = snapshot_summary
@@ -1006,10 +1063,12 @@ class ParallelAuditService(AuditService):
                 self.snapshot_serialize_duration = snapshot_cache.serialize_duration_total
                 self.snapshot_serialized_bytes = snapshot_cache.serialized_bytes_total
                 logger.info(
-                    "SNAPSHOT_CACHE_SUMMARY unique_versions=%d parse_count=%d reuse_count=%d "
+                    "SNAPSHOT_CACHE_SUMMARY catalog_versions_total=%d execution_unique_versions=%d "
+                    "parse_count=%d reuse_count=%d "
                     "duplicate_parse_prevented=%d peak_cache_count=%d estimated_peak_bytes=%d "
                     "parse_amplification=%.6f",
-                    snapshot_summary.unique_versions, snapshot_summary.parse_count,
+                    len(versions) if versions is not None else 0,
+                    snapshot_summary.execution_unique_versions, snapshot_summary.parse_count,
                     snapshot_summary.reuse_count, snapshot_summary.duplicate_parse_prevented,
                     snapshot_summary.peak_cache_count, snapshot_summary.estimated_peak_bytes,
                     snapshot_summary.parse_amplification,
@@ -1099,6 +1158,7 @@ class ParallelAuditService(AuditService):
                 self._slot(task, TaskState.STAGED, 0, "Preparando staging", started,
                            TimedStage.STAGING, staging_started)
                 staging.put(comparison, changes, metrics)
+                task.pair_state = PairState.STAGED
                 staged_at = time.perf_counter()
                 if lifecycle is not None:
                     lifecycle.staged_at = staged_at
@@ -1185,6 +1245,7 @@ class ParallelAuditService(AuditService):
                  pairs: list[tuple[VersionInfo, VersionInfo]] | None = None) -> None:
         for sequence in coordinator.promote_available():
             task = tasks[sequence - 1]
+            task.pair_state = PairState.COMMITTED
             promoted_at = time.perf_counter()
             lifecycle = lifecycles.get(sequence) if lifecycles else None
             if lifecycle is not None:

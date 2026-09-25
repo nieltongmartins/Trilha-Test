@@ -116,3 +116,58 @@ def test_sliding_window_never_exceeds_capacity():
             cache.release(key, sequence)
     assert cache.resident_count == 0
     assert cache.summary().peak_cache_count <= cache.capacity
+
+
+def test_result_waits_for_atomic_ready_publication(monkeypatch):
+    """Future.done() must never be mistaken for registry publication."""
+    cache = SnapshotCache(capacity=2)
+    key = (IDENTITY, "B")
+    cache.register(key, {1})
+    publish_entered = threading.Event()
+    permit_publish = threading.Event()
+    original_publish = cache._publish
+
+    def delayed_publish(cache_key, future):
+        publish_entered.set()
+        permit_publish.wait(1)
+        original_publish(cache_key, future)
+
+    monkeypatch.setattr(cache, "_publish", delayed_publish)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future = cache.request(key, "B.xlsx", 1, executor, parsed)
+        assert future.result().snapshot
+        assert publish_entered.wait(1)
+        consumer = executor.submit(cache.result, key)
+        time.sleep(.02)
+        assert not consumer.done()
+        permit_publish.set()
+        assert consumer.result(timeout=1).snapshot
+    assert cache.state(key) is SnapshotState.READY
+
+
+def test_ready_callbacks_are_event_driven_and_out_of_order():
+    cache = SnapshotCache(capacity=4)
+    awakened: list[str] = []
+    cache.add_ready_callback(lambda key: awakened.append(key[1]))
+    order = ("C", "A", "D", "B")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        for sequence, technical_id in enumerate(order, 1):
+            key = (IDENTITY, technical_id)
+            cache.register(key, {sequence})
+            cache.request(key, f"{technical_id}.xlsx", sequence, executor, parsed).result()
+        # Publication callback can trail Future.result(), so consume through the
+        # atomic registry API before asserting the event order.
+        for technical_id in order:
+            cache.result((IDENTITY, technical_id))
+    assert awakened == list(order)
+    assert all(cache.is_ready((IDENTITY, technical_id)) for technical_id in order)
+
+
+def test_twenty_thousand_backlog_materializes_only_active_window():
+    cache = SnapshotCache(capacity=16)
+    backlog = [(str(index), str(index + 1)) for index in range(20_000)]
+    for sequence, pair in enumerate(backlog[:15], 1):
+        for technical_id in pair:
+            cache.register((IDENTITY, technical_id), {sequence})
+    assert cache.summary().execution_unique_versions == 16
+    assert cache.resident_count == 0

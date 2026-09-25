@@ -6,7 +6,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import StrEnum
 import logging
-from queue import PriorityQueue
+from queue import Empty, PriorityQueue
 import threading
 import time
 from typing import Callable, Generic, TypeVar
@@ -56,6 +56,7 @@ class DriverWorker:
     health: str = "starting"
     downloads: int = 0
     busy_time: float = 0.0
+    idle_no_work: float = 0.0
     started_at: float = field(default_factory=time.monotonic)
 
 
@@ -84,6 +85,9 @@ class WebDriverPool(Generic[T]):
         self._serial = 0
         self._futures: dict[str, Future] = {}
         self.download_state: dict[str, DownloadState] = {}
+        self._queued_at: dict[str, float] = {}
+        self._queue_waits: list[float] = []
+        self._queue_depth_samples: list[int] = []
         self.workers = [DriverWorker(index, driver) for index, driver in enumerate(drivers, 1)]
         for worker in self.workers:
             thread = threading.Thread(target=self._run, args=(worker,),
@@ -99,6 +103,7 @@ class WebDriverPool(Generic[T]):
             future: Future = Future()
             self._futures[task.technical_version_id] = future
             self.download_state[task.technical_version_id] = DownloadState.QUEUED
+            self._queued_at[task.technical_version_id] = time.monotonic()
             self._serial += 1
             self._queue.put((task.sequence_priority, self._serial, task, future))
             return future
@@ -113,13 +118,18 @@ class WebDriverPool(Generic[T]):
             while not self._stop.is_set():
                 try:
                     _, _, task, future = self._queue.get(timeout=.1)
-                except Exception:
+                except Empty:
                     worker.state = DriverState.IDLE
+                    worker.idle_no_work += .1
                     continue
                 if future.cancelled() or future.done():
                     self._queue.task_done()
                     continue
                 started = time.monotonic()
+                with self._lock:
+                    queued_at = self._queued_at.pop(task.technical_version_id, started)
+                    self._queue_waits.append(max(0.0, started - queued_at))
+                    self._queue_depth_samples.append(self._queue.qsize())
                 worker.state = DriverState.DOWNLOADING
                 worker.current_version = task.technical_version_id
                 with self._lock:
@@ -188,13 +198,22 @@ class WebDriverPool(Generic[T]):
         elapsed = max(.001, max((time.monotonic() - w.started_at for w in self.workers), default=.001))
         logger.info("WEBDRIVER_POOL_SUMMARY driver_count_configured=%d drivers_created=%d "
                     "drivers_ready=%d drivers_failed=%d total_downloads=%d downloads_per_driver=%s "
-                    "utilization_per_driver=%s aggregate_downloads_per_minute=%.3f",
+                    "utilization_per_driver=%s aggregate_downloads_per_minute=%.3f "
+                    "download_queue_depth_mean=%.3f download_queue_depth_max=%d "
+                    "driver_idle_due_to_no_work=%.3f driver_busy_fetch_time=%.3f "
+                    "driver_busy_transfer_time=%.3f",
                     len(self.workers), len(self.workers),
                     sum(w.health == "ready" for w in self.workers),
                     sum(w.health != "ready" for w in self.workers), sum(w.downloads for w in self.workers),
                     {w.driver_id: w.downloads for w in self.workers},
                     {w.driver_id: round(w.busy_time / elapsed, 4) for w in self.workers},
-                    sum(w.downloads for w in self.workers) * 60 / elapsed)
+                    sum(w.downloads for w in self.workers) * 60 / elapsed,
+                    (sum(self._queue_depth_samples) / len(self._queue_depth_samples)
+                     if self._queue_depth_samples else 0.0),
+                    max(self._queue_depth_samples, default=0),
+                    sum(w.idle_no_work for w in self.workers),
+                    sum(w.busy_time for w in self.workers),
+                    sum(w.busy_time for w in self.workers))
 
     def forget(self, technical_version_id: str) -> None:
         """Remove resultado READY depois que o consumidor libera o arquivo."""
