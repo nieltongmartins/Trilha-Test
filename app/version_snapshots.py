@@ -29,6 +29,8 @@ SnapshotKey = tuple[str, str]
 
 class SnapshotState(StrEnum):
     NOT_REQUESTED = "NOT_REQUESTED"
+    REQUESTED = "REQUESTED"
+    DOWNLOADING = "DOWNLOADING"
     PARSING = "PARSING"
     READY = "READY"
     FAILED = "FAILED"
@@ -145,7 +147,7 @@ class _Entry:
 
 @dataclass(frozen=True, slots=True)
 class SnapshotCacheSummary:
-    unique_versions: int
+    execution_unique_versions: int
     parse_count: int
     reuse_count: int
     duplicate_parse_prevented: int
@@ -153,8 +155,14 @@ class SnapshotCacheSummary:
     estimated_peak_bytes: int
 
     @property
+    def unique_versions(self) -> int:
+        """Compatibility alias; this is deliberately execution-scoped."""
+        return self.execution_unique_versions
+
+    @property
     def parse_amplification(self) -> float:
-        return self.parse_count / self.unique_versions if self.unique_versions else 0.0
+        return (self.parse_count / self.execution_unique_versions
+                if self.execution_unique_versions else 0.0)
 
 
 class SnapshotCache:
@@ -166,6 +174,10 @@ class SnapshotCache:
         self.capacity = capacity
         self._entries: dict[SnapshotKey, _Entry] = {}
         self._lock = threading.RLock()
+        self._changed = threading.Condition(self._lock)
+        self._seen_keys: set[SnapshotKey] = set()
+        self._released_keys: set[SnapshotKey] = set()
+        self._ready_callbacks: list[Callable[[SnapshotKey], None]] = []
         self.parse_count = 0
         self.reuse_count = 0
         self.duplicate_parse_prevented = 0
@@ -178,10 +190,15 @@ class SnapshotCache:
 
     def register(self, key: SnapshotKey, dependencies: set[int]) -> None:
         with self._lock:
+            self._released_keys.discard(key)
             entry = self._entries.setdefault(key, _Entry())
             entry.dependencies.update(dependencies)
-        logger.info("SNAPSHOT_REQUESTED technical_version_id=%s sequence_dependencies=%s",
-                    key[1], sorted(dependencies))
+            self._seen_keys.add(key)
+
+    def add_ready_callback(self, callback: Callable[[SnapshotKey], None]) -> None:
+        """Notify the scheduler after an immutable snapshot is atomically published."""
+        with self._lock:
+            self._ready_callbacks.append(callback)
 
     def _resident_count(self) -> int:
         return sum(entry.state in {SnapshotState.PARSING, SnapshotState.READY}
@@ -217,6 +234,8 @@ class SnapshotCache:
             if self._resident_count() >= self.capacity:
                 raise BufferError("snapshot cache cheio; aplicar backpressure")
             entry.state = SnapshotState.PARSING
+            logger.info("SNAPSHOT_REQUESTED technical_version_id=%s consumer_sequence=%d",
+                        key[1], consumer_sequence)
             self.parse_count += 1
             future = executor.submit(parser, VersionSnapshotTask(key[0], key[1], local_path))
             entry.future = future
@@ -225,6 +244,7 @@ class SnapshotCache:
             return future
 
     def _publish(self, key: SnapshotKey, future: Future[SnapshotParseResult]) -> None:
+        callbacks: tuple[Callable[[SnapshotKey], None], ...] = ()
         with self._lock:
             entry = self._entries[key]
             try:
@@ -233,21 +253,28 @@ class SnapshotCache:
                 entry.state = SnapshotState.FAILED
                 entry.error = error
                 entry.result = None
+                self._changed.notify_all()
                 logger.error("SNAPSHOT_PARSE_FAILED technical_version_id=%s", key[1], exc_info=error)
                 return
             entry.result = result
+            # The reference and all accounting are installed under the same lock;
+            # READY is the final publication store, never an optimistic flag.
             entry.state = SnapshotState.READY
             self.estimated_bytes += result.estimated_bytes
             self.read_xlsx_total += result.duration
             self.serialize_duration_total += result.serialize_duration
             self.serialized_bytes_total += result.serialized_bytes
             self.estimated_peak_bytes = max(self.estimated_peak_bytes, self.estimated_bytes)
+            callbacks = tuple(self._ready_callbacks)
+            self._changed.notify_all()
             logger.info(
                 "SNAPSHOT_PARSE_READY technical_version_id=%s duration=%.6f estimated_bytes=%d "
                 "worker_pid=%d snapshot_serialize_duration=%.6f snapshot_serialized_bytes=%d",
                 key[1], result.duration, result.estimated_bytes, result.worker_pid,
                 result.serialize_duration, result.serialized_bytes,
             )
+        for callback in callbacks:
+            callback(key)
 
     def result(self, key: SnapshotKey) -> SnapshotParseResult:
         with self._lock:
@@ -257,9 +284,18 @@ class SnapshotCache:
             raise RuntimeError(f"snapshot não solicitado: {key}")
         result = future.result()
         with self._lock:
-            if self._entries[key].state is not SnapshotState.READY:
-                raise RuntimeError(f"snapshot não está READY: {key}")
+            # Future completion and its publication callback are distinct steps.
+            # Wait for atomic publication instead of observing their tiny race.
+            self._changed.wait_for(lambda: self._entries[key].state in {
+                SnapshotState.READY, SnapshotState.FAILED,
+            })
+            if self._entries[key].state is SnapshotState.FAILED:
+                raise RuntimeError(f"snapshot FAILED: {key}") from self._entries[key].error
         return result
+
+    def is_ready(self, key: SnapshotKey) -> bool:
+        with self._lock:
+            return self._entries.get(key, _Entry()).state is SnapshotState.READY
 
     def release(self, key: SnapshotKey, consumer_sequence: int) -> bool:
         with self._lock:
@@ -274,12 +310,19 @@ class SnapshotCache:
             entry.result = None
             entry.future = None
             entry.state = SnapshotState.RELEASED
+            self._released_keys.add(key)
+            del self._entries[key]
             logger.info("SNAPSHOT_RELEASED technical_version_id=%s remaining_refs=0", key[1])
             return True
 
     def state(self, key: SnapshotKey) -> SnapshotState:
         with self._lock:
-            return self._entries[key].state
+            entry = self._entries.get(key)
+            if entry is None and key in self._released_keys:
+                return SnapshotState.RELEASED
+            if entry is None:
+                raise KeyError(key)
+            return entry.state
 
     def reset_failed(self, key: SnapshotKey) -> None:
         """Invalida atomicamente uma falha antes de um retry explícito."""
@@ -301,7 +344,7 @@ class SnapshotCache:
     def summary(self) -> SnapshotCacheSummary:
         with self._lock:
             return SnapshotCacheSummary(
-                len(self._entries), self.parse_count, self.reuse_count,
+                len(self._seen_keys), self.parse_count, self.reuse_count,
                 self.duplicate_parse_prevented, self.peak_cache_count,
                 self.estimated_peak_bytes,
             )
