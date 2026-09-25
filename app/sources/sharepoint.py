@@ -12,6 +12,8 @@ from pathlib import Path
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 from typing import Any, Protocol
 from urllib.parse import quote, unquote, urljoin, urlsplit
@@ -19,6 +21,7 @@ import zipfile
 
 from app.sources.base import SpreadsheetInfo, VersionInfo
 from app.temp_files import TemporaryWorkspace
+from app.webdriver_pool import DownloadTask, WebDriverPool
 
 
 logger = logging.getLogger("auditoria_excel.sharepoint")
@@ -346,6 +349,85 @@ class BrowserSharePointSource:
         self._status_callback = status_callback
         self._incremental_digests: dict[Path, str] = {}
         self._download_metrics: dict[str, dict[str, object]] = {}
+        self._driver_pool: WebDriverPool[tuple[SpreadsheetInfo, VersionInfo]] | None = None
+        self._pool_sources: list[BrowserSharePointSource] = []
+        self._path_sources: dict[Path, tuple[BrowserSharePointSource, str]] = {}
+        self._pool_profile_directories: list[Path] = []
+
+    def configure_driver_pool(self, driver_count: int) -> None:
+        """Cria sessões isoladas e exige autenticação integrada em cada uma.
+
+        Segredos da sessão principal não são extraídos nem copiados. Perfis novos
+        dependem do SSO integrado do Edge; se o tenant não o permitir, a criação
+        falha de forma controlada antes do primeiro download. Nenhum
+        ``user-data-dir`` é compartilhado.
+        """
+        if not 1 <= driver_count <= 4:
+            raise ValueError("driver_count deve estar entre 1 e 4")
+        if self._driver_pool is not None:
+            if len(self._driver_pool.workers) != driver_count:
+                raise RuntimeError("pool de WebDrivers não pode ser alterado durante a auditoria")
+            return
+        if driver_count == 1:
+            return
+        from selenium import webdriver
+
+        self._validate_webdriver_context()
+        sources = [self]
+        try:
+            for driver_id in range(2, driver_count + 1):
+                profile = Path(tempfile.mkdtemp(prefix=f"driver-profile-{driver_id}-"))
+                self._pool_profile_directories.append(profile)
+                options = webdriver.EdgeOptions()
+                options.add_argument(f"--user-data-dir={profile}")
+                browser = webdriver.Edge(options=options)
+                browser.set_script_timeout(600)
+                browser.set_page_load_timeout(EDGE_RECOVERY_TIMEOUT_SECONDS)
+                browser.get(self.site_url)
+                added = type(self)(self.site_url, self.scope_paths, browser,
+                                   temp_directory=self._workspace.root, owns_browser=False,
+                                   status_callback=self._status_callback)
+                added._validate_webdriver_context()
+                entity = _odata_object(added._json("web?$select=Id"))
+                if not isinstance(entity.get("Id"), str):
+                    raise SharePointReadError(
+                        "Edge adicional não autenticado; o tenant não ofereceu SSO integrado"
+                    )
+                sources.append(added)
+                logger.info("WEBDRIVER_CREATED driver_id=%d session=%s", driver_id,
+                            getattr(browser, "session_id", "unknown"))
+        except Exception:
+            for source in sources[1:]:
+                try:
+                    source._browser.quit()
+                    source._workspace.close()
+                except Exception:
+                    pass
+            raise
+        self._pool_sources = sources
+        by_browser = {id(source._browser): source for source in sources}
+
+        def validate(browser: object) -> None:
+            source = by_browser[id(browser)]
+            source._validate_webdriver_context()
+            entity = _odata_object(source._json("web?$select=Id"))
+            if not isinstance(entity.get("Id"), str):
+                raise SharePointReadError("sessão adicional não autorizada pelo SharePoint")
+
+        def download(browser: object, task: DownloadTask[tuple[SpreadsheetInfo, VersionInfo]]) -> Path:
+            source = by_browser[id(browser)]
+            sheet, version = task.payload
+            path = source._get_version_direct(sheet, version)
+            self._path_sources[path] = (source, version.id)
+            if source is not self:
+                self._download_metrics[version.id] = source.consume_download_metrics(version.id)
+            return path
+
+        self._driver_pool = WebDriverPool(
+            [source._browser for source in sources], download, validate=validate,
+            close_driver=lambda browser: browser.quit() if browser is not self._browser else None,
+            max_attempts=2,
+        )
 
     def consume_download_metrics(self, technical_version_id: str) -> dict[str, object]:
         """Entrega a telemetria da aquisição sem expor/mover o WebDriver."""
@@ -444,7 +526,17 @@ class BrowserSharePointSource:
         except Exception:
             logger.debug("Falha ao cancelar prefetch durante encerramento", exc_info=True)
 
-        if self._owns_browser:
+        if self._driver_pool is not None:
+            self._driver_pool.close()
+            self._driver_pool = None
+            for source in self._pool_sources[1:]:
+                try:
+                    source._workspace.close()
+                except Exception:
+                    logger.debug("Falha ao limpar workspace de driver", exc_info=True)
+            for profile in self._pool_profile_directories:
+                shutil.rmtree(profile, ignore_errors=True)
+        elif self._owns_browser:
             try:
                 self._browser.quit()
             except Exception:
@@ -1765,6 +1857,16 @@ class BrowserSharePointSource:
         return destination
 
     def get_version(self, spreadsheet: SpreadsheetInfo, version: VersionInfo) -> Path:
+        if self._driver_pool is not None:
+            task = DownloadTask(
+                f"{spreadsheet.site_id}|{spreadsheet.drive_id}|{spreadsheet.drive_item_id}",
+                version.id, version.number, int(version.id) if version.id.isdigit() else 0,
+                self._version_download_url(spreadsheet, version), (spreadsheet, version),
+            )
+            return self._driver_pool.submit(task).result()
+        return self._get_version_direct(spreadsheet, version)
+
+    def _get_version_direct(self, spreadsheet: SpreadsheetInfo, version: VersionInfo) -> Path:
         self._validate_webdriver_context()
         url = self._version_download_url(spreadsheet, version)
         alternate_url = self._historical_url_fallback(version)
@@ -1897,12 +1999,16 @@ class BrowserSharePointSource:
         raise last_error
 
     def release_version(self, path: Path) -> None:
-        self._incremental_digests.pop(path, None)
-        self._workspace.release(path)
+        owner, technical_id = self._path_sources.pop(path, (self, ""))
+        owner._incremental_digests.pop(path, None)
+        owner._workspace.release(path)
+        if self._driver_pool is not None and technical_id:
+            self._driver_pool.forget(technical_id)
 
     def verify_download_digest(self, path: Path, reference_digest: str) -> None:
         """Compara o SHA incremental da transferência com a leitura de referência."""
-        incremental = self._incremental_digests.get(path)
+        owner = self._path_sources.get(path, (self, ""))[0]
+        incremental = owner._incremental_digests.get(path)
         if incremental is None:
             raise SharePointReadError("SHA-256 incremental do download indisponível")
         if incremental != reference_digest:

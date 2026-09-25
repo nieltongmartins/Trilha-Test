@@ -360,6 +360,7 @@ class ParallelAuditService(AuditService):
     """Scheduler com fila dinâmica e de um a oito workers independentes."""
 
     def __init__(self, database, source: VersionSource, *, slots: int = 2,
+                 driver_count: int = 1,
                  backend: Literal["sync", "thread", "process"] = "process",
                  slot_callback: Callable[[SlotProgress], None] | None = None,
                  metrics_callback: Callable[[ParallelMetrics], None] | None = None,
@@ -371,8 +372,16 @@ class ParallelAuditService(AuditService):
                  **kwargs) -> None:
         if not MIN_WORKERS <= slots <= MAX_WORKERS:
             raise ValueError("slots deve estar entre 1 e 8")
+        if not 1 <= driver_count <= 4:
+            raise ValueError("driver_count deve estar entre 1 e 4")
         super().__init__(database, source, **kwargs)
         self.slots = slots
+        self.driver_count = driver_count
+        configure_drivers = getattr(source, "configure_driver_pool", None)
+        if callable(configure_drivers):
+            configure_drivers(driver_count)
+        elif driver_count != 1:
+            raise ValueError("a fonte selecionada não oferece pool de WebDrivers")
         self.backend = backend
         self.slot_callback = slot_callback
         self.metrics_callback = metrics_callback
@@ -547,6 +556,10 @@ class ParallelAuditService(AuditService):
         Este método roda exclusivamente no coordenador/proprietário do WebDriver.
         O mapa por ID técnico torna o agendamento idempotente.
         """
+        # Em modo pool, os próprios atores são o prefetch paralelo. Não envie
+        # comandos JS de um scheduler a um driver que já pertence a outro ator.
+        if self.driver_count > 1:
+            return
         prefetch = getattr(self.source, "prefetch_version", None)
         if not callable(prefetch):
             return
@@ -604,7 +617,7 @@ class ParallelAuditService(AuditService):
                  slot: int) -> tuple[Path, float, bool]:
         record = self._acquisitions.setdefault(version.id, AcquisitionRecord(version))
         prefetched = record.state in (AcquisitionState.PREFETCH_PENDING, AcquisitionState.PREFETCH_READY)
-        if record.state is AcquisitionState.CONSUMING:
+        if record.state is AcquisitionState.CONSUMING and self.driver_count == 1:
             raise RuntimeError(f"aquisição duplicada: technical_version_id={version.id}")
         record.state = AcquisitionState.CONSUMING
         started = time.perf_counter()
@@ -764,10 +777,11 @@ class ParallelAuditService(AuditService):
                 snapshot_cache.register((identity, previous.id), {sequence})
                 snapshot_cache.register((identity, current.id), {sequence})
             executor_type = ProcessPoolExecutor if self.backend == "process" else ThreadPoolExecutor
-            # Selenium has exactly one owner.  Acquisition runs independently from
-            # the coordinator so completed workers are staged/promoted while Edge waits.
+            # Cada ator Selenium tem owner exclusivo. Os futures abaixo apenas
+            # alimentam a fila compartilhada do pool e jamais comandam um driver.
             with (executor_type(max_workers=configured_workers, initializer=_initialize_worker) as executor,
-                  ThreadPoolExecutor(max_workers=1, thread_name_prefix="webdriver-owner") as downloader):
+                  ThreadPoolExecutor(max_workers=self.driver_count,
+                                     thread_name_prefix="download-scheduler") as downloader):
                 running: dict[Future, tuple[VersionTask, ComparisonTask, float, float]] = {}
                 ready: list[tuple[VersionTask, ComparisonTask]] = []
                 snapshot_waiting: list[
@@ -775,8 +789,7 @@ class ParallelAuditService(AuditService):
                 ] = []
                 accounted_snapshot_reads: set[str] = set()
                 lifecycles: dict[int, TaskLifecycle] = {}
-                acquisition: Future | None = None
-                acquisition_task: VersionTask | None = None
+                acquisitions: dict[Future, VersionTask] = {}
                 next_acquisition = 0
                 while coordinator.committed < len(pairs):
                     if self.stop_event.is_set():
@@ -791,8 +804,9 @@ class ParallelAuditService(AuditService):
                         pairs=pairs,
                     )
 
-                    if acquisition is not None and acquisition.done():
-                        assert acquisition_task is not None
+                    for acquisition, acquisition_task in list(acquisitions.items()):
+                        if not acquisition.done():
+                            continue
                         try:
                             comparison = acquisition.result()
                         except Exception:
@@ -801,12 +815,11 @@ class ParallelAuditService(AuditService):
                         lifecycle = lifecycles[acquisition_task.sequence]
                         lifecycle.download_ready_at = time.perf_counter()
                         snapshot_waiting.append((acquisition_task, comparison, None, None))
-                        acquisition = None
-                        acquisition_task = None
+                        del acquisitions[acquisition]
 
                     if self.pause_event.is_set():
                         self.timing_model.pause()
-                        if not running and acquisition is None:
+                        if not running and not acquisitions:
                             self._report_control("paused", coordinator.final or initial)
                             while self.pause_event.is_set() and not self.stop_event.wait(.05):
                                 pass
@@ -816,10 +829,10 @@ class ParallelAuditService(AuditService):
                             self.stop_event.wait(.01)
                         continue
 
-                    # Queue one pair at a time on the sole WebDriver owner.  No worker
-                    # slot is reserved until this future publishes local READY files.
-                    if (acquisition is None and next_acquisition < len(tasks)
-                            and next_acquisition - coordinator.committed < self.scheduler_window):
+                    # Mantém no máximo uma preparação por driver em voo. Drivers
+                    # não são vinculados a slots e o primeiro livre pega a prioridade menor.
+                    while (len(acquisitions) < self.driver_count and next_acquisition < len(tasks)
+                           and next_acquisition - coordinator.committed < self.scheduler_window):
                         candidate_task = tasks[next_acquisition]
                         if candidate_task.state is TaskState.WAITING:
                             candidate_task.state = TaskState.WAITING_DOWNLOAD
@@ -832,12 +845,14 @@ class ParallelAuditService(AuditService):
                                     if version.id not in acquired and version.id not in seen:
                                         seen.add(version.id)
                                         candidates.append(version)
-                            acquisition_task = candidate_task
                             acquisition = downloader.submit(
                                 self._prepare_pair, spreadsheet, pairs[next_acquisition],
                                 candidate_task, acquired, candidates,
                             )
+                            acquisitions[acquisition] = candidate_task
                             next_acquisition += 1
+                        else:
+                            break
 
                     # Solicita cada versão uma única vez. Solicitações repetidas recebem
                     # o mesmo Future PARSING/READY e nunca abrem o XLSX novamente.
@@ -936,7 +951,7 @@ class ParallelAuditService(AuditService):
                         running[future] = (task, comparison, task_started, stage_started)
 
                     self._metrics(started, coordinator, staging, len(running))
-                    if running or acquisition is not None or ready or snapshot_waiting:
+                    if running or acquisitions or ready or snapshot_waiting:
                         self.stop_event.wait(.01)
                     elif coordinator.committed < len(pairs):
                         raise RuntimeError("pipeline sem trabalho antes do checkpoint final")

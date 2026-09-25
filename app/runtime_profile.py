@@ -35,6 +35,7 @@ class RuntimeProfile:
     profile_needs_revalidation: bool
     sample_count: int
     benchmark_count: int
+    last_driver_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +90,7 @@ class RuntimeProfileStore:
                 float(row["best_measured_throughput"]), row["best_measured_slots"],
                 row["recommendation_confidence"], bool(row["profile_needs_revalidation"]),
                 int(row["sample_count"]), int(row["benchmark_count"]),
+                int(row["last_driver_count"]),
             )
             if (not math.isfinite(result.avg_file_bytes) or result.avg_file_bytes < 0
                     or result.recommendation_confidence not in {"LOW", "MEDIUM", "HIGH"}):
@@ -103,6 +105,19 @@ class RuntimeProfileStore:
             result.recommendation_confidence,
         )
         return result
+
+    def save_driver_count(self, identity: str, driver_count: int) -> None:
+        """Persiste somente a escolha explícita, sem criar recomendação automática."""
+        if not 1 <= driver_count <= 4:
+            raise ValueError("driver_count deve estar entre 1 e 4")
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO workbook_runtime_profile (workbook_identity,last_driver_count)
+                   VALUES (?,?) ON CONFLICT(workbook_identity) DO UPDATE SET
+                   last_driver_count=excluded.last_driver_count,
+                   last_updated_at=CURRENT_TIMESTAMP""",
+                (identity, driver_count),
+            )
 
     def record(self, identity: str, sample: RuntimeSample) -> RuntimeProfile | None:
         """Guarda amostra válida e recalcula recomendação por throughput comparável."""
