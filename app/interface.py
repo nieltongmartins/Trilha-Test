@@ -218,6 +218,13 @@ class AuditApplication(ttk.Frame):
         )
         self.worker_selector.pack(side="left", padx=(0, 10))
         self.worker_selector.bind("<<ComboboxSelected>>", self._manual_worker_selection)
+        ttk.Label(buttons, text="WebDrivers para download:").pack(side="left", padx=(0, 4))
+        self.driver_count = tk.IntVar(value=1)
+        self.driver_selector = ttk.Combobox(
+            buttons, textvariable=self.driver_count, values=(1, 2, 3, 4),
+            state="readonly", width=3,
+        )
+        self.driver_selector.pack(side="left", padx=(0, 10))
         self.runtime_recommendation = tk.StringVar(value="Recomendado: ainda não calculado")
         ttk.Label(buttons, textvariable=self.runtime_recommendation).pack(
             side="left", padx=(0, 10)
@@ -746,6 +753,8 @@ class AuditApplication(ttk.Frame):
     def _apply_runtime_profile(self, profile: RuntimeProfile | None) -> None:
         """Aplica recomendação no Tk MainThread, preservando override manual."""
         self._loaded_runtime_profile = profile
+        if profile is not None and hasattr(self, "driver_count"):
+            self.driver_count.set(profile.last_driver_count)
         label = getattr(self, "runtime_recommendation", None)
         if profile is None or profile.recommended_slots is None:
             if label is not None:
@@ -798,6 +807,9 @@ class AuditApplication(ttk.Frame):
         self._timing_model = SharedExecutionTimingModel()
         self._timing_models[timing_key] = self._timing_model
         self._audit_active_started_at = self._timing_model.active_now()
+        RuntimeProfileStore(self.database.connection).save_driver_count(
+            workbook_identity(spreadsheet), max(1, min(4, int(self.driver_count.get())))
+        )
         if self._timing_model.sample_count():
             self._last_global_mean = self._timing_model.task_average()
         self._last_global_throughput = self._timing_model.throughput_per_minute()
@@ -846,6 +858,7 @@ class AuditApplication(ttk.Frame):
                 self.database,
                 source,
                 slots=max(1, min(8, int(self.worker_count.get()))),
+                driver_count=max(1, min(4, int(self.driver_count.get()))),
                 backend="process",
                 slot_callback=report_slot,
                 metrics_callback=report_metrics,
@@ -1476,6 +1489,8 @@ class AuditApplication(ttk.Frame):
             )
         if hasattr(self, "worker_selector"):
             self.worker_selector.configure(state="disabled" if self._audit_active else "readonly")
+        if hasattr(self, "driver_selector"):
+            self.driver_selector.configure(state="disabled" if self._audit_active else "readonly")
         for button in getattr(self, "storage_buttons", ()):
             button.configure(state=state)
         self._stored_selection_changed()

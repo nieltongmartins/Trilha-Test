@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS workbook_runtime_profile (
     best_measured_throughput REAL NOT NULL DEFAULT 0,
     best_measured_slots INTEGER CHECK (best_measured_slots BETWEEN 1 AND 8),
     last_slots_used INTEGER CHECK (last_slots_used BETWEEN 1 AND 8),
+    last_driver_count INTEGER NOT NULL DEFAULT 1 CHECK (last_driver_count BETWEEN 1 AND 4),
     last_prefetch_target INTEGER,
     avg_download_seconds REAL NOT NULL DEFAULT 0,
     avg_read_xlsx_seconds REAL NOT NULL DEFAULT 0,
@@ -288,6 +289,14 @@ class Database:
                 DROP TABLE version_catalog_legacy;
                 CREATE INDEX IF NOT EXISTS idx_version_catalog_watermark
                     ON version_catalog (workbook_identity, technical_version_id);"""
+            )
+        profile_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(workbook_runtime_profile)")
+        }
+        if "last_driver_count" not in profile_columns:
+            connection.execute(
+                "ALTER TABLE workbook_runtime_profile ADD COLUMN last_driver_count "
+                "INTEGER NOT NULL DEFAULT 1 CHECK (last_driver_count BETWEEN 1 AND 4)"
             )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
