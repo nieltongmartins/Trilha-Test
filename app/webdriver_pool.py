@@ -88,6 +88,10 @@ class WebDriverPool(Generic[T]):
         self._queued_at: dict[str, float] = {}
         self._queue_waits: list[float] = []
         self._queue_depth_samples: list[int] = []
+        self._active_driver_samples: list[int] = []
+        self._download_durations: list[float] = []
+        self._completed = 0
+        self._retries = 0
         self.workers = [DriverWorker(index, driver) for index, driver in enumerate(drivers, 1)]
         for worker in self.workers:
             thread = threading.Thread(target=self._run, args=(worker,),
@@ -130,6 +134,9 @@ class WebDriverPool(Generic[T]):
                     queued_at = self._queued_at.pop(task.technical_version_id, started)
                     self._queue_waits.append(max(0.0, started - queued_at))
                     self._queue_depth_samples.append(self._queue.qsize())
+                    self._active_driver_samples.append(sum(
+                        item.state is DriverState.DOWNLOADING for item in self.workers
+                    ) + 1)
                 worker.state = DriverState.DOWNLOADING
                 worker.current_version = task.technical_version_id
                 with self._lock:
@@ -150,6 +157,8 @@ class WebDriverPool(Generic[T]):
                                                  task.payload, task.attempt + 1)
                             with self._lock:
                                 self.download_state[task.technical_version_id] = DownloadState.QUEUED
+                                self._queued_at[task.technical_version_id] = time.monotonic()
+                                self._retries += 1
                                 self._serial += 1
                                 self._queue.put((retry.sequence_priority, self._serial, retry, future))
                         except BaseException as recovery_error:
@@ -167,13 +176,19 @@ class WebDriverPool(Generic[T]):
                     worker.busy_time += elapsed
                     with self._lock:
                         self.download_state[task.technical_version_id] = DownloadState.READY
+                        self._download_durations.append(elapsed)
+                        self._completed += 1
                     future.set_result(result)
                     logger.info("WEBDRIVER_DOWNLOAD_FINISHED driver_id=%d technical_version_id=%s duration=%.3f",
                                 worker.driver_id, task.technical_version_id, elapsed)
                 finally:
                     worker.last_activity = time.monotonic()
                     worker.current_version = None
+                    if not self._stop.is_set():
+                        worker.state = DriverState.IDLE
                     self._queue.task_done()
+                    # Give another idle owner a fair chance at the shared queue.
+                    time.sleep(0)
         except BaseException as error:
             worker.state = DriverState.FAILED
             worker.health = str(error)
@@ -220,3 +235,26 @@ class WebDriverPool(Generic[T]):
         with self._lock:
             self._futures.pop(technical_version_id, None)
             self.download_state.pop(technical_version_id, None)
+
+    def metrics(self) -> dict[str, float | int]:
+        """Return one coherent, side-effect-free snapshot for pipeline telemetry."""
+        with self._lock:
+            states = tuple(self.download_state.values())
+            queue_depths = tuple(self._queue_depth_samples)
+            active = tuple(self._active_driver_samples)
+            durations = tuple(self._download_durations)
+            waits = tuple(self._queue_waits)
+            return {
+                "files_queued": sum(state is DownloadState.QUEUED for state in states),
+                "files_downloading": sum(state is DownloadState.DOWNLOADING for state in states),
+                "files_ready": sum(state is DownloadState.READY for state in states),
+                "downloads_completed": self._completed,
+                "download_retries": self._retries,
+                "avg_download": sum(durations) / len(durations) if durations else 0.0,
+                "avg_queue_wait": sum(waits) / len(waits) if waits else 0.0,
+                "download_queue_depth_mean": (
+                    sum(queue_depths) / len(queue_depths) if queue_depths else 0.0
+                ),
+                "download_queue_depth_max": max(queue_depths, default=0),
+                "active_drivers_mean": sum(active) / len(active) if active else 0.0,
+            }

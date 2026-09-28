@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 from pathlib import Path
 import sqlite3
 import threading
@@ -188,6 +189,50 @@ def test_adjacent_pairs_download_shared_version_only_once(tmp_path: Path):
     assert result.status is AuditExecutionStatus.COMPLETED
     assert counted.downloads.count("technical-1") == 1
     assert len(counted.downloads) == len(set(counted.downloads)) == 3
+
+
+def test_multi_driver_pool_is_filled_by_lookahead_and_reports_ready_hits(tmp_path: Path):
+    items = history(tmp_path, 7)
+
+    class PoolLocal(LocalSource):
+        def __init__(self):
+            super().__init__(
+                [SHEET], {(SHEET.site_id, SHEET.drive_id, SHEET.drive_item_id): items}
+            )
+            self.futures = {}
+            self.priorities = []
+            self.downloads = []
+
+        def configure_driver_pool(self, count):
+            self.driver_count = count
+
+        def queue_pool_download(self, spreadsheet, version, priority):
+            if version.id not in self.futures:
+                self.priorities.append((version.id, priority))
+                future = Future()
+                future.set_result(super().get_version(spreadsheet, version))
+                self.futures[version.id] = future
+                self.downloads.append(version.id)
+            return self.futures[version.id]
+
+        def get_version(self, spreadsheet, version):
+            return self.queue_pool_download(spreadsheet, version, 999).result()
+
+    pooled = PoolLocal()
+    with Database(tmp_path / "pool-prefetch.db") as database:
+        database.initialize()
+        service = ParallelAuditService(
+            database, pooled, slots=5, driver_count=2, backend="thread",
+            staging_directory=tmp_path / "stage-pool-prefetch",
+        )
+        result = service.audit(SHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    assert len(pooled.downloads) == len(set(pooled.downloads)) == len(items)
+    assert service._prefetch_ready_hits == len(items)
+    assert service._prefetch_pending_hits == service._prefetch_misses == 0
+    # Look-ahead priorities, not reactive get_version priorities, scheduled every file.
+    assert all(priority < 999 for _version, priority in pooled.priorities)
 
 
 def test_slot_phase_events_use_timing_model_instead_of_fixed_percentages(tmp_path: Path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from concurrent.futures import Future
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 import hashlib
@@ -432,6 +433,33 @@ class BrowserSharePointSource:
     def consume_download_metrics(self, technical_version_id: str) -> dict[str, object]:
         """Entrega a telemetria da aquisição sem expor/mover o WebDriver."""
         return self._download_metrics.pop(technical_version_id, {})
+
+    def queue_pool_download(
+        self,
+        spreadsheet: SpreadsheetInfo,
+        version: VersionInfo,
+        sequence_priority: int,
+    ) -> Future | None:
+        """Queue look-ahead work without making the coordinator wait for Selenium.
+
+        The pool registry owns deduplication by technical version ID.  Calling
+        this method repeatedly therefore only returns the original future.
+        Single-driver operation deliberately has no implementation here: it
+        continues to use the browser-native prefetch path unchanged.
+        """
+        if self._driver_pool is None:
+            return None
+        task = DownloadTask(
+            f"{spreadsheet.site_id}|{spreadsheet.drive_id}|{spreadsheet.drive_item_id}",
+            version.id, version.number, sequence_priority,
+            self._version_download_url(spreadsheet, version), (spreadsheet, version),
+        )
+        return self._driver_pool.submit(task)
+
+    def pool_download_metrics(self) -> dict[str, float | int]:
+        if self._driver_pool is None:
+            return {}
+        return self._driver_pool.metrics()
 
     @classmethod
     def open_edge(
@@ -1858,12 +1886,11 @@ class BrowserSharePointSource:
 
     def get_version(self, spreadsheet: SpreadsheetInfo, version: VersionInfo) -> Path:
         if self._driver_pool is not None:
-            task = DownloadTask(
-                f"{spreadsheet.site_id}|{spreadsheet.drive_id}|{spreadsheet.drive_item_id}",
-                version.id, version.number, int(version.id) if version.id.isdigit() else 0,
-                self._version_download_url(spreadsheet, version), (spreadsheet, version),
+            future = self.queue_pool_download(
+                spreadsheet, version, int(version.id) if version.id.isdigit() else 0,
             )
-            return self._driver_pool.submit(task).result()
+            assert future is not None
+            return future.result()
         return self._get_version_direct(spreadsheet, version)
 
     def _get_version_direct(self, spreadsheet: SpreadsheetInfo, version: VersionInfo) -> Path:

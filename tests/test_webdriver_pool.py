@@ -66,3 +66,32 @@ def test_failed_driver_task_is_requeued_without_duplicate_future() -> None:
         assert pool.download_state["20"] is DownloadState.READY
     finally:
         pool.close()
+
+
+def test_shared_queue_dispatches_nearest_priority_after_variable_latency() -> None:
+    release_slow = threading.Event()
+    started = threading.Event()
+    order: list[str] = []
+
+    def variable(_driver: Driver, item: DownloadTask[str]) -> str:
+        order.append(item.technical_version_id)
+        if item.technical_version_id == "slow":
+            started.set()
+            release_slow.wait(timeout=2)
+        return item.payload
+
+    pool = WebDriverPool([Driver()], variable)
+    try:
+        slow = pool.submit(task("slow", 1))
+        assert started.wait(timeout=2)
+        far = pool.submit(task("far", 40))
+        nearest = pool.submit(task("nearest", 10))
+        duplicate = pool.submit(task("nearest", 0))
+        release_slow.set()
+        assert slow.result(timeout=2) == "slow"
+        assert nearest.result(timeout=2) == "nearest"
+        assert far.result(timeout=2) == "far"
+        assert duplicate is nearest
+        assert order == ["slow", "nearest", "far"]
+    finally:
+        pool.close()
