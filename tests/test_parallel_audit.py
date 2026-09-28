@@ -132,6 +132,64 @@ def test_parallel_scheduler_prefetches_once_by_technical_id(tmp_path: Path):
     assert service._prefetch_hits > 0
 
 
+def test_six_slots_are_reserved_before_slow_downloads_finish(tmp_path: Path):
+    items = history(tmp_path, 8)
+
+    class SlowLocal(LocalSource):
+        def get_version(self, spreadsheet, version):
+            time.sleep(.04)
+            return super().get_version(spreadsheet, version)
+
+    slow = SlowLocal(
+        [SHEET], {(SHEET.site_id, SHEET.drive_id, SHEET.drive_item_id): items}
+    )
+    with Database(tmp_path / "early-reservation.db") as database:
+        database.initialize()
+        service = ParallelAuditService(
+            database, slow, slots=6, driver_count=1, backend="thread",
+            staging_directory=tmp_path / "stage-early-reservation",
+        )
+        result = service.audit(SHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    reservations = [event for event in service.telemetry
+                    if event.get("stage") == "SLOT_RESERVED"]
+    assert [event["slot_id"] for event in reservations[:6]] == [1, 2, 3, 4, 5, 6]
+    first_ready = next(event for event in service.telemetry if event.get("stage") == "FILE_READY")
+    assert all(event["reserved_at"] < first_ready.get("ready_at", float("inf"))
+               for event in reservations[:6])
+
+
+def test_adjacent_pairs_download_shared_version_only_once(tmp_path: Path):
+    items = history(tmp_path, 3)
+
+    class CountingLocal(LocalSource):
+        def __init__(self):
+            super().__init__(
+                [SHEET], {(SHEET.site_id, SHEET.drive_id, SHEET.drive_item_id): items}
+            )
+            self.downloads = []
+
+        def get_version(self, spreadsheet, version):
+            self.downloads.append(version.id)
+            return super().get_version(spreadsheet, version)
+
+        def configure_driver_pool(self, count):
+            self.driver_count = count
+
+    counted = CountingLocal()
+    with Database(tmp_path / "dedupe.db") as database:
+        database.initialize()
+        result = ParallelAuditService(
+            database, counted, slots=2, driver_count=2, backend="thread",
+            staging_directory=tmp_path / "stage-dedupe",
+        ).audit(SHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    assert counted.downloads.count("technical-1") == 1
+    assert len(counted.downloads) == len(set(counted.downloads)) == 3
+
+
 def test_slot_phase_events_use_timing_model_instead_of_fixed_percentages(tmp_path: Path):
     events = []
     with Database(tmp_path / "phase-progress.db") as database:

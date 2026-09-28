@@ -270,8 +270,8 @@ class AuditApplication(ttk.Frame):
 
         self.slots_container = ttk.Frame(audit_tab)
         self.slots_container.grid(row=7, column=0, sticky="ew")
-        self.slots_container.columnconfigure(0, weight=1, uniform="slots")
-        self.slots_container.columnconfigure(1, weight=1, uniform="slots")
+        self.slots_container.grid_columnconfigure(0, weight=1, uniform="slot")
+        self.slots_container.grid_columnconfigure(1, weight=1, uniform="slot")
         self.slot_frames = []
         self.slot_progress_values = []
         self.slot_stage_texts = []
@@ -312,8 +312,7 @@ class AuditApplication(ttk.Frame):
                 self.slots_container, text=f"SLOT {slot_id} — —", padding=5,
                 height=102,
             )
-            current.grid(row=row, column=column,
-                         sticky="nsew", padx=(0, 4) if slot_id % 2 else (4, 0), pady=(3, 0))
+            current.grid(row=row, column=column, sticky="nsew", padx=4, pady=3)
             current.grid_propagate(False)
             current.columnconfigure(0, weight=1)
             value = tk.DoubleVar(value=0)
