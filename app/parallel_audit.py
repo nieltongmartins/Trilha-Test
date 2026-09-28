@@ -460,8 +460,14 @@ class ParallelAuditService(AuditService):
         self._download_normal: list[float] = []
         self._download_prefetch: list[float] = []
         self._download_pool: list[float] = []
+        self._pool_futures: dict[str, Future] = {}
+        self._files_reused = 0
         self._validated_file_bytes: list[int] = []
         self._worker_starvation_count = 0
+        self._worker_starvation_started: float | None = None
+        self._idle_scheduler_time = 0.0
+        self._idle_commit_time = 0.0
+        self._idle_other_time = 0.0
         self._slot_states: dict[int, TaskState] = {
             slot: TaskState.WAITING for slot in range(1, slots + 1)
         }
@@ -648,8 +654,89 @@ class ParallelAuditService(AuditService):
                 version.id, version.number, ready + pending, ready, pending,
             )
 
+    def _refresh_pool_registry(self) -> None:
+        """Publish completed actor futures as READY without consuming a slot."""
+        for version_id, future in tuple(self._pool_futures.items()):
+            record = self._acquisitions.get(version_id)
+            if record is None or record.state is not AcquisitionState.PREFETCH_PENDING:
+                continue
+            if future.done() and not future.cancelled():
+                try:
+                    future.result()
+                except BaseException:
+                    record.state = AcquisitionState.FAILED
+                else:
+                    record.state = AcquisitionState.PREFETCH_READY
+                    record.fetch_finished_at = time.perf_counter()
+
+    def _refill_pool_prefetch(
+        self,
+        spreadsheet: SpreadsheetInfo,
+        pairs: list[tuple[VersionInfo, VersionInfo]],
+        first_sequence: int,
+        acquired: dict[str, Path],
+    ) -> None:
+        """Keep the shared actor queue supplied from the scheduler look-ahead.
+
+        Priority is pair sequence first, then a version that completes a
+        partially local pair, then the pair's current side.  The conservative
+        target is shared by all drivers and is never multiplied by pool size.
+        """
+        if self.driver_count == 1:
+            return
+        queue_download = getattr(self.source, "queue_pool_download", None)
+        if not callable(queue_download) or self._memory_pressure():
+            return
+        self._refresh_pool_registry()
+        ready, pending = self._prefetch_counts()
+        if ready >= self.prefetch_target or ready + pending >= self.prefetch_target:
+            return
+        pending_bytes, ready_bytes = self._buffer_bytes()
+        candidates: list[tuple[int, int, int, VersionInfo]] = []
+        window_end = min(len(pairs), first_sequence - 1 + self.scheduler_window)
+        for offset, (previous, current) in enumerate(
+            pairs[first_sequence - 1:window_end], start=first_sequence
+        ):
+            previous_local = previous.id in acquired
+            current_local = current.id in acquired
+            for side, version in enumerate((previous, current)):
+                if version.id in acquired:
+                    continue
+                completes_pair = (side == 0 and current_local) or (side == 1 and previous_local)
+                candidates.append((offset, 0 if completes_pair else 1, 0 if side else 1, version))
+        seen: set[str] = set()
+        for sequence, completion_rank, side_rank, version in sorted(candidates):
+            if ready + pending >= self.prefetch_target:
+                break
+            if version.id in seen:
+                continue
+            seen.add(version.id)
+            record = self._acquisitions.setdefault(version.id, AcquisitionRecord(version))
+            if record.state is not AcquisitionState.NOT_REQUESTED:
+                continue
+            estimate = int(version.size or self._avg_file_bytes or 0)
+            if pending_bytes + ready_bytes + estimate > self.max_prefetch_bytes:
+                break
+            # Integer tuple encoding preserves all documented priority levels.
+            priority = sequence * 10 + completion_rank * 2 + side_rank
+            future = queue_download(spreadsheet, version, priority)
+            if future is None:
+                return
+            self._pool_futures[version.id] = future
+            record.state = AcquisitionState.PREFETCH_PENDING
+            record.planned_at = record.fetch_started_at = time.perf_counter()
+            record.estimated_bytes = estimate
+            pending += 1
+            pending_bytes += estimate
+            logger.info(
+                "PREFETCH_STARTED technical_version_id=%s VersionLabel=%s "
+                "mode=webdriver_pool sequence=%d priority=%d buffer_occupied=%d",
+                version.id, version.number, sequence, priority, ready + pending,
+            )
+
     def _acquire(self, spreadsheet: SpreadsheetInfo, version: VersionInfo,
                  slot: int) -> tuple[Path, float, bool]:
+        self._refresh_pool_registry()
         record = self._acquisitions.setdefault(version.id, AcquisitionRecord(version))
         prefetched = record.state in (AcquisitionState.PREFETCH_PENDING, AcquisitionState.PREFETCH_READY)
         if record.state is AcquisitionState.CONSUMING and self.driver_count == 1:
@@ -736,6 +823,7 @@ class ParallelAuditService(AuditService):
                                 version.id, task.sequence)
                     self.telemetry.append({"stage": "FILE_REUSED", "sequence": task.sequence,
                                            "technical_version_id": version.id})
+                    self._files_reused += 1
                     continue
                 if version.id in self._file_failures:
                     raise RuntimeError(f"download anterior falhou: {version.id}") from self._file_failures[version.id]
@@ -883,6 +971,9 @@ class ParallelAuditService(AuditService):
                     # polling/submitting WebDriver work.
                     self._collect_done(running, staging, block=False, lifecycles=lifecycles)
                     self._promote(coordinator, tasks, len(pairs), lifecycles=lifecycles)
+                    self._refill_pool_prefetch(
+                        spreadsheet, pairs, coordinator.committed + 1, acquired,
+                    )
 
                     for acquisition, acquisition_task in list(acquisitions.items()):
                         if not acquisition.done():
@@ -1011,6 +1102,23 @@ class ParallelAuditService(AuditService):
                         future = executor.submit(_compare_pair, comparison)
                         running[future] = (task, comparison, task_started, stage_started)
 
+                    # True download starvation: worker capacity exists, work
+                    # remains, but no pair with two validated local files can
+                    # be submitted.  Sampling ends as soon as a pair is ready.
+                    starving = (
+                        len(running) < configured_workers
+                        and coordinator.committed < len(pairs)
+                        and not ready
+                        and bool(acquisitions)
+                    )
+                    now = time.monotonic()
+                    if starving and self._worker_starvation_started is None:
+                        self._worker_starvation_started = now
+                        self._worker_starvation_count += 1
+                    elif not starving and self._worker_starvation_started is not None:
+                        self._download_starvation_time += now - self._worker_starvation_started
+                        self._worker_starvation_started = None
+
                     self._metrics(started, coordinator, staging, len(running))
                     if running or acquisitions or ready:
                         self.stop_event.wait(.01)
@@ -1034,6 +1142,11 @@ class ParallelAuditService(AuditService):
             return self._record_failure(connection, execution_id, spreadsheet_id, code,
                                         initial, 0, 0, None, None, error)
         finally:
+            if self._worker_starvation_started is not None:
+                self._download_starvation_time += (
+                    time.monotonic() - self._worker_starvation_started
+                )
+                self._worker_starvation_started = None
             total_requests = self._prefetch_ready_hits + self._prefetch_pending_hits + self._prefetch_misses
             ready, pending = self._prefetch_counts()
             logger.info(
@@ -1059,6 +1172,52 @@ class ParallelAuditService(AuditService):
                 statistics.fmean(self._download_normal) if self._download_normal else 0.0,
                 statistics.fmean(self._download_prefetch) if self._download_prefetch else 0.0,
                 self._worker_starvation_count, self._download_starvation_time,
+            )
+            elapsed = max(time.perf_counter() - started, .001)
+            pool_reporter = getattr(self.source, "pool_download_metrics", None)
+            pool_metrics = pool_reporter() if callable(pool_reporter) else {}
+            worker_busy_for_summary = sum(self._worker_busy.values())
+            worker_capacity_for_summary = elapsed * configured_workers
+            throughput = (
+                coordinator.committed * 60.0 / elapsed if coordinator is not None else 0.0
+            )
+            logger.info(
+                "UNIFIED_DOWNLOAD_PIPELINE_SUMMARY driver_count=%d slots=%d "
+                "prefetch_target=%d files_queued=%d files_downloading=%d files_ready=%d "
+                "files_reused=%d downloads_completed=%d ready_hits=%d pending_hits=%d "
+                "misses=%d ready_hit_rate=%.4f pending_hit_rate=%.4f miss_rate=%.4f "
+                "avg_download=%.3f avg_fetch=%.3f avg_transfer=%.3f "
+                "avg_residual_wait=%.3f download_queue_depth_mean=%.3f "
+                "download_queue_depth_max=%d active_drivers_mean=%.3f "
+                "worker_utilization=%.4f active_workers_mean=%.3f "
+                "throughput_versions_min=%.3f worker_starvation_due_to_no_ready_pair=%.3f "
+                "idle_download_starvation=%.3f idle_scheduler=%.3f idle_commit=%.3f "
+                "idle_other=%.3f download_retries=%d",
+                self.driver_count, self.slots, self.prefetch_target,
+                int(pool_metrics.get("files_queued", pending)),
+                int(pool_metrics.get("files_downloading", 0)),
+                int(pool_metrics.get("files_ready", ready)), self._files_reused,
+                int(pool_metrics.get("downloads_completed", len(self._download_normal))),
+                self._prefetch_ready_hits, self._prefetch_pending_hits, self._prefetch_misses,
+                self._prefetch_ready_hits / total_requests if total_requests else 0.0,
+                self._prefetch_pending_hits / total_requests if total_requests else 0.0,
+                self._prefetch_misses / total_requests if total_requests else 0.0,
+                float(pool_metrics.get("avg_download", (
+                    statistics.fmean(self._download_normal) if self._download_normal else 0.0
+                ))),
+                statistics.fmean(self._active_fetch_times) if self._active_fetch_times else 0.0,
+                statistics.fmean(self._download_normal) if self._download_normal else 0.0,
+                statistics.fmean(self._residual_waits) if self._residual_waits else 0.0,
+                float(pool_metrics.get("download_queue_depth_mean", 0.0)),
+                int(pool_metrics.get("download_queue_depth_max", 0)),
+                float(pool_metrics.get("active_drivers_mean", 0.0)),
+                worker_busy_for_summary / max(worker_capacity_for_summary, .001),
+                statistics.fmean(self._active_worker_samples)
+                if self._active_worker_samples else 0.0,
+                throughput, self._download_starvation_time,
+                self._download_starvation_time, self._idle_scheduler_time,
+                self._idle_commit_time, self._idle_other_time,
+                int(pool_metrics.get("download_retries", 0)),
             )
             downloads = len(self._download_normal)
             logger.info(
