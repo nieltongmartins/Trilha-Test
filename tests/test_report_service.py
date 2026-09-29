@@ -20,17 +20,18 @@ def populated_database(tmp_path: Path):
         execution_id = connection.execute(
             """INSERT INTO execucao_auditoria
                (codigo_execucao, planilha_id, status, fim, versoes_processadas,
-                alteracoes_encontradas)
-               VALUES ('AUD-1', ?, 'CONCLUIDA', CURRENT_TIMESTAMP, 1, 2)""",
+                alteracoes_encontradas, executor_local)
+               VALUES ('AUD-1', ?, 'CONCLUIDA', CURRENT_TIMESTAMP, 1, 2, 'operadora')""",
             (spreadsheet_id,),
         ).lastrowid
         version_id = connection.execute(
             """INSERT INTO versao_processada
                (planilha_id, versao_anterior_id, versao_anterior_numero,
                 versao_atual_id, versao_atual_numero, data_hora_versao, autor,
-                comentario, quantidade_alteracoes, status, execucao_id)
+                autor_email, autor_login, comentario, quantidade_alteracoes, status, execucao_id)
                VALUES (?, 'v1', '0.1', 'v2', '0.2', '2026-09-16T10:00:00Z',
-                       'Maria', 'Ajuste', 2, 'PROCESSADA', ?)""",
+                       'Maria', 'maria@example.com', 'i:0#.f|membership|maria@example.com',
+                       'Ajuste', 2, 'PROCESSADA', ?)""",
             (spreadsheet_id, execution_id),
         ).lastrowid
         connection.executemany(
@@ -62,8 +63,39 @@ def test_report_contains_official_sheets_filters_and_database_data(
     assert workbook["Resumo"]["B2"].value == "CQL028.xlsx"
     assert workbook["Resumo"]["B6"].value == 2
     assert workbook["Versões processadas"]["B2"].value == "0.1"
+    assert tuple(
+        workbook["Versões processadas"].cell(2, column).value
+        for column in range(5, 9)
+    ) == (
+        "Maria", "maria@example.com",
+        "i:0#.f|membership|maria@example.com", "Ajuste",
+    )
+    assert workbook["Execuções"]["C2"].value == "operadora"
     assert workbook["Alterações_001"]["I2"].value == "ADD"
     assert all(sheet.auto_filter.ref for sheet in workbook.worksheets)
+
+
+def test_report_keeps_missing_version_metadata_blank(populated_database, tmp_path: Path) -> None:
+    database, spreadsheet_id = populated_database
+    database.connection.execute(
+        "UPDATE versao_processada SET autor_email=NULL, comentario=NULL WHERE planilha_id=?",
+        (spreadsheet_id,),
+    )
+    # Simula uma execução anterior à coluna de identidade local.
+    database.connection.execute(
+        "UPDATE execucao_auditoria SET executor_local=NULL WHERE planilha_id=?",
+        (spreadsheet_id,),
+    )
+    database.connection.commit()
+
+    path = ReportService(database.connection, tmp_path / "partial").generate(spreadsheet_id)
+    workbook = load_workbook(path)
+
+    assert workbook["Versões processadas"]["E2"].value == "Maria"
+    assert workbook["Versões processadas"]["F2"].value is None
+    assert workbook["Versões processadas"]["G2"].value is not None
+    assert workbook["Versões processadas"]["H2"].value is None
+    assert workbook["Execuções"]["C2"].value is None
 
 
 def test_report_can_be_regenerated_and_rejects_unknown_spreadsheet(

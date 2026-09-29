@@ -23,6 +23,7 @@ from app.audit_service import AuditResult, AuditService
 from app.excel.comparator import CellChange, compare_snapshots
 from app.excel.reader import read_workbook
 from app.integrity import sha256_file
+from app.local_identity import local_executor_name
 from app.execution_timing import SharedExecutionTimingModel, TimedStage
 from app.models import AuditExecutionStatus
 from app.runtime_profile import RuntimeProfileStore, RuntimeSample, workbook_identity
@@ -919,8 +920,9 @@ class ParallelAuditService(AuditService):
         initial = checkpoint["versao_numero"] if checkpoint else None
         code = f"AUD-P2-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid4().hex[:8]}"
         execution_id = connection.execute(
-            "INSERT INTO execucao_auditoria (codigo_execucao,planilha_id,checkpoint_inicial,status) VALUES (?,?,?,?)",
-            (code, spreadsheet_id, initial, AuditExecutionStatus.RUNNING.value),
+            "INSERT INTO execucao_auditoria (codigo_execucao,planilha_id,checkpoint_inicial,status,executor_local) VALUES (?,?,?,?,?)",
+            (code, spreadsheet_id, initial, AuditExecutionStatus.RUNNING.value,
+             self.executor_name if self.executor_name is not None else local_executor_name()),
         ).lastrowid
         connection.commit()
         staging: StagingStore | None = None

@@ -15,6 +15,28 @@ def versions(last: int):
     )
 
 
+def test_catalog_round_trip_preserves_version_authorship(tmp_path):
+    db = database(tmp_path)
+    remote = (
+        VersionInfo(
+            "1", "1.1", "2026-01-01T10:00:00Z", "Ana", "Revisão",
+            author_email="ana@example.com", author_login="ana.login",
+        ),
+        VersionInfo("2", "1.2", is_current=True),
+    )
+    source = Source(remote)
+
+    VersionCatalog(db, source).synchronize(SHEET)
+    loaded, _ = VersionCatalog(db, source).load(SHEET)
+
+    assert loaded[0].author == "Ana"
+    assert loaded[0].author_email == "ana@example.com"
+    assert loaded[0].author_login == "ana.login"
+    assert loaded[0].comment == "Revisão"
+    assert loaded[1].author is None
+    db.close()
+
+
 class Source:
     def __init__(self, remote):
         self.remote = remote

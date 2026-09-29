@@ -175,6 +175,7 @@ class GraphSharePointSource:
             modified_by = item.get("lastModifiedBy")
             user = modified_by.get("user") if isinstance(modified_by, dict) else None
             author = user.get("displayName") if isinstance(user, dict) else None
+            author_email = user.get("email") if isinstance(user, dict) else None
             size = item.get("size")
             versions.append(
                 VersionInfo(
@@ -182,6 +183,7 @@ class GraphSharePointSource:
                     number=version_id,
                     modified_at=item.get("lastModifiedDateTime") if isinstance(item.get("lastModifiedDateTime"), str) else None,
                     author=author if isinstance(author, str) else None,
+                    author_email=author_email if isinstance(author_email, str) else None,
                     # DriveItemVersion não expõe comentário de versão no
                     # contrato usado aqui; não atribuímos outro metadado a ele.
                     comment=None,

@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS execucao_auditoria (
         status IN ('EM_EXECUCAO', 'CONCLUIDA', 'CONCLUIDA_SEM_NOVIDADES', 'FALHA')
     ),
     mensagem TEXT,
+    executor_local TEXT,
     CONSTRAINT fk_execucao_planilha FOREIGN KEY (planilha_id)
         REFERENCES planilha (id) ON DELETE RESTRICT
 );
@@ -119,6 +120,10 @@ CREATE TABLE IF NOT EXISTS version_catalog (
     technical_version_id TEXT NOT NULL,
     version_label TEXT NOT NULL,
     created_at_sharepoint TEXT,
+    author TEXT,
+    author_email TEXT,
+    author_login TEXT,
+    comment TEXT,
     is_current_snapshot INTEGER NOT NULL DEFAULT 0 CHECK (is_current_snapshot IN (0, 1)),
     discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -205,13 +210,21 @@ CREATE INDEX IF NOT EXISTS idx_erro_execucao
 # Colunas acrescentadas ao modelo depois da criação dos primeiros bancos F1.
 # CREATE TABLE IF NOT EXISTS não evolui uma tabela que já existe, portanto cada
 # acréscimo precisa permanecer registrado como uma migração explícita.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 VERSION_PROCESSED_MIGRATIONS = {
     "autor_email": "TEXT",
     "autor_login": "TEXT",
     "url_origem": "TEXT",
     "versao_atual": "INTEGER NOT NULL DEFAULT 0 CHECK (versao_atual IN (0, 1))",
     "hash_origem": "TEXT",
+}
+
+EXECUTION_MIGRATIONS = {"executor_local": "TEXT"}
+VERSION_CATALOG_MIGRATIONS = {
+    "author": "TEXT",
+    "author_email": "TEXT",
+    "author_login": "TEXT",
+    "comment": "TEXT",
 }
 
 
@@ -263,6 +276,15 @@ class Database:
                 connection.execute(
                     f'ALTER TABLE versao_processada ADD COLUMN "{name}" {definition}'
                 )
+        execution_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(execucao_auditoria)")
+        }
+        for name, definition in EXECUTION_MIGRATIONS.items():
+            if name not in execution_columns:
+                connection.execute(
+                    f'ALTER TABLE execucao_auditoria ADD COLUMN "{name}" {definition}'
+                )
         catalog_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(version_catalog)")
         }
@@ -289,6 +311,25 @@ class Database:
                 DROP TABLE version_catalog_legacy;
                 CREATE INDEX IF NOT EXISTS idx_version_catalog_watermark
                     ON version_catalog (workbook_identity, technical_version_id);"""
+            )
+        catalog_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(version_catalog)")
+        }
+        metadata_columns_missing = any(
+            name not in catalog_columns for name in VERSION_CATALOG_MIGRATIONS
+        )
+        for name, definition in VERSION_CATALOG_MIGRATIONS.items():
+            if name not in catalog_columns:
+                connection.execute(
+                    f'ALTER TABLE version_catalog ADD COLUMN "{name}" {definition}'
+                )
+        # Catálogos de versões anteriores descartavam autoria/comentário. Uma
+        # reconstrução remota única é necessária; preencher esses valores por
+        # inferência comprometeria a trilha. Os dados funcionais já auditados
+        # permanecem intocados.
+        if metadata_columns_missing:
+            connection.execute(
+                "UPDATE version_catalog_state SET catalog_status='NEEDS_RECONCILIATION'"
             )
         profile_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(workbook_runtime_profile)")

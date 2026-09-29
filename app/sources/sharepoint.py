@@ -785,6 +785,7 @@ class BrowserSharePointSource:
                 f"web/GetFileByServerRelativeUrl('{encoded}')"
                 "?$select=Name,ServerRelativeUrl,UniqueId,UIVersion,UIVersionLabel,"
                 "TimeLastModified,Length,ModifiedBy/Title,ModifiedBy/Email,ModifiedBy/LoginName"
+                ",CheckInComment"
                 "&$expand=ModifiedBy"
             )
         )
@@ -802,7 +803,16 @@ class BrowserSharePointSource:
         return VersionInfo(
             str(version_id), label,
             metadata.get("TimeLastModified") if isinstance(metadata.get("TimeLastModified"), str) else None,
-            size=self._size(metadata), source_url=spreadsheet.path, is_current=True,
+            author=(metadata.get("ModifiedBy") or {}).get("Title")
+            if isinstance(metadata.get("ModifiedBy"), Mapping) else None,
+            comment=metadata.get("CheckInComment")
+            if isinstance(metadata.get("CheckInComment"), str) else None,
+            size=self._size(metadata),
+            author_email=(metadata.get("ModifiedBy") or {}).get("Email")
+            if isinstance(metadata.get("ModifiedBy"), Mapping) else None,
+            author_login=(metadata.get("ModifiedBy") or {}).get("LoginName")
+            if isinstance(metadata.get("ModifiedBy"), Mapping) else None,
+            source_url=spreadsheet.path, is_current=True,
         )
 
     def list_version_delta(
@@ -1131,6 +1141,9 @@ class BrowserSharePointSource:
             author_login=modified_by.get("LoginName")
             if isinstance(modified_by, Mapping)
             and isinstance(modified_by.get("LoginName"), str)
+            else None,
+            comment=metadata.get("CheckInComment")
+            if isinstance(metadata.get("CheckInComment"), str)
             else None,
             size=self._size(metadata),
             source_url=spreadsheet.path,
