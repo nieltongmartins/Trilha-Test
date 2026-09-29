@@ -147,9 +147,9 @@ class ReportService:
 
         self._progress("Exportando execuções...", force=True)
         executions = self._export_query(workbook, "Execuções", (
-            "ID", "Código", "Início", "Fim", "Checkpoint inicial", "Versão final",
+            "ID", "Código", "Executor local", "Início", "Fim", "Checkpoint inicial", "Versão final",
             "Versões", "Alterações", "Status", "Mensagem",
-        ), """SELECT id, codigo_execucao, inicio, fim, checkpoint_inicial, versao_final,
+        ), """SELECT id, codigo_execucao, executor_local, inicio, fim, checkpoint_inicial, versao_final,
                      versoes_processadas, alteracoes_encontradas, status, mensagem
                 FROM execucao_auditoria WHERE planilha_id=? ORDER BY id""",
             (spreadsheet_id,))

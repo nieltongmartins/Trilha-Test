@@ -16,6 +16,7 @@ from app.excel.comparator import CellChange, compare_snapshots
 from app.excel.formula_values import normalize_formula_value
 from app.excel.reader import CellValue, ConsecutiveWorkbookReader, Snapshot, read_workbook
 from app.integrity import sha256_file
+from app.local_identity import local_executor_name
 from app.models import AuditExecutionStatus, ProcessedVersionStatus
 from app.sources.base import SpreadsheetInfo, VersionInfo, VersionSource
 
@@ -57,6 +58,7 @@ class AuditService:
         pause_event: threading.Event | None = None,
         stop_event: threading.Event | None = None,
         control_callback: Callable[[str, str | None], None] | None = None,
+        executor_name: str | None = None,
     ) -> None:
         self.database = database
         self.source = source
@@ -66,6 +68,7 @@ class AuditService:
         self.pause_event = pause_event or threading.Event()
         self.stop_event = stop_event or threading.Event()
         self.control_callback = control_callback
+        self.executor_name = executor_name
 
     def audit(
         self,
@@ -83,14 +86,15 @@ class AuditService:
         execution_id = connection.execute(
             """
             INSERT INTO execucao_auditoria
-                (codigo_execucao, planilha_id, checkpoint_inicial, status)
-            VALUES (?, ?, ?, ?)
+                (codigo_execucao, planilha_id, checkpoint_inicial, status, executor_local)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 execution_code,
                 spreadsheet_id,
                 initial_checkpoint,
                 AuditExecutionStatus.RUNNING.value,
+                self.executor_name if self.executor_name is not None else local_executor_name(),
             ),
         ).lastrowid
         connection.commit()

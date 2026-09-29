@@ -46,13 +46,16 @@ class VersionCatalog:
         ).fetchone()
         rows = self.database.connection.execute(
             """SELECT technical_version_id, version_label, created_at_sharepoint,
-                      is_current_snapshot
+                      is_current_snapshot, author, author_email, author_login, comment
                  FROM version_catalog WHERE workbook_identity=?
                 ORDER BY CAST(technical_version_id AS INTEGER)""",
             (identity,),
         ).fetchall()
         versions = tuple(
-            VersionInfo(str(row[0]), row[1], row[2], is_current=bool(row[3]))
+            VersionInfo(
+                str(row[0]), row[1], row[2], row[4], row[7],
+                author_email=row[5], author_login=row[6], is_current=bool(row[3]),
+            )
             for row in rows
         )
         logger.info(
@@ -192,9 +195,11 @@ class VersionCatalog:
             connection.executemany(
                 """INSERT INTO version_catalog
                    (workbook_identity, technical_version_id, version_label,
-                    created_at_sharepoint, is_current_snapshot)
-                   VALUES (?, ?, ?, ?, ?)""",
-                ((identity, v.id, v.number, v.modified_at, int(v.is_current)) for v in versions),
+                    created_at_sharepoint, is_current_snapshot, author,
+                    author_email, author_login, comment)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ((identity, v.id, v.number, v.modified_at, int(v.is_current),
+                  v.author, v.author_email, v.author_login, v.comment) for v in versions),
             )
             connection.execute(
                 """INSERT INTO version_catalog_state

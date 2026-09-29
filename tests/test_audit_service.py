@@ -75,6 +75,21 @@ def source(history: list[tuple[VersionInfo, Path]]) -> LocalSource:
     return LocalSource([SPREADSHEET], {identity: history})
 
 
+def test_execution_records_explicit_local_executor(
+    database: Database, local_history: list[tuple[VersionInfo, Path]],
+) -> None:
+    result = AuditService(
+        database, source(local_history), executor_name="usuario.local"
+    ).audit(SPREADSHEET)
+
+    assert result.status is AuditExecutionStatus.COMPLETED
+    row = database.connection.execute(
+        "SELECT executor_local FROM execucao_auditoria WHERE codigo_execucao=?",
+        (result.execution_code,),
+    ).fetchone()
+    assert row["executor_local"] == "usuario.local"
+
+
 def scalar(connection: sqlite3.Connection, query: str) -> int:
     return int(connection.execute(query).fetchone()[0])
 
