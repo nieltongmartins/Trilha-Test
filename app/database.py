@@ -62,6 +62,11 @@ CREATE TABLE IF NOT EXISTS execucao_auditoria (
     reused_percent REAL NOT NULL DEFAULT 0,
     interval_duration REAL NOT NULL DEFAULT 0,
     interval_result TEXT,
+    pairs_total INTEGER NOT NULL DEFAULT 0,
+    pairs_reused INTEGER NOT NULL DEFAULT 0,
+    pairs_processed_now INTEGER NOT NULL DEFAULT 0,
+    pairs_missing_before INTEGER NOT NULL DEFAULT 0,
+    coverage_percent_final REAL NOT NULL DEFAULT 0,
     CONSTRAINT fk_execucao_planilha FOREIGN KEY (planilha_id)
         REFERENCES planilha (id) ON DELETE RESTRICT
 );
@@ -225,7 +230,7 @@ CREATE INDEX IF NOT EXISTS idx_erro_execucao
 # Colunas acrescentadas ao modelo depois da criação dos primeiros bancos F1.
 # CREATE TABLE IF NOT EXISTS não evolui uma tabela que já existe, portanto cada
 # acréscimo precisa permanecer registrado como uma migração explícita.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 VERSION_PROCESSED_MIGRATIONS = {
     "autor_email": "TEXT",
     "autor_login": "TEXT",
@@ -249,6 +254,11 @@ EXECUTION_MIGRATIONS = {
     "reused_percent": "REAL NOT NULL DEFAULT 0",
     "interval_duration": "REAL NOT NULL DEFAULT 0",
     "interval_result": "TEXT",
+    "pairs_total": "INTEGER NOT NULL DEFAULT 0",
+    "pairs_reused": "INTEGER NOT NULL DEFAULT 0",
+    "pairs_processed_now": "INTEGER NOT NULL DEFAULT 0",
+    "pairs_missing_before": "INTEGER NOT NULL DEFAULT 0",
+    "coverage_percent_final": "REAL NOT NULL DEFAULT 0",
 }
 VERSION_CATALOG_MIGRATIONS = {
     "author": "TEXT",

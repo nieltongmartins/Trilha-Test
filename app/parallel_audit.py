@@ -947,23 +947,29 @@ class ParallelAuditService(AuditService):
                     ))
                 except TypeError:
                     versions = list(self.source.list_versions(spreadsheet))
+            from app.audit_interval import get_audit_coverage
+            coverage = get_audit_coverage(
+                connection, spreadsheet_id, list(versions),
+                start_version_id, end_version_id,
+            )
+            pairs = list(coverage.missing_pairs)
+            self._configure_coverage_plan(coverage, interval_mode)
             if interval_mode:
-                from app.audit_interval import get_audit_coverage
-                coverage = get_audit_coverage(
-                    connection, spreadsheet_id, list(versions),
-                    start_version_id, end_version_id,
-                )
-                pairs = list(coverage.missing_pairs)
                 self._record_interval_request(connection, execution_id, coverage)
             else:
-                pairs = self._pending_pairs(list(versions), checkpoint["versao_id"] if checkpoint else None)
+                self._record_full_coverage(connection, execution_id, coverage)
+                self._advance_covered_prefix(connection, spreadsheet_id, coverage)
             self._report_progress(0, len(pairs))
             if not pairs:
+                current_checkpoint = connection.execute(
+                    "SELECT versao_numero FROM checkpoint WHERE planilha_id=?",
+                    (spreadsheet_id,),
+                ).fetchone()
+                final = current_checkpoint[0] if current_checkpoint else initial
                 self._finish_execution(connection, execution_id,
-                    AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES, initial, 0, 0, None)
-                if interval_mode:
-                    self._finish_interval(connection, execution_id, 0, time.perf_counter() - started)
-                return AuditResult(code, AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES, 0, 0, initial, initial)
+                    AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES, final, 0, 0, None)
+                self._finish_coverage(connection, execution_id, 0, time.perf_counter() - started)
+                return AuditResult(code, AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES, 0, 0, initial, final)
 
             staging = StagingStore(self.staging_directory, code)
             coordinator = OrderedCommitCoordinator(
@@ -1151,17 +1157,23 @@ class ParallelAuditService(AuditService):
                 return self._stop_execution(connection, execution_id, code, initial,
                                             coordinator.committed, coordinator.changes,
                                             coordinator.final or initial)
+            final = coordinator.final
+            if not interval_mode:
+                checkpoint_after = connection.execute(
+                    "SELECT versao_numero FROM checkpoint WHERE planilha_id=?",
+                    (spreadsheet_id,),
+                ).fetchone()
+                final = checkpoint_after[0] if checkpoint_after else final
             self._finish_execution(connection, execution_id, AuditExecutionStatus.COMPLETED,
-                                   coordinator.final, coordinator.committed,
+                                   final, coordinator.committed,
                                    coordinator.changes, None)
-            if interval_mode:
-                self._finish_interval(
-                    connection, execution_id, coordinator.committed,
-                    time.perf_counter() - started,
-                )
+            self._finish_coverage(
+                connection, execution_id, coordinator.committed,
+                time.perf_counter() - started,
+            )
             learnable = completed_normally = True
             return AuditResult(code, AuditExecutionStatus.COMPLETED, coordinator.committed,
-                               coordinator.changes, initial, coordinator.final)
+                               coordinator.changes, initial, final)
         except Exception as error:
             connection.rollback()
             return self._record_failure(connection, execution_id, spreadsheet_id, code,
