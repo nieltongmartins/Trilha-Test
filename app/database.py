@@ -49,6 +49,19 @@ CREATE TABLE IF NOT EXISTS execucao_auditoria (
     ),
     mensagem TEXT,
     executor_local TEXT,
+    modo TEXT NOT NULL DEFAULT 'COMPLETA',
+    requested_start_version_id TEXT,
+    requested_start_label TEXT,
+    requested_end_version_id TEXT,
+    requested_end_label TEXT,
+    coverage_pairs_total INTEGER NOT NULL DEFAULT 0,
+    coverage_pairs_existing INTEGER NOT NULL DEFAULT 0,
+    coverage_pairs_processed_now INTEGER NOT NULL DEFAULT 0,
+    coverage_pairs_missing INTEGER NOT NULL DEFAULT 0,
+    coverage_percent REAL NOT NULL DEFAULT 0,
+    reused_percent REAL NOT NULL DEFAULT 0,
+    interval_duration REAL NOT NULL DEFAULT 0,
+    interval_result TEXT,
     CONSTRAINT fk_execucao_planilha FOREIGN KEY (planilha_id)
         REFERENCES planilha (id) ON DELETE RESTRICT
 );
@@ -199,6 +212,8 @@ CREATE INDEX IF NOT EXISTS idx_runtime_benchmark_workbook
 
 CREATE INDEX IF NOT EXISTS idx_versao_planilha
     ON versao_processada (planilha_id, data_processamento);
+CREATE INDEX IF NOT EXISTS idx_versao_cobertura
+    ON versao_processada (planilha_id, versao_anterior_id, versao_atual_id);
 CREATE INDEX IF NOT EXISTS idx_alteracao_planilha
     ON alteracao (planilha_id);
 CREATE INDEX IF NOT EXISTS idx_execucao_planilha
@@ -210,7 +225,7 @@ CREATE INDEX IF NOT EXISTS idx_erro_execucao
 # Colunas acrescentadas ao modelo depois da criação dos primeiros bancos F1.
 # CREATE TABLE IF NOT EXISTS não evolui uma tabela que já existe, portanto cada
 # acréscimo precisa permanecer registrado como uma migração explícita.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 VERSION_PROCESSED_MIGRATIONS = {
     "autor_email": "TEXT",
     "autor_login": "TEXT",
@@ -219,7 +234,22 @@ VERSION_PROCESSED_MIGRATIONS = {
     "hash_origem": "TEXT",
 }
 
-EXECUTION_MIGRATIONS = {"executor_local": "TEXT"}
+EXECUTION_MIGRATIONS = {
+    "executor_local": "TEXT",
+    "modo": "TEXT NOT NULL DEFAULT 'COMPLETA'",
+    "requested_start_version_id": "TEXT",
+    "requested_start_label": "TEXT",
+    "requested_end_version_id": "TEXT",
+    "requested_end_label": "TEXT",
+    "coverage_pairs_total": "INTEGER NOT NULL DEFAULT 0",
+    "coverage_pairs_existing": "INTEGER NOT NULL DEFAULT 0",
+    "coverage_pairs_processed_now": "INTEGER NOT NULL DEFAULT 0",
+    "coverage_pairs_missing": "INTEGER NOT NULL DEFAULT 0",
+    "coverage_percent": "REAL NOT NULL DEFAULT 0",
+    "reused_percent": "REAL NOT NULL DEFAULT 0",
+    "interval_duration": "REAL NOT NULL DEFAULT 0",
+    "interval_result": "TEXT",
+}
 VERSION_CATALOG_MIGRATIONS = {
     "author": "TEXT",
     "author_email": "TEXT",

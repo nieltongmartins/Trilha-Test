@@ -74,7 +74,11 @@ class AuditService:
         self,
         spreadsheet: SpreadsheetInfo,
         versions: list[VersionInfo] | tuple[VersionInfo, ...] | None = None,
+        *,
+        start_version_id: str | None = None,
+        end_version_id: str | None = None,
     ) -> AuditResult:
+        interval_mode = start_version_id is not None or end_version_id is not None
         connection = self.database.connection
         spreadsheet_id = self._upsert_spreadsheet(connection, spreadsheet)
         checkpoint = connection.execute(
@@ -137,7 +141,16 @@ class AuditService:
                     execution_code,
                     len(versions),
                 )
-            pairs = self._pending_pairs(versions, checkpoint["versao_id"] if checkpoint else None)
+            if interval_mode:
+                from app.audit_interval import get_audit_coverage
+                coverage = get_audit_coverage(
+                    connection, spreadsheet_id, versions,
+                    start_version_id, end_version_id,
+                )
+                pairs = list(coverage.missing_pairs)
+                self._record_interval_request(connection, execution_id, coverage)
+            else:
+                pairs = self._pending_pairs(versions, checkpoint["versao_id"] if checkpoint else None)
             logger.info(
                 "Versões descobertas execucao=%s planilha=%s total=%d comparacoes_pendentes=%d",
                 execution_code,
@@ -158,6 +171,8 @@ class AuditService:
                 connection, execution_id, AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES,
                 final, 0, 0, None,
             )
+            if interval_mode:
+                self._finish_interval(connection, execution_id, 0, 0.0)
             logger.info(
                 "Auditoria sem novidades execucao=%s planilha=%s checkpoint=%s",
                 execution_code,
@@ -182,6 +197,10 @@ class AuditService:
                 0, 0, initial_checkpoint,
             )
         for pair_index, (previous, current) in enumerate(pairs):
+            # Lacunas independentes não compartilham a borda. Reuso de snapshot
+            # só é correto dentro do mesmo bloco consecutivo.
+            if pair_index and pairs[pair_index - 1][1].id != previous.id:
+                previous_snapshot = None
             pair_started = time.perf_counter()
             future_versions = tuple(pair[1] for pair in pairs[pair_index:])
             try:
@@ -224,10 +243,16 @@ class AuditService:
 
                 persist_started = time.perf_counter()
                 self._report_version_progress(current.number, 97, "Salvando alterações...")
-                self._persist_comparison(
-                    connection, spreadsheet_id, execution_id, previous, current,
-                    current_hash, changes,
-                )
+                if interval_mode:
+                    self._persist_comparison(
+                        connection, spreadsheet_id, execution_id, previous, current,
+                        current_hash, changes, update_checkpoint=False,
+                    )
+                else:
+                    self._persist_comparison(
+                        connection, spreadsheet_id, execution_id, previous, current,
+                        current_hash, changes,
+                    )
                 persist_seconds = time.perf_counter() - persist_started
                 pair_seconds = time.perf_counter() - pair_started
 
@@ -281,6 +306,8 @@ class AuditService:
             final, processed, total_changes, None,
         )
         audit_perf_seconds = time.perf_counter() - audit_perf_started
+        if interval_mode:
+            self._finish_interval(connection, execution_id, processed, audit_perf_seconds)
         logger.info(
             "PERF auditoria_resumo planilha=%s comparacoes=%d total=%.3fs media=%.3fs_por_comparacao",
             spreadsheet.name,
@@ -605,6 +632,8 @@ class AuditService:
         current: VersionInfo,
         current_hash: str,
         changes: list[CellChange],
+        *,
+        update_checkpoint: bool = True,
     ) -> None:
         status = (
             ProcessedVersionStatus.PROCESSED
@@ -645,7 +674,8 @@ class AuditService:
                     for change in changes
                 ],
             )
-            connection.execute(
+            if update_checkpoint:
+                connection.execute(
                 """
                 INSERT INTO checkpoint
                     (planilha_id, versao_id, versao_numero, data_hora_versao)
@@ -657,7 +687,52 @@ class AuditService:
                     data_atualizacao = CURRENT_TIMESTAMP
                 """,
                 (spreadsheet_id, current.id, current.number, current.modified_at),
-            )
+                )
+
+    @staticmethod
+    def _record_interval_request(connection, execution_id, coverage) -> None:
+        requested = coverage.requested_pairs
+        start, end = requested[0][0], requested[-1][1]
+        total, existing = len(requested), len(coverage.covered_pairs)
+        logger.info("INTERVAL_REQUEST start_id=%s end_id=%s", start.id, end.id)
+        logger.info("INTERVAL_RESOLVED start=%s end=%s pairs=%d", start.number, end.number, total)
+        logger.info("INTERVAL_COVERAGE requested_pairs=%d existing_pairs=%d missing_pairs=%d", total, existing, len(coverage.missing_pairs))
+        for left, right in coverage.covered_pairs:
+            logger.info("INTERVAL_REUSED_PAIR previous_id=%s current_id=%s", left.id, right.id)
+        for left, right in coverage.missing_pairs:
+            logger.info("INTERVAL_MISSING_PAIR previous_id=%s current_id=%s", left.id, right.id)
+        for block in coverage.missing_blocks:
+            logger.info("INTERVAL_MISSING_BLOCK start_id=%s end_id=%s", block.start.id, block.end.id)
+        connection.execute(
+            """UPDATE execucao_auditoria SET modo='INTERVALO',
+               requested_start_version_id=?, requested_start_label=?,
+               requested_end_version_id=?, requested_end_label=?,
+               coverage_pairs_total=?, coverage_pairs_existing=?,
+               coverage_pairs_missing=?, reused_percent=? WHERE id=?""",
+            (start.id, start.number, end.id, end.number, total, existing,
+             len(coverage.missing_pairs), 100.0 * existing / total, execution_id),
+        )
+        connection.commit()
+        logger.info("INTERVAL_PROCESSING_START missing_pairs=%d", len(coverage.missing_pairs))
+
+    @staticmethod
+    def _finish_interval(connection, execution_id, processed, duration) -> None:
+        row = connection.execute(
+            "SELECT coverage_pairs_total,coverage_pairs_existing FROM execucao_auditoria WHERE id=?",
+            (execution_id,),
+        ).fetchone()
+        total, existing = row[0], row[1]
+        remaining = max(total - existing - processed, 0)
+        result = "REUSED_EXISTING_HISTORY" if processed == 0 and remaining == 0 else "PROCESSED_MISSING_PAIRS"
+        connection.execute(
+            """UPDATE execucao_auditoria SET coverage_pairs_processed_now=?,
+               coverage_pairs_missing=?, coverage_percent=?, interval_duration=?,
+               interval_result=? WHERE id=?""",
+            (processed, remaining, 100.0 * (total - remaining) / total,
+             duration, result, execution_id),
+        )
+        connection.commit()
+        logger.info("INTERVAL_PROCESSING_COMPLETE processed_pairs=%d coverage_percent=%.2f interval_duration=%.3f", processed, 100.0 * (total - remaining) / total, duration)
 
     @staticmethod
     def _finish_execution(

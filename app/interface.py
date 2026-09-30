@@ -142,6 +142,9 @@ class AuditApplication(ttk.Frame):
             )
         )
         self.details = tk.StringVar(value="Selecione uma planilha.")
+        self.interval_enabled = tk.StringVar(value="0")
+        self.interval_start = tk.StringVar(value="")
+        self.interval_end = tk.StringVar(value="")
         self._startup_log("configurar_variaveis_tk")
         self._build()
         self._startup_log("finalizacao")
@@ -207,8 +210,33 @@ class AuditApplication(ttk.Frame):
         self.selector.grid(row=2, column=0, sticky="ew", pady=8)
         self.selector.bind("<<ComboboxSelected>>", lambda _event: self.show_status())
         ttk.Label(audit_tab, textvariable=self.details).grid(row=3, column=0, sticky="w")
+        self.interval_frame = ttk.LabelFrame(
+            audit_tab, text="Intervalo opcional", padding=6
+        )
+        self.interval_frame.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        ttk.Checkbutton(
+            self.interval_frame, text="Auditar intervalo específico",
+            variable=self.interval_enabled, command=self._toggle_interval,
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(self.interval_frame, text="Versão inicial:").grid(row=1, column=0, sticky="w")
+        self.interval_start_selector = ttk.Combobox(
+            self.interval_frame, textvariable=self.interval_start, state="disabled", width=18
+        )
+        self.interval_start_selector.grid(row=1, column=1, padx=(5, 18))
+        ttk.Label(self.interval_frame, text="Versão final:").grid(row=1, column=2, sticky="w")
+        self.interval_end_selector = ttk.Combobox(
+            self.interval_frame, textvariable=self.interval_end, state="disabled", width=18
+        )
+        self.interval_end_selector.grid(row=1, column=3, padx=5)
+        self.interval_hint = tk.StringVar(value="Deixe limites vazios para manter o fluxo padrão.")
+        ttk.Label(self.interval_frame, textvariable=self.interval_hint).grid(
+            row=2, column=0, columnspan=4, sticky="w"
+        )
+        for selector in (self.interval_start_selector, self.interval_end_selector):
+            selector.bind("<KeyRelease>", self._filter_interval_versions)
+
         buttons = ttk.Frame(audit_tab)
-        buttons.grid(row=4, column=0, sticky="w", pady=10)
+        buttons.grid(row=5, column=0, sticky="w", pady=10)
         ttk.Label(buttons, text="Processamentos simultâneos:").pack(side="left", padx=(0, 4))
         # Três foi o melhor ponto no workload pesado controlado da Fase 4.
         self.worker_count = tk.IntVar(value=3)
@@ -238,9 +266,13 @@ class AuditApplication(ttk.Frame):
         )
         self.audit_button.pack(side="left", padx=(0, 6))
         self.report_button = ttk.Button(
-            buttons, text="Gerar relatório", command=self.generate_report
+            buttons, text="Relatório do intervalo", command=self.generate_report
         )
         self.report_button.pack(side="left", padx=6)
+        ttk.Button(
+            buttons, text="Relatório do histórico",
+            command=lambda: self.generate_report(full_history=True),
+        ).pack(side="left", padx=6)
         ttk.Button(buttons, text="Abrir relatório", command=self.open_report).pack(
             side="left", padx=6
         )
@@ -249,10 +281,10 @@ class AuditApplication(ttk.Frame):
         self.stop_button = ttk.Button(buttons, text="Parar", command=self.stop_audit)
         self.stop_button.pack(side="left", padx=6)
         ttk.Label(audit_tab, textvariable=self.status, wraplength=720).grid(
-            row=5, column=0, sticky="w"
+            row=6, column=0, sticky="w"
         )
         progress = ttk.LabelFrame(audit_tab, text="Progresso geral", padding=8)
-        progress.grid(row=6, column=0, sticky="ew", pady=(10, 2))
+        progress.grid(row=7, column=0, sticky="ew", pady=(10, 2))
         progress.columnconfigure(0, weight=1)
         self.progress_value = tk.DoubleVar(value=0)
         self.progress_bar = ttk.Progressbar(
@@ -658,6 +690,42 @@ class AuditApplication(ttk.Frame):
             time.monotonic(),
             versions,
         )
+        labels = tuple(version.number for version in versions)
+        if hasattr(self, "interval_start_selector"):
+            self.interval_start_selector.configure(values=labels)
+            self.interval_end_selector.configure(values=labels)
+
+    def _toggle_interval(self) -> None:
+        state = "normal" if str(self.interval_enabled.get()).lower() in ("1", "true") else "disabled"
+        self.interval_start_selector.configure(state=state)
+        self.interval_end_selector.configure(state=state)
+
+    def _filter_interval_versions(self, event) -> None:
+        selector = event.widget
+        try:
+            versions = self._cached_versions(self._selected()) or ()
+        except ValueError:
+            versions = ()
+        typed = selector.get().strip().casefold()
+        selector.configure(values=tuple(
+            version.number for version in versions
+            if typed in version.number.casefold()
+        ))
+
+    def _interval_ids(self, spreadsheet: SpreadsheetInfo) -> tuple[str | None, str | None]:
+        if str(self.interval_enabled.get()).lower() not in ("1", "true"):
+            return None, None
+        start_label, end_label = self.interval_start.get().strip(), self.interval_end.get().strip()
+        if not start_label and not end_label:
+            return None, None
+        versions = self._cached_versions(spreadsheet) or ()
+        labels = {version.number: version.id for version in versions}
+        invalid = [label for label in (start_label, end_label) if label and label not in labels]
+        if invalid:
+            suggestions = [v.number for v in versions if invalid[0] in v.number][:8]
+            suffix = f" Próximas: {', '.join(suggestions)}." if suggestions else ""
+            raise ValueError(f"Versão inexistente: {invalid[0]}.{suffix}")
+        return labels.get(start_label), labels.get(end_label)
 
     def _database_row(self, spreadsheet: SpreadsheetInfo):
         return self.database.connection.execute(
@@ -783,6 +851,11 @@ class AuditApplication(ttk.Frame):
         if self.source is None:
             self.status.set("Conecte ao SharePoint antes de auditar.")
             return
+        try:
+            interval_start_id, interval_end_id = self._interval_ids(spreadsheet)
+        except ValueError as error:
+            self.status.set(str(error))
+            return
         source = self.source
         self._pause_event.clear()
         self._stop_event.clear()
@@ -876,7 +949,11 @@ class AuditApplication(ttk.Frame):
                     self._loaded_runtime_profile.recommended_prefetch_target
                     if self._loaded_runtime_profile else None
                 ),
-            ).audit(spreadsheet, versions=cached_versions),
+            ).audit(
+                spreadsheet, versions=cached_versions,
+                start_version_id=interval_start_id,
+                end_version_id=interval_end_id,
+            ),
             self._audit_finished,
         )
 
@@ -943,7 +1020,7 @@ class AuditApplication(ttk.Frame):
         self.pause_button.configure(state="disabled")
         self.stop_button.configure(state="disabled")
 
-    def generate_report(self) -> None:
+    def generate_report(self, *, full_history: bool = False) -> None:
         from app.report_service import ReportService
 
         try:
@@ -957,12 +1034,21 @@ class AuditApplication(ttk.Frame):
                 "Relatório", "Audite a planilha antes de gerar o relatório."
             )
             return
+        start_id = end_id = None
+        if not full_history:
+            try:
+                start_id, end_id = self._interval_ids(spreadsheet)
+            except ValueError as error:
+                self.status.set(str(error))
+                return
         self._start_work(
             "Gerando relatório...",
             lambda: ReportService(
                 self.database.connection, self.reports_directory,
                 progress_callback=self._report_updates.put,
-            ).generate(row["id"]),
+            ).generate(
+                row["id"], start_version_id=start_id, end_version_id=end_id
+            ),
             self._report_finished,
         )
 

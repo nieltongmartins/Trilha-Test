@@ -4,6 +4,20 @@ Aplicação Python para construir uma trilha de auditoria incremental de
 planilhas armazenadas no SharePoint Online. O banco SQLite é a fonte oficial
 da trilha; a integração com SharePoint será estritamente de leitura.
 
+## Auditoria por intervalo
+
+A tela mantém o modo completo/incremental como padrão. Ao marcar **Auditar
+intervalo específico**, os limites são escolhidos no catálogo local e resolvidos
+internamente pelo `technical_version_id` (o rótulo é apenas visual). O limite
+inicial vazio significa a primeira versão disponível; o final vazio, a última.
+Ambos vazios preservam o fluxo padrão.
+
+A cobertura é calculada por pares consecutivos. Pares persistidos com status
+final e hash íntegro são reutilizados; apenas lacunas chegam ao scheduler.
+Execuções por intervalo não alteram o checkpoint oficial. A interface oferece
+relatório limitado ao intervalo selecionado e relatório de todo o histórico
+persistido, sem transformar blocos separados em uma continuidade.
+
 ## Requisitos
 
 - Python 3.10 ou superior

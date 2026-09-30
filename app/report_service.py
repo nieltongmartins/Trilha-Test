@@ -59,7 +59,10 @@ class ReportService:
         self.fetch_batch_size = fetch_batch_size
         self._last_progress = 0.0
 
-    def generate(self, spreadsheet_id: int) -> Path:
+    def generate(
+        self, spreadsheet_id: int, *, start_version_id: str | None = None,
+        end_version_id: str | None = None,
+    ) -> Path:
         started = time.monotonic()
         export_id = str(uuid.uuid4())
         exported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -69,7 +72,7 @@ class ReportService:
         ).fetchone()
         if spreadsheet is None:
             raise ValueError("Planilha não encontrada no banco de auditoria")
-        stats = self._database_stats(spreadsheet_id)
+        stats = self._database_stats(spreadsheet_id, start_version_id, end_version_id)
         self._progress(
             f"Total encontrado: {stats['changes']:,} alterações", force=True
         )
@@ -81,7 +84,8 @@ class ReportService:
         temporary.unlink(missing_ok=True)
         try:
             exported = self._write_workbook(
-                temporary, spreadsheet_id, spreadsheet, stats, export_id, exported_at
+                temporary, spreadsheet_id, spreadsheet, stats, export_id, exported_at,
+                start_version_id, end_version_id,
             )
             self._progress("Validando integridade...", force=True)
             self._validate(temporary, stats, exported)
@@ -99,15 +103,33 @@ class ReportService:
         )
         return output
 
-    def _database_stats(self, spreadsheet_id: int) -> dict[str, object]:
+    @staticmethod
+    def _pair_filter(start_version_id, end_version_id, alias="v"):
+        clauses, parameters = [], []
+        if start_version_id is not None:
+            clauses.append(f"CAST({alias}.versao_anterior_id AS INTEGER)>=CAST(? AS INTEGER)")
+            parameters.append(start_version_id)
+        if end_version_id is not None:
+            clauses.append(f"CAST({alias}.versao_atual_id AS INTEGER)<=CAST(? AS INTEGER)")
+            parameters.append(end_version_id)
+        return (" AND " + " AND ".join(clauses) if clauses else ""), tuple(parameters)
+
+    def _database_stats(self, spreadsheet_id: int, start_version_id=None,
+                        end_version_id=None) -> dict[str, object]:
+        pair_filter, bounds = self._pair_filter(start_version_id, end_version_id)
         changes = self.connection.execute(
             """SELECT COUNT(*) AS total,
                       COALESCE(SUM(tipo='ADD'), 0) AS adds,
                       COALESCE(SUM(tipo='MOD'), 0) AS mods,
                       COALESCE(SUM(tipo='DEL'), 0) AS dels,
-                      MIN(id) AS first_id, MAX(id) AS last_id
-                 FROM alteracao WHERE planilha_id=?""", (spreadsheet_id,)
+                      MIN(a.id) AS first_id, MAX(a.id) AS last_id
+                 FROM alteracao a JOIN versao_processada v ON v.id=a.versao_processada_id
+                WHERE a.planilha_id=?""" + pair_filter, (spreadsheet_id, *bounds)
         ).fetchone()
+        versions = self.connection.execute(
+            "SELECT COUNT(*) FROM versao_processada v WHERE v.planilha_id=?" + pair_filter,
+            (spreadsheet_id, *bounds),
+        ).fetchone()[0]
         scalar = lambda table: self.connection.execute(  # noqa: E731
             f"SELECT COUNT(*) FROM {table} WHERE planilha_id=?", (spreadsheet_id,)
         ).fetchone()[0]
@@ -118,22 +140,25 @@ class ReportService:
             "changes": changes["total"], "ADD": changes["adds"],
             "MOD": changes["mods"], "DEL": changes["dels"],
             "first_id": changes["first_id"], "last_id": changes["last_id"],
-            "versions": scalar("versao_processada"),
+            "versions": versions,
             "executions": scalar("execucao_auditoria"),
             "errors": scalar("erro_processamento"),
             "checkpoint": checkpoint[0] if checkpoint else None,
+            "requested_start": start_version_id,
+            "requested_end": end_version_id,
         }
 
     def _write_workbook(self, path: Path, spreadsheet_id: int, spreadsheet: sqlite3.Row,
                         stats: dict[str, object], export_id: str,
-                        exported_at: str) -> dict[str, object]:
+                        exported_at: str, start_version_id=None,
+                        end_version_id=None) -> dict[str, object]:
         workbook = Workbook(write_only=True)
         identity = "/".join((spreadsheet["site_id"], spreadsheet["drive_id"],
                              spreadsheet["drive_item_id"]))
         summary = workbook.create_sheet("Resumo")
         self._setup_sheet(summary, (24, 60))
         self._header(summary, ("Campo", "Valor"))
-        for row in (
+        summary_rows = [
             ("Planilha", spreadsheet["nome_atual"]), ("Identidade técnica", identity),
             ("DriveItem ID", spreadsheet["drive_item_id"]),
             ("Versões processadas", stats["versions"]),
@@ -141,29 +166,63 @@ class ReportService:
             ("MOD", stats["MOD"]), ("DEL", stats["DEL"]),
             ("Execuções", stats["executions"]), ("Erros", stats["errors"]),
             ("Checkpoint", stats["checkpoint"]),
-        ):
+        ]
+        if start_version_id is not None or end_version_id is not None:
+            interval_run = self.connection.execute(
+                """SELECT coverage_pairs_total,coverage_pairs_existing,
+                          coverage_pairs_processed_now,coverage_pairs_missing,coverage_percent,
+                          requested_start_label,requested_end_label
+                     FROM execucao_auditoria WHERE planilha_id=? AND modo='INTERVALO'
+                       AND (? IS NULL OR requested_start_version_id=?)
+                       AND (? IS NULL OR requested_end_version_id=?)
+                    ORDER BY id DESC LIMIT 1""",
+                (spreadsheet_id, start_version_id, start_version_id,
+                 end_version_id, end_version_id),
+            ).fetchone()
+            summary_rows.append((
+                "Intervalo solicitado",
+                (f"{interval_run[5]} → {interval_run[6]}" if interval_run
+                 else f"{start_version_id or 'início'} → {end_version_id or 'fim'}"),
+            ))
+            if interval_run:
+                summary_rows.extend((
+                    ("Cobertura existente", interval_run[1]),
+                    ("Cobertura processada nesta execução", interval_run[2]),
+                    ("Total coberto", interval_run[0] - interval_run[3]),
+                    ("Lacunas restantes", interval_run[3]),
+                    ("Cobertura (%)", interval_run[4]),
+                ))
+        for row in summary_rows:
             summary.append(row)
-        summary.auto_filter.ref = "A1:B12"
+        summary.auto_filter.ref = f"A1:B{len(summary_rows) + 1}"
 
         self._progress("Exportando execuções...", force=True)
         executions = self._export_query(workbook, "Execuções", (
             "ID", "Código", "Executor local", "Início", "Fim", "Checkpoint inicial", "Versão final",
-            "Versões", "Alterações", "Status", "Mensagem",
+            "Versões", "Alterações", "Status", "Mensagem", "Modo",
+            "Versão inicial solicitada", "Versão final solicitada", "Pairs solicitados",
+            "Pairs reutilizados", "Pairs processados agora", "Cobertura final %",
         ), """SELECT id, codigo_execucao, executor_local, inicio, fim, checkpoint_inicial, versao_final,
-                     versoes_processadas, alteracoes_encontradas, status, mensagem
+                     versoes_processadas, alteracoes_encontradas, status, mensagem, modo,
+                     requested_start_label, requested_end_label, coverage_pairs_total,
+                     coverage_pairs_existing, coverage_pairs_processed_now, coverage_percent
                 FROM execucao_auditoria WHERE planilha_id=? ORDER BY id""",
             (spreadsheet_id,))
         self._progress("Exportando versões...", force=True)
+        pair_filter, bounds = self._pair_filter(start_version_id, end_version_id)
         versions = self._export_query(workbook, "Versões processadas", (
             "ID", "Versão anterior", "Versão atual", "Data/hora", "Autor", "E-mail",
             "Login", "Comentário", "Status", "Alterações", "Processamento",
         ), """SELECT id, versao_anterior_numero, versao_atual_numero,
                      data_hora_versao, autor, autor_email, autor_login, comentario,
                      status, quantidade_alteracoes, data_processamento
-                FROM versao_processada WHERE planilha_id=? ORDER BY id""",
-            (spreadsheet_id,))
+                FROM versao_processada v WHERE planilha_id=?""" + pair_filter + " ORDER BY id",
+            (spreadsheet_id, *bounds))
 
-        change_result = self._export_changes(workbook, spreadsheet_id, int(stats["changes"]))
+        change_result = self._export_changes(
+            workbook, spreadsheet_id, int(stats["changes"]),
+            start_version_id, end_version_id,
+        )
         self._progress("Exportando erros...", force=True)
         errors = self._export_query(workbook, "Erros", (
             "ID", "Execução", "Versão anterior", "Versão atual", "Tipo", "Mensagem",
@@ -207,14 +266,17 @@ class ReportService:
         return result
 
     def _export_changes(self, workbook: Workbook, spreadsheet_id: int,
-                        total: int) -> dict[str, object]:
+                        total: int, start_version_id=None,
+                        end_version_id=None) -> dict[str, object]:
+        pair_filter, bounds = self._pair_filter(start_version_id, end_version_id)
         cursor = self.connection.execute(
             """SELECT a.id, v.versao_anterior_numero, v.versao_atual_numero,
                       v.data_hora_versao, v.autor, v.comentario, a.aba, a.endereco,
                       a.tipo, a.valor_anterior, a.valor_novo
                  FROM alteracao a JOIN versao_processada v
                    ON v.id=a.versao_processada_id
-                WHERE a.planilha_id=? ORDER BY a.id""", (spreadsheet_id,)
+                WHERE a.planilha_id=?""" + pair_filter + " ORDER BY a.id",
+            (spreadsheet_id, *bounds)
         )
         sheets: list[dict[str, object]] = []
         sheet = None
