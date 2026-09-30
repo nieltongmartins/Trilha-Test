@@ -169,10 +169,28 @@ class AuditApplication(ttk.Frame):
         self.rowconfigure(0, weight=1)
         self.notebook = ttk.Notebook(self)
         self.notebook.grid(row=0, column=0, sticky="nsew")
-        audit_tab = ttk.Frame(self.notebook, padding=4)
+        audit_page = ttk.Frame(self.notebook)
         stored_tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(audit_tab, text="Auditoria")
+        self.notebook.add(audit_page, text="Auditoria")
         self.notebook.add(stored_tab, text="Auditorias armazenadas")
+        audit_page.columnconfigure(0, weight=1)
+        audit_page.rowconfigure(0, weight=1)
+        self.audit_canvas = tk.Canvas(audit_page, highlightthickness=0)
+        audit_scroll = ttk.Scrollbar(
+            audit_page, orient="vertical", command=self.audit_canvas.yview
+        )
+        self.audit_canvas.configure(yscrollcommand=audit_scroll.set)
+        self.audit_canvas.grid(row=0, column=0, sticky="nsew")
+        audit_scroll.grid(row=0, column=1, sticky="ns")
+        audit_tab = ttk.Frame(self.audit_canvas, padding=4)
+        self._audit_canvas_window = self.audit_canvas.create_window(
+            (0, 0), window=audit_tab, anchor="nw"
+        )
+        audit_tab.bind("<Configure>", self._update_audit_scrollregion)
+        self.audit_canvas.bind("<Configure>", self._resize_audit_content)
+        for widget in (self.audit_canvas, audit_tab):
+            widget.bind("<Enter>", self._bind_audit_mousewheel)
+            widget.bind("<Leave>", self._unbind_audit_mousewheel)
         self._startup_log("criar_abas")
         self._audit_tab = audit_tab
         self._comparator_tab = None
@@ -236,53 +254,56 @@ class AuditApplication(ttk.Frame):
             selector.bind("<KeyRelease>", self._filter_interval_versions)
 
         buttons = ttk.Frame(audit_tab)
-        buttons.grid(row=5, column=0, sticky="w", pady=10)
-        ttk.Label(buttons, text="Processamentos simultâneos:").pack(side="left", padx=(0, 4))
+        buttons.grid(row=5, column=0, sticky="ew", pady=10)
+        self._control_widgets = []
+        slots_label = ttk.Label(buttons, text="Processamentos simultâneos:")
+        self._control_widgets.append(slots_label)
         # Três foi o melhor ponto no workload pesado controlado da Fase 4.
         self.worker_count = tk.IntVar(value=3)
         self.worker_selector = ttk.Combobox(
             buttons, textvariable=self.worker_count, values=tuple(range(1, 9)),
             state="readonly", width=3,
         )
-        self.worker_selector.pack(side="left", padx=(0, 10))
+        self._control_widgets.append(self.worker_selector)
         self.worker_selector.bind("<<ComboboxSelected>>", self._manual_worker_selection)
-        ttk.Label(buttons, text="WebDrivers para download:").pack(side="left", padx=(0, 4))
+        drivers_label = ttk.Label(buttons, text="WebDrivers para download:")
+        self._control_widgets.append(drivers_label)
         self.driver_count = tk.IntVar(value=1)
         self.driver_selector = ttk.Combobox(
             buttons, textvariable=self.driver_count, values=(1, 2, 3, 4),
             state="readonly", width=3,
         )
-        self.driver_selector.pack(side="left", padx=(0, 10))
+        self._control_widgets.append(self.driver_selector)
         self.runtime_recommendation = tk.StringVar(value="Recomendado: ainda não calculado")
-        ttk.Label(buttons, textvariable=self.runtime_recommendation).pack(
-            side="left", padx=(0, 10)
-        )
+        recommendation = ttk.Label(buttons, textvariable=self.runtime_recommendation)
+        self._control_widgets.append(recommendation)
         self.refresh_button = ttk.Button(
             buttons, text="Atualizar lista", command=self.refresh
         )
-        self.refresh_button.pack(side="left", padx=(0, 6))
+        self._control_widgets.append(self.refresh_button)
         self.audit_button = ttk.Button(
             buttons, text="Auditar histórico", command=self.audit
         )
-        self.audit_button.pack(side="left", padx=(0, 6))
+        self._control_widgets.append(self.audit_button)
         self.report_button = ttk.Button(
             buttons, text="Relatório do intervalo", command=self.generate_report
         )
-        self.report_button.pack(side="left", padx=6)
-        ttk.Button(
+        self._control_widgets.append(self.report_button)
+        history_report_button = ttk.Button(
             buttons, text="Relatório do histórico",
             command=lambda: self.generate_report(full_history=True),
-        ).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Abrir relatório", command=self.open_report).pack(
-            side="left", padx=6
         )
+        self._control_widgets.append(history_report_button)
+        open_report_button = ttk.Button(buttons, text="Abrir relatório", command=self.open_report)
+        self._control_widgets.append(open_report_button)
         self.pause_button = ttk.Button(buttons, text="Pausar", command=self.toggle_pause)
-        self.pause_button.pack(side="left", padx=6)
+        self._control_widgets.append(self.pause_button)
         self.stop_button = ttk.Button(buttons, text="Parar", command=self.stop_audit)
-        self.stop_button.pack(side="left", padx=6)
-        ttk.Label(audit_tab, textvariable=self.status, wraplength=720).grid(
-            row=6, column=0, sticky="w"
-        )
+        self._control_widgets.append(self.stop_button)
+        self._buttons_container = buttons
+        self._layout_controls(1200)
+        self.status_label = ttk.Label(audit_tab, textvariable=self.status, wraplength=720)
+        self.status_label.grid(row=6, column=0, sticky="w")
         progress = ttk.LabelFrame(audit_tab, text="Progresso geral", padding=8)
         progress.grid(row=7, column=0, sticky="ew", pady=(10, 2))
         progress.columnconfigure(0, weight=1)
@@ -294,14 +315,15 @@ class AuditApplication(ttk.Frame):
         self.progress_text = tk.StringVar(
             value="0 / 0 (0,00%) | Tempo total: 00:00:00 | Tempo restante: calculando..."
         )
-        ttk.Label(progress, textvariable=self.progress_text).grid(row=1, column=0, sticky="w")
+        self.progress_label = ttk.Label(progress, textvariable=self.progress_text)
+        self.progress_label.grid(row=1, column=0, sticky="w")
         self.global_timing_text = tk.StringVar(value=self._global_timing_message(0, 0))
         ttk.Label(progress, textvariable=self.global_timing_text, justify="left").grid(
             row=2, column=0, sticky="w", pady=(4, 0)
         )
 
         self.slots_container = ttk.Frame(audit_tab)
-        self.slots_container.grid(row=7, column=0, sticky="ew")
+        self.slots_container.grid(row=8, column=0, sticky="ew", pady=(4, 0))
         self.slots_container.grid_columnconfigure(0, weight=1, uniform="slot")
         self.slots_container.grid_columnconfigure(1, weight=1, uniform="slot")
         self.slot_frames = []
@@ -325,6 +347,56 @@ class AuditApplication(ttk.Frame):
         self._startup_log("configurar_callbacks_estado")
         self.refresh_stored()
         self._startup_log("refresh_inicial")
+
+    def _update_audit_scrollregion(self, _event: object = None) -> None:
+        self.audit_canvas.configure(scrollregion=self.audit_canvas.bbox("all"))
+
+    def _resize_audit_content(self, event: tk.Event) -> None:
+        self.audit_canvas.itemconfigure(self._audit_canvas_window, width=event.width)
+        wrap = max(280, event.width - 32)
+        self.status_label.configure(wraplength=wrap)
+        self.progress_label.configure(wraplength=wrap)
+        self._layout_controls(event.width)
+        self._layout_slot_frames(event.width)
+
+    def _bind_audit_mousewheel(self, _event: object = None) -> None:
+        self.audit_canvas.bind_all("<MouseWheel>", self._on_audit_mousewheel)
+        self.audit_canvas.bind_all("<Button-4>", self._on_audit_mousewheel)
+        self.audit_canvas.bind_all("<Button-5>", self._on_audit_mousewheel)
+
+    def _unbind_audit_mousewheel(self, _event: object = None) -> None:
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.audit_canvas.unbind_all(sequence)
+
+    def _on_audit_mousewheel(self, event: tk.Event) -> str:
+        if getattr(event, "num", None) in (4, 5):
+            delta = -1 if event.num == 4 else 1
+        else:
+            raw_delta = getattr(event, "delta", 0)
+            delta = -1 if raw_delta > 0 else 1 if raw_delta < 0 else 0
+        self.audit_canvas.yview_scroll(delta, "units")
+        return "break"
+
+    def _layout_controls(self, width: int) -> None:
+        widgets = getattr(self, "_control_widgets", ())
+        if not widgets:
+            return
+        columns = 11 if width >= 1320 else 6 if width >= 850 else 3
+        container = self._buttons_container
+        for column in range(11):
+            container.columnconfigure(column, weight=1 if column < columns else 0)
+        for index, widget in enumerate(widgets):
+            widget.grid(row=index // columns, column=index % columns, sticky="ew", padx=3, pady=3)
+
+    def _layout_slot_frames(self, width: int) -> None:
+        columns = 2 if width >= 900 else 1
+        container = getattr(self, "slots_container", None)
+        if container is None:
+            return
+        container.columnconfigure(0, weight=1, uniform="slot")
+        container.columnconfigure(1, weight=1 if columns == 2 else 0, uniform="slot")
+        for index, frame in enumerate(getattr(self, "slot_frames", ())):
+            frame.grid_configure(row=index // columns, column=index % columns)
 
     def _rebuild_slot_frames(self) -> None:
         """Materializa apenas os slots selecionados, sempre antes da execução."""
@@ -363,6 +435,8 @@ class AuditApplication(ttk.Frame):
             self._slot_visual_progress.append(None)
             self._slot_visual_identities.append(SlotTaskIdentity())
             self._slot_progress_plans.append(None)
+        width = self.audit_canvas.winfo_width() if hasattr(self, "audit_canvas") else 1200
+        self._layout_slot_frames(width)
         self.current_version_frame = self.slot_frames[0]
         self.version_progress_value = self.slot_progress_values[0]
         self.version_stage_text = self.slot_stage_texts[0]

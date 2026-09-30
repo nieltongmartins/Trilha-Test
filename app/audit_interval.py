@@ -30,7 +30,8 @@ class AuditCoverage:
 
     @property
     def coverage_percent(self) -> float:
-        return 100.0 * len(self.covered_pairs) / len(self.requested_pairs)
+        return (100.0 * len(self.covered_pairs) / len(self.requested_pairs)
+                if self.requested_pairs else 100.0)
 
 
 def resolve_interval(
