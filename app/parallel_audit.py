@@ -339,13 +339,15 @@ class OrderedCommitCoordinator:
 
     def __init__(self, service: "ParallelAuditService", staging: StagingStore,
                  connection: sqlite3.Connection, spreadsheet_id: int,
-                 execution_id: int, pairs: list[tuple[VersionInfo, VersionInfo]]) -> None:
+                 execution_id: int, pairs: list[tuple[VersionInfo, VersionInfo]],
+                 *, update_checkpoint: bool = True) -> None:
         self.service = service
         self.staging = staging
         self.connection = connection
         self.spreadsheet_id = spreadsheet_id
         self.execution_id = execution_id
         self.pairs = pairs
+        self.update_checkpoint = update_checkpoint
         self.next_sequence = 1
         self.committed = 0
         self.changes = 0
@@ -366,6 +368,7 @@ class OrderedCommitCoordinator:
             self.service._persist_comparison(
                 self.connection, self.spreadsheet_id, self.execution_id,
                 previous, current, digest, changes,
+                update_checkpoint=self.update_checkpoint,
             )
             now = time.monotonic()
             commit_duration = time.perf_counter() - started
@@ -894,7 +897,10 @@ class ParallelAuditService(AuditService):
         )
 
     def audit(self, spreadsheet: SpreadsheetInfo,
-              versions: list[VersionInfo] | tuple[VersionInfo, ...] | None = None) -> AuditResult:
+              versions: list[VersionInfo] | tuple[VersionInfo, ...] | None = None,
+              *, start_version_id: str | None = None,
+              end_version_id: str | None = None) -> AuditResult:
+        interval_mode = start_version_id is not None or end_version_id is not None
         connection = self.database.connection
         identity = workbook_identity(spreadsheet)
         # Fail safe: banco corrompido ou perfil de versão antiga jamais impede a auditoria.
@@ -941,16 +947,28 @@ class ParallelAuditService(AuditService):
                     ))
                 except TypeError:
                     versions = list(self.source.list_versions(spreadsheet))
-            pairs = self._pending_pairs(list(versions), checkpoint["versao_id"] if checkpoint else None)
+            if interval_mode:
+                from app.audit_interval import get_audit_coverage
+                coverage = get_audit_coverage(
+                    connection, spreadsheet_id, list(versions),
+                    start_version_id, end_version_id,
+                )
+                pairs = list(coverage.missing_pairs)
+                self._record_interval_request(connection, execution_id, coverage)
+            else:
+                pairs = self._pending_pairs(list(versions), checkpoint["versao_id"] if checkpoint else None)
             self._report_progress(0, len(pairs))
             if not pairs:
                 self._finish_execution(connection, execution_id,
                     AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES, initial, 0, 0, None)
+                if interval_mode:
+                    self._finish_interval(connection, execution_id, 0, time.perf_counter() - started)
                 return AuditResult(code, AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES, 0, 0, initial, initial)
 
             staging = StagingStore(self.staging_directory, code)
             coordinator = OrderedCommitCoordinator(
-                self, staging, connection, spreadsheet_id, execution_id, pairs
+                self, staging, connection, spreadsheet_id, execution_id, pairs,
+                update_checkpoint=not interval_mode,
             )
             tasks = [VersionTask(cur.id, cur.number, prev.id, index, execution_id)
                      for index, (prev, cur) in enumerate(pairs, 1)]
@@ -1136,6 +1154,11 @@ class ParallelAuditService(AuditService):
             self._finish_execution(connection, execution_id, AuditExecutionStatus.COMPLETED,
                                    coordinator.final, coordinator.committed,
                                    coordinator.changes, None)
+            if interval_mode:
+                self._finish_interval(
+                    connection, execution_id, coordinator.committed,
+                    time.perf_counter() - started,
+                )
             learnable = completed_normally = True
             return AuditResult(code, AuditExecutionStatus.COMPLETED, coordinator.committed,
                                coordinator.changes, initial, coordinator.final)
