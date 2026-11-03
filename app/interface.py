@@ -192,7 +192,11 @@ class AuditApplication(ttk.Frame):
             widget.bind("<Enter>", self._bind_audit_mousewheel)
             widget.bind("<Leave>", self._unbind_audit_mousewheel)
         self._startup_log("criar_abas")
-        self._audit_tab = audit_tab
+        # Guarde a página que é filha direta do Notebook. ``audit_tab`` é o
+        # frame rolável interno e não pode ser passado a Notebook.select().
+        # Confundir os dois fazia "Fechar comparador" falhar com TclError.
+        self._audit_tab = audit_page
+        self._audit_content = audit_tab
         self._comparator_tab = None
         audit_tab.columnconfigure(0, weight=1)
         title_label = ttk.Label(

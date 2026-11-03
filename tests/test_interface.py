@@ -553,6 +553,41 @@ def test_hidden_gesture_requires_five_clicks_and_does_not_duplicate(monkeypatch)
     assert calls == ["show"]
 
 
+def test_hide_comparator_selects_notebook_page_before_destroying_tab() -> None:
+    application = AuditApplication.__new__(AuditApplication)
+    audit_page = object()
+
+    class ComparatorFake:
+        destroyed = False
+
+        def destroy(self) -> None:
+            self.destroyed = True
+
+    comparator = ComparatorFake()
+
+    class NotebookFake:
+        def __init__(self) -> None:
+            self.selected = None
+            self.forgotten = None
+
+        def select(self, tab) -> None:
+            self.selected = tab
+
+        def forget(self, tab) -> None:
+            self.forgotten = tab
+
+    application.notebook = NotebookFake()
+    application._audit_tab = audit_page
+    application._comparator_tab = comparator
+
+    application._hide_comparator()
+
+    assert application.notebook.selected is audit_page
+    assert application.notebook.forgotten is comparator
+    assert comparator.destroyed is True
+    assert application._comparator_tab is None
+
+
 def test_open_stored_report_opens_exact_existing_artifact(monkeypatch, tmp_path: Path) -> None:
     application = AuditApplication.__new__(AuditApplication)
     report = tmp_path / "exact.xlsx"
