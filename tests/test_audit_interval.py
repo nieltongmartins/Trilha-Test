@@ -87,3 +87,82 @@ def test_interval_validation_and_open_bounds(tmp_path):
             pass
         else:
             raise AssertionError("intervalo inválido aceito")
+
+
+def test_full_audit_reuses_interval_pairs_and_second_run_processes_zero(tmp_path):
+    history = _history(tmp_path, 106)
+    with Database(tmp_path / "audit.db") as database:
+        database.initialize()
+        service = AuditService(database, _source(history))
+
+        interval = service.audit(SHEET, versions=[item[0] for item in history],
+                                 start_version_id="10", end_version_id="30")
+        complete = service.audit(SHEET, versions=[item[0] for item in history])
+        repeated = service.audit(SHEET, versions=[item[0] for item in history])
+
+        assert interval.processed_versions == 20
+        assert complete.processed_versions == 85
+        assert repeated.processed_versions == 0
+        assert database.connection.execute(
+            "SELECT COUNT(*) FROM versao_processada"
+        ).fetchone()[0] == 105
+        execution = database.connection.execute(
+            "SELECT * FROM execucao_auditoria WHERE codigo_execucao=?",
+            (complete.execution_code,),
+        ).fetchone()
+        assert (execution["pairs_total"], execution["pairs_reused"],
+                execution["pairs_processed_now"], execution["pairs_missing_before"],
+                execution["coverage_percent_final"]) == (105, 20, 85, 85, 100)
+        assert database.connection.execute(
+            "SELECT versao_id FROM checkpoint"
+        ).fetchone()[0] == "106"
+
+
+def test_full_audit_fills_fragmented_coverage_without_skipping_checkpoint(tmp_path):
+    history = _history(tmp_path, 9)
+    versions = [item[0] for item in history]
+    with Database(tmp_path / "audit.db") as database:
+        database.initialize()
+        service = AuditService(database, _source(history))
+        service.audit(SHEET, versions=versions, start_version_id="2", end_version_id="4")
+        service.audit(SHEET, versions=versions, start_version_id="6", end_version_id="8")
+
+        assert database.connection.execute("SELECT COUNT(*) FROM checkpoint").fetchone()[0] == 0
+        result = service.audit(SHEET, versions=versions)
+
+        assert result.processed_versions == 4
+        assert database.connection.execute(
+            "SELECT versao_id FROM checkpoint"
+        ).fetchone()[0] == "9"
+        pairs = database.connection.execute(
+            "SELECT versao_anterior_id,versao_atual_id FROM versao_processada ORDER BY CAST(versao_anterior_id AS INTEGER)"
+        ).fetchall()
+        assert [(row[0], row[1]) for row in pairs] == [
+            (str(number), str(number + 1)) for number in range(1, 9)
+        ]
+
+
+def test_full_audit_recomputes_only_incomplete_pair(tmp_path):
+    history = _history(tmp_path, 6)
+    versions = [item[0] for item in history]
+    with Database(tmp_path / "audit.db") as database:
+        database.initialize()
+        service = AuditService(database, _source(history))
+        service.audit(SHEET, versions=versions)
+        database.connection.execute(
+            "UPDATE versao_processada SET hash_origem=NULL WHERE versao_anterior_id='3'"
+        )
+        database.connection.execute(
+            "UPDATE checkpoint SET versao_id='2',versao_numero='9.2'"
+        )
+        database.connection.commit()
+
+        result = service.audit(SHEET, versions=versions)
+
+        assert result.processed_versions == 1
+        assert database.connection.execute(
+            "SELECT COUNT(*) FROM versao_processada"
+        ).fetchone()[0] == 5
+        assert database.connection.execute(
+            "SELECT versao_id FROM checkpoint"
+        ).fetchone()[0] == "6"

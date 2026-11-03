@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from uuid import uuid4
 
+from app.audit_interval import AuditCoverage, get_audit_coverage
 from app.database import Database
 from app.excel.comparator import CellChange, compare_snapshots
 from app.excel.formula_values import normalize_formula_value
@@ -141,16 +142,17 @@ class AuditService:
                     execution_code,
                     len(versions),
                 )
+            coverage = get_audit_coverage(
+                connection, spreadsheet_id, versions,
+                start_version_id, end_version_id,
+            )
+            pairs = list(coverage.missing_pairs)
+            self._configure_coverage_plan(coverage, interval_mode)
             if interval_mode:
-                from app.audit_interval import get_audit_coverage
-                coverage = get_audit_coverage(
-                    connection, spreadsheet_id, versions,
-                    start_version_id, end_version_id,
-                )
-                pairs = list(coverage.missing_pairs)
                 self._record_interval_request(connection, execution_id, coverage)
             else:
-                pairs = self._pending_pairs(versions, checkpoint["versao_id"] if checkpoint else None)
+                self._record_full_coverage(connection, execution_id, coverage)
+                self._advance_covered_prefix(connection, spreadsheet_id, coverage)
             logger.info(
                 "Versões descobertas execucao=%s planilha=%s total=%d comparacoes_pendentes=%d",
                 execution_code,
@@ -166,13 +168,16 @@ class AuditService:
             )
 
         if not pairs:
-            final = initial_checkpoint
+            current_checkpoint = connection.execute(
+                "SELECT versao_numero FROM checkpoint WHERE planilha_id=?",
+                (spreadsheet_id,),
+            ).fetchone()
+            final = current_checkpoint[0] if current_checkpoint else initial_checkpoint
             self._finish_execution(
                 connection, execution_id, AuditExecutionStatus.COMPLETED_WITHOUT_UPDATES,
                 final, 0, 0, None,
             )
-            if interval_mode:
-                self._finish_interval(connection, execution_id, 0, 0.0)
+            self._finish_coverage(connection, execution_id, 0, 0.0)
             logger.info(
                 "Auditoria sem novidades execucao=%s planilha=%s checkpoint=%s",
                 execution_code,
@@ -301,13 +306,18 @@ class AuditService:
                 )
 
         self._cancel_prefetch()
+        if not interval_mode:
+            checkpoint_after = connection.execute(
+                "SELECT versao_numero FROM checkpoint WHERE planilha_id=?",
+                (spreadsheet_id,),
+            ).fetchone()
+            final = checkpoint_after[0] if checkpoint_after else final
         self._finish_execution(
             connection, execution_id, AuditExecutionStatus.COMPLETED,
             final, processed, total_changes, None,
         )
         audit_perf_seconds = time.perf_counter() - audit_perf_started
-        if interval_mode:
-            self._finish_interval(connection, execution_id, processed, audit_perf_seconds)
+        self._finish_coverage(connection, execution_id, processed, audit_perf_seconds)
         logger.info(
             "PERF auditoria_resumo planilha=%s comparacoes=%d total=%.3fs media=%.3fs_por_comparacao",
             spreadsheet.name,
@@ -641,6 +651,31 @@ class AuditService:
             else ProcessedVersionStatus.WITHOUT_CHANGES
         )
         with connection:
+            # Segunda linha de defesa para duas execuções que tenham planejado o
+            # mesmo par simultaneamente. Um registro final e íntegro é
+            # autoritativo e nunca deve ser sobrescrito.
+            existing = connection.execute(
+                """SELECT id,status,hash_origem FROM versao_processada
+                    WHERE planilha_id=? AND versao_anterior_id=? AND versao_atual_id=?""",
+                (spreadsheet_id, previous.id, current.id),
+            ).fetchone()
+            if (existing is not None
+                    and existing["status"] in ("PROCESSADA", "SEM_ALTERACOES")
+                    and existing["hash_origem"] is not None
+                    and len(existing["hash_origem"]) == 64):
+                logger.info("PAIR_REUSED previous_id=%s current_id=%s", previous.id, current.id)
+                if update_checkpoint:
+                    self._advance_planned_checkpoint(connection, spreadsheet_id, previous, current)
+                return
+            if existing is not None:
+                # Registro parcial/falhado não é cobertura. A recomputação o
+                # substitui dentro da mesma transação, preservando a UNIQUE.
+                connection.execute(
+                    "DELETE FROM alteracao WHERE versao_processada_id=?", (existing["id"],)
+                )
+                connection.execute(
+                    "DELETE FROM versao_processada WHERE id=?", (existing["id"],)
+                )
             cursor = connection.execute(
                 """
                 INSERT INTO versao_processada (
@@ -675,19 +710,111 @@ class AuditService:
                 ],
             )
             if update_checkpoint:
-                connection.execute(
-                """
-                INSERT INTO checkpoint
-                    (planilha_id, versao_id, versao_numero, data_hora_versao)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(planilha_id) DO UPDATE SET
-                    versao_id = excluded.versao_id,
-                    versao_numero = excluded.versao_numero,
-                    data_hora_versao = excluded.data_hora_versao,
-                    data_atualizacao = CURRENT_TIMESTAMP
-                """,
-                (spreadsheet_id, current.id, current.number, current.modified_at),
-                )
+                self._advance_planned_checkpoint(connection, spreadsheet_id, previous, current)
+
+    def _advance_planned_checkpoint(self, connection, spreadsheet_id, previous, current) -> None:
+        target = getattr(self, "_checkpoint_targets", {}).get(
+            (previous.id, current.id), current
+        )
+        connection.execute(
+            """
+            INSERT INTO checkpoint
+                (planilha_id, versao_id, versao_numero, data_hora_versao)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(planilha_id) DO UPDATE SET
+                versao_id=excluded.versao_id, versao_numero=excluded.versao_numero,
+                data_hora_versao=excluded.data_hora_versao,
+                data_atualizacao=CURRENT_TIMESTAMP
+            """,
+            (spreadsheet_id, target.id, target.number, target.modified_at),
+        )
+
+    def _configure_coverage_plan(self, coverage: AuditCoverage, interval_mode: bool) -> None:
+        """Mapeia cada lacuna ao maior prefixo contínuo confirmado após seu commit."""
+        self._checkpoint_targets = {}
+        if interval_mode:
+            return
+        missing = {
+            (left.id, right.id) for left, right in coverage.missing_pairs
+        }
+        requested = coverage.requested_pairs
+        for index, pair in enumerate(requested):
+            key = (pair[0].id, pair[1].id)
+            if key not in missing:
+                continue
+            target = pair[1]
+            for following in requested[index + 1:]:
+                following_key = (following[0].id, following[1].id)
+                if following_key in missing:
+                    break
+                target = following[1]
+            self._checkpoint_targets[key] = target
+
+    @staticmethod
+    def _advance_covered_prefix(connection, spreadsheet_id, coverage: AuditCoverage) -> None:
+        """Avança somente sobre o prefixo já coberto, nunca sobre uma lacuna."""
+        covered = {(a.id, b.id) for a, b in coverage.covered_pairs}
+        target = None
+        for previous, current in coverage.requested_pairs:
+            if (previous.id, current.id) not in covered:
+                break
+            target = current
+        if target is None:
+            return
+        connection.execute(
+            """INSERT INTO checkpoint
+                   (planilha_id,versao_id,versao_numero,data_hora_versao)
+               VALUES (?,?,?,?)
+               ON CONFLICT(planilha_id) DO UPDATE SET
+                   versao_id=excluded.versao_id,
+                   versao_numero=excluded.versao_numero,
+                   data_hora_versao=excluded.data_hora_versao,
+                   data_atualizacao=CURRENT_TIMESTAMP""",
+            (spreadsheet_id, target.id, target.number, target.modified_at),
+        )
+        connection.commit()
+
+    @staticmethod
+    def _record_full_coverage(connection, execution_id, coverage: AuditCoverage) -> None:
+        total = len(coverage.requested_pairs)
+        covered = len(coverage.covered_pairs)
+        logger.info(
+            "FULL_AUDIT_COVERAGE total_pairs=%d covered_pairs=%d missing_pairs=%d coverage_percent=%.2f",
+            total, covered, len(coverage.missing_pairs), coverage.coverage_percent,
+        )
+        for left, right in coverage.covered_pairs:
+            logger.info("PAIR_REUSED previous_id=%s current_id=%s", left.id, right.id)
+        for block in coverage.missing_blocks:
+            logger.info("MISSING_BLOCK start_id=%s end_id=%s", block.start.id, block.end.id)
+        connection.execute(
+            """UPDATE execucao_auditoria SET modo='COMPLETA',
+               coverage_pairs_total=?, coverage_pairs_existing=?,
+               coverage_pairs_missing=?, reused_percent=?,
+               pairs_total=?, pairs_reused=?, pairs_missing_before=? WHERE id=?""",
+            (total, covered, len(coverage.missing_pairs),
+             100.0 * covered / total if total else 100.0,
+             total, covered, len(coverage.missing_pairs), execution_id),
+        )
+        connection.commit()
+
+    @classmethod
+    def _finish_coverage(cls, connection, execution_id, processed, duration) -> None:
+        cls._finish_interval(connection, execution_id, processed, duration)
+        connection.execute(
+            """UPDATE execucao_auditoria SET pairs_processed_now=?,
+                      coverage_percent_final=coverage_percent WHERE id=?""",
+            (processed, execution_id),
+        )
+        connection.commit()
+        row = connection.execute(
+            """SELECT coverage_pairs_total,coverage_pairs_existing,
+                      coverage_pairs_processed_now,coverage_percent
+                 FROM execucao_auditoria WHERE id=?""", (execution_id,),
+        ).fetchone()
+        logger.info(
+            "AUDIT_COVERAGE_COMPLETE total_pairs=%d reused_pairs=%d processed_pairs=%d coverage_percent=%.2f",
+            row[0], row[1], row[2], row[3],
+        )
 
     @staticmethod
     def _record_interval_request(connection, execution_id, coverage) -> None:
@@ -708,9 +835,11 @@ class AuditService:
                requested_start_version_id=?, requested_start_label=?,
                requested_end_version_id=?, requested_end_label=?,
                coverage_pairs_total=?, coverage_pairs_existing=?,
-               coverage_pairs_missing=?, reused_percent=? WHERE id=?""",
+               coverage_pairs_missing=?, reused_percent=?, pairs_total=?,
+               pairs_reused=?, pairs_missing_before=? WHERE id=?""",
             (start.id, start.number, end.id, end.number, total, existing,
-             len(coverage.missing_pairs), 100.0 * existing / total, execution_id),
+             len(coverage.missing_pairs), 100.0 * existing / total,
+             total, existing, len(coverage.missing_pairs), execution_id),
         )
         connection.commit()
         logger.info("INTERVAL_PROCESSING_START missing_pairs=%d", len(coverage.missing_pairs))
