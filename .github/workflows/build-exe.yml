@@ -1,0 +1,49 @@
+name: Gerar EXE Portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Baixar código do repositório
+        uses: actions/checkout@v7
+
+      - name: Configurar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Atualizar pip
+        run: python -m pip install --upgrade pip
+
+      - name: Instalar dependências do projeto
+        run: |
+          if (Test-Path requirements.txt) {
+            pip install -r requirements.txt
+          }
+
+      - name: Instalar PyInstaller
+        run: pip install pyinstaller
+
+      - name: Gerar executável
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name "Trilha de Auditoria" `
+            main.py
+
+      - name: Enviar EXE para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trilha-de-Auditoria-Portable
+          path: dist/Trilha de Auditoria.exe
+          if-no-files-found: error
