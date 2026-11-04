@@ -34,12 +34,12 @@ jobs:
       - name: Gerar executável
         run: |
           pyinstaller `
-            --noconfirm `
-            --clean `
-            --onefile `
-            --windowed `
-            --name "Trilha de Auditoria" `
-            main.py
+          --noconfirm `
+          --clean `
+          --onefile `
+          --console `
+          --name "Trilha de Auditoria DEBUG" `
+          main.py
 
       - name: Enviar EXE para download
         uses: actions/upload-artifact@v4
