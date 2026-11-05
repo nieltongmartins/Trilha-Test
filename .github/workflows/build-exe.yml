@@ -23,7 +23,6 @@ jobs:
         run: python -m pip install --upgrade pip
 
       - name: Instalar dependências do projeto
-        shell: powershell
         run: |
           if (Test-Path requirements.txt) {
             python -m pip install -r requirements.txt
@@ -33,24 +32,28 @@ jobs:
         run: python -m pip install pyinstaller
 
       - name: Gerar executável
-        shell: powershell
         run: |
           pyinstaller `
             --noconfirm `
             --clean `
             --onefile `
-            --console `
-            --name "Trilha de Auditoria DEBUG" `
+            --windowed `
+            --name "Trilha de Auditoria" `
+            --collect-all selenium `
+            --hidden-import selenium.webdriver.edge.options `
+            --hidden-import selenium.webdriver.edge.service `
+            --hidden-import selenium.webdriver.common.by `
+            --hidden-import selenium.webdriver.support.ui `
+            --hidden-import selenium.webdriver.support.expected_conditions `
             main.py
 
       - name: Verificar arquivos gerados
-        shell: powershell
         run: |
           Get-ChildItem -Recurse dist
 
       - name: Enviar EXE para download
         uses: actions/upload-artifact@v4
         with:
-          name: Trilha-de-Auditoria-DEBUG
-          path: "dist/Trilha de Auditoria DEBUG.exe"
+          name: Trilha-de-Auditoria-Portable
+          path: "dist/Trilha de Auditoria.exe"
           if-no-files-found: error
